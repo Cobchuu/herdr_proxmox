@@ -1620,6 +1620,34 @@ class ContributionTests(unittest.TestCase):
         self.service.advance_proposals()
         self.assertEqual(len(self.service.snapshot()['tasks']), before)
 
+    def test_meeting_evaluation_reads_one_snapshot_regardless_of_proposal_count(self):
+        # Each proposal used to rebuild the whole organization snapshot through
+        # open_work_count and the proposal/create actions, so materializing a
+        # meeting with N proposals cost N more full parses. One pass must read
+        # the organization history once, not once per proposal.
+        self.store.snapshot.return_value['organizations'] = [dict(id='org')]
+        task = self.candidate()
+        self.service.action('automation', dict(request_id='a-1', organization_id='org', auto_queue_proposals=True,
+            max_per_meeting=10, max_open_per_agent=50, daily_cap=100, max_follow_up_depth=5), 'admin', 'admin')
+
+        def proposals(count, prefix):
+            return [dict(title=prefix + ' ' + str(index),
+                         description='Follow-up ' + str(index) + ' with acceptance criteria and required checks.',
+                         profile_id='worker') for index in range(count)]
+
+        small = self._meeting(task, proposals(2, 'Pair'))
+        self.store.snapshot.reset_mock()
+        self.service.advance_proposals()
+        first = self.store.snapshot.call_count
+        self.assertEqual(len(self.service.get(small['id'])['auto_queue']['meeting']['queued']), 2)
+        self.assertEqual(first, 1)
+
+        large = self._meeting(self.service.get(task['id']), proposals(8, 'Batch'), job_id='second')
+        self.store.snapshot.reset_mock()
+        self.service.advance_proposals()
+        self.assertEqual(len(self.service.get(large['id'])['auto_queue']['second']['queued']), 8)
+        self.assertEqual(self.store.snapshot.call_count, first)
+
     def test_auto_queue_respects_depth_pause_and_disabled_policy(self):
         self.store.snapshot.return_value['organizations'] = [dict(id='org')]
         task = self.candidate()

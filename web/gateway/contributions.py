@@ -1081,9 +1081,14 @@ class Contributions:
                 record(db, 'policy', organization_id, organization_id)
             return dict(policy=policy, organization_id=organization_id)
 
-    def open_work_count(self, profile_id):
-        """Queued assignments plus active task executions for one agent."""
-        jobs = self.store.snapshot(live_status=False).get('jobs', [])
+    def open_work_count(self, profile_id, jobs=None):
+        """Queued assignments plus active task executions for one agent.
+
+        Callers that already hold an organization snapshot pass its jobs so the
+        count does not rebuild every job for each proposal.
+        """
+        if jobs is None:
+            jobs = self.store.snapshot(live_status=False).get('jobs', [])
         active = sum(1 for j in jobs if j.get('kind') == 'launch' and j.get('profile_id') == profile_id
                      and j.get('task_id') and j.get('state') not in TERMINAL_EXECUTIONS)
         with closing(self.connect()) as db:
@@ -1135,7 +1140,10 @@ class Contributions:
         with closing(self.connect()) as db:
             saved = {row[0]: json.loads(row[1]) for row in db.execute('SELECT id, data FROM policies')}
         policies = {organization: dict(AUTOMATION_DEFAULTS, **data) for organization, data in saved.items()}
-        groups = {group['id']: group for group in self.store.snapshot(live_status=False).get('groups', [])}
+        # One snapshot per pass: the whole organization history is read once and
+        # reused for every group lookup and every meeting materialized below.
+        snapshot = self.store.snapshot(live_status=False)
+        groups = {group['id']: group for group in snapshot.get('groups', [])}
         active = [organization for organization, policy in policies.items()
                   if policy['auto_queue_proposals'] and not policy['paused']]
         # Every live group may propose; only these start work unattended.
@@ -1193,13 +1201,13 @@ class Contributions:
             try:
                 with self.operation('task:' + task_id, timeout=0):
                     self.materialize_meeting(task_id, job_id, policy, 'group_auto_queue',
-                                             queue_allowed=queue_allowed)
+                                             queue_allowed=queue_allowed, snapshot=snapshot)
             except Busy:
                 continue
             except (ValueError, OSError, sqlite3.Error, KeyError, TypeError) as error:
                 self.record_error(task_id, error, 'auto_queue', 'group_auto_queue')
 
-    def materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True):
+    def materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True, snapshot=None):
         """Create follow-up tasks from one finalized discussion.
 
         A finalized discussion that reports proposals always creates the
@@ -1213,7 +1221,9 @@ class Contributions:
         task = self.get(task_id)
         if (task.get('auto_queue') or {}).get(job_id) is not None:
             return
-        jobs = self.store.snapshot(live_status=False).get('jobs', [])
+        if snapshot is None:
+            snapshot = self.store.snapshot(live_status=False)
+        jobs = snapshot.get('jobs', [])
         job = next((j for j in jobs if j.get('id') == job_id), None)
         if not job:
             task.setdefault('auto_queue', {})[job_id] = dict(
@@ -1229,7 +1239,7 @@ class Contributions:
         if depth > policy['max_follow_up_depth']:
             skipped = {p['key']: 'follow-up depth limit reached' for p in proposals}
         else:
-            profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
+            profiles = {p['id']: p for p in snapshot.get('profiles', [])}
             repository = self.path_for(task)
             for proposal in proposals:
                 profile = profiles.get(proposal['profile_id'])
@@ -1246,7 +1256,7 @@ class Contributions:
                     skipped[proposal['key']] = 'meeting limit reached'
                     continue
                 if wants_queue:
-                    if self.open_work_count(proposal['profile_id']) >= policy['max_open_per_agent']:
+                    if self.open_work_count(proposal['profile_id'], jobs) >= policy['max_open_per_agent']:
                         skipped[proposal['key']] = 'assignee queue limit reached'
                         continue
                     if self.auto_created_today(task['organization_id']) >= policy['daily_cap']:
@@ -1254,7 +1264,7 @@ class Contributions:
                         continue
                 try:
                     self.perform('proposal', dict(meeting_id=job_id, proposal_key=proposal['key'],
-                                                 queue=wants_queue), task_id, actor)
+                                                 queue=wants_queue), task_id, actor, snapshot=snapshot)
                 except (ValueError, OSError) as error:
                     skipped[proposal['key']] = str(error)[:300]
                     continue
@@ -2105,7 +2115,7 @@ class Contributions:
             task.pop('assignment_error', None)
             return self.save(task, 'launch', actor)
 
-    def perform(self, action, body, task_id, actor):
+    def perform(self, action, body, task_id, actor, snapshot=None):
         if action == 'automation':
             return self.set_automation_policy(body, actor)
         if action == 'create':
@@ -2129,7 +2139,7 @@ class Contributions:
                 raise ValueError('Invalid task base_ref.')
             base, sha = task_base(repository, requested)
             remote = remote_info(repository)
-            profiles = self.store.snapshot(live_status=False)['profiles']
+            profiles = (self.store.snapshot(live_status=False) if snapshot is None else snapshot)['profiles']
             profile = next((p for p in profiles if p['id'] == body.get('profile_id')
                             and not p.get('archived') and not p.get('ephemeral')), None)
             if not profile or Path(profile['project']).resolve() != repository or not profile.get('use_worktree', True):
@@ -2341,17 +2351,20 @@ class Contributions:
             reference = next((m for m in task.get('meetings', []) if m['job_id'] == body.get('meeting_id')), None)
             if not reference:
                 raise ValueError('Select a discussion linked to this task.')
-            jobs = self.store.snapshot(live_status=False).get('jobs', [])
+            # A materializing pass already holds one snapshot; reuse it so
+            # evaluating a meeting does not rebuild history per proposal.
+            data = self.store.snapshot(live_status=False) if snapshot is None else snapshot
+            jobs = data.get('jobs', [])
             job = next((j for j in jobs if j['id'] == reference['job_id'] and j.get('organization_id') == task['organization_id']), None)
             proposal = next((p for p in self.discussion_proposals(job or {}) if p['key'] == body.get('proposal_key')), None)
             if not proposal:
                 raise ValueError('Select a finalized discussion proposal.')
-            profile = next((p for p in self.store.snapshot(live_status=False)['profiles'] if p['id'] == proposal['profile_id']), None)
+            profile = next((p for p in data.get('profiles', []) if p['id'] == proposal['profile_id']), None)
             if not profile or profile.get('organization_id') != task['organization_id']:
                 raise ValueError('Proposal assignee belongs to a different organization.')
             new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + reference['job_id'] + ':' + proposal['key']).hex
             created = self.perform('create', dict(title=proposal['title'], description=proposal['description'],
-                repository=task['repository'], base_ref=task['base_ref'], profile_id=proposal['profile_id']), new_id, actor)
+                repository=task['repository'], base_ref=task['base_ref'], profile_id=proposal['profile_id']), new_id, actor, snapshot=snapshot)
             created['source'] = dict(task_id=task_id, meeting_id=reference['job_id'], group_id=reference['group_id'],
                                      proposal_key=proposal['key'], depth=(task.get('source', {}).get('depth') or 0) + 1)
             self.save(created, 'proposal_accepted', actor)
