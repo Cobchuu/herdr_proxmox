@@ -1432,6 +1432,10 @@ class OrganizationStore:
                 detail += ' The agent needs a decision; no prompt input was sent. Inspect the session and choose an action.'
             elif delivery == 'unknown' and code:
                 detail += ' Prompt delivery is unknown; inspect the terminal before retrying.'
-            else:
+            elif delivery in ('sent', 'unknown'):
                 detail += ' Inspect SSH before retrying; terminal input may have been sent.'
+            else:
+                # A delivery of 'none' wrote nothing, so claiming input may have
+                # been sent would send the operator hunting for nothing.
+                detail += ' Inspect SSH before retrying.'
             self.update_job(job_id, state='needs_attention', error=detail)

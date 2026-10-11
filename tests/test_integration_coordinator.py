@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'web/gateway'))
-from integration_coordinator import IntegrationCoordinator, report_digest
+from integration_coordinator import IntegrationCoordinator, report_digest, prompt_payload
 
 
 class Store:
@@ -51,6 +51,28 @@ class Store:
 
 
 class CoordinatorTests(unittest.TestCase):
+    def test_an_oversized_event_still_produces_a_deliverable_prompt(self):
+        # The chat submission refuses a prompt over 8000 characters, so an
+        # oversized payload must shrink rather than block delivery forever:
+        # every pass would otherwise rebuild the same rejected prompt.
+        budget = 4000
+        events = [dict(name='integration', path='repo', target='a' * 40, state='validation_ready',
+                       reason='x' * 500, checkpoint='y' * 200, tests={'summary': 'z' * 3000},
+                       verification={'detail': 'v' * 3000}, recovery={'ref': 'r' * 200})]
+        encoded, shortened = prompt_payload(events, budget)
+        self.assertTrue(shortened)
+        self.assertLessEqual(len(encoded), budget)
+        # Identity and state survive even when the evidence does not.
+        kept = json.loads(encoded)[0]
+        self.assertEqual(kept['name'], 'integration')
+        self.assertEqual(kept['state'], 'validation_ready')
+        self.assertEqual(kept['target'], 'a' * 40)
+        self.assertLess(len(kept['tests']['summary']), 3000)
+        # Evidence that already fits is left untouched.
+        encoded, shortened = prompt_payload([dict(name='n', reason='short')], budget)
+        self.assertFalse(shortened)
+        self.assertIn('short', encoded)
+
     def setUp(self):
         bundle = patch('worker_guidance.local_bundle', return_value=Path(__file__).parents[1] / 'web/gateway/skills/herdr-worktree-integration')
         bundle.start()

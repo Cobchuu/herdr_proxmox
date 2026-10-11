@@ -67,11 +67,23 @@ def lookup_diagnostic(error):
             + persistent)
 
 
+def read_releases(request):
+    """Read a release list, rejecting a truncated response before parsing it.
+
+    `read` returns at most the requested size, so a larger body would be an
+    unparseable fragment and surface as a raw JSON decode error.
+    """
+    with urlopen(request, timeout=10) as response:
+        raw = response.read(2_000_001)
+    if len(raw) > 2_000_000:
+        raise ValueError('GitHub release list exceeds the supported size; inspect it on GitHub.')
+    return json.loads(raw)
+
+
 def latest_release():
     request = Request(f'https://api.github.com/repos/{REPOSITORY}/releases?per_page=100',
                       headers={'User-Agent': 'herdr-proxmox-updater', 'Accept': 'application/vnd.github+json'})
-    with urlopen(request, timeout=10) as response:
-        releases = json.loads(response.read(2_000_001))
+    releases = read_releases(request)
     available = [r for r in releases if not r.get('draft') and not r.get('prerelease')
                  and re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', r.get('tag_name', ''))
                  and ASSETS.issubset({a.get('name') for a in r.get('assets', [])})]
@@ -86,8 +98,7 @@ ALPHA = re.compile(r'alpha-[a-z0-9-]+-[a-f0-9]{12}-b[1-9][0-9]*')
 def alpha_releases():
     request = Request(f'https://api.github.com/repos/{REPOSITORY}/releases?per_page=100',
                       headers={'User-Agent': 'herdr-proxmox-updater', 'Accept': 'application/vnd.github+json'})
-    with urlopen(request, timeout=10) as response:
-        releases = json.loads(response.read(2_000_001))
+    releases = read_releases(request)
     return sorted((r for r in releases if not r.get('draft') and r.get('prerelease')
                    and ALPHA.fullmatch(str(r.get('tag_name', '')))
                    and ASSETS.issubset({a.get('name') for a in r.get('assets', [])})),

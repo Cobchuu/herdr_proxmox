@@ -33,7 +33,6 @@ void main() {
         }),
       );
       BlocScope.register<DashboardBloc>(() => bloc);
-      BlocScope.get<DashboardBloc>();
       bloc.connect('token');
       await tester.pump(const Duration(milliseconds: 110));
       await tester.pumpAndSettle();
@@ -108,7 +107,6 @@ void main() {
       }),
     );
     BlocScope.register<DashboardBloc>(() => bloc);
-    BlocScope.get<DashboardBloc>();
     bloc.connect('token');
     await tester.pump(const Duration(milliseconds: 110));
     await tester.pumpAndSettle();

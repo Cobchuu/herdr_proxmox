@@ -1,8 +1,12 @@
 """Per-profile OpenCode permission policies; no global configuration mutation."""
 import json
+import re
 from pathlib import Path
 
 MODES = ('default', 'dashboard_outputs', 'full_autonomy')
+# The id becomes part of a file name, so it must not carry separators or
+# traversal segments. Generated ids are 32-character hex and always match.
+IDENTITY = re.compile(r'[A-Za-z0-9_-]{1,64}')
 
 
 def accessible_paths(body, runtime):
@@ -27,6 +31,10 @@ def permission_mode(body, runtime):
 
 
 def prepare_permissions(profile, output_root, home=None, output_directories=()):
+    # The profile id is interpolated into a file name, so a crafted id with a
+    # separator or '..' would write outside the agent directory.
+    if not isinstance(profile.get('id'), str) or not IDENTITY.fullmatch(profile['id']):
+        raise ValueError('Profile identity is not usable for a permission file name.')
     mode = permission_mode(profile, profile['runtime'])
     paths = accessible_paths(profile, profile['runtime'])
     variant = bool(profile.get('provider') and profile.get('model') and profile.get('reasoning'))

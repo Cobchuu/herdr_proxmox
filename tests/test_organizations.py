@@ -473,6 +473,9 @@ class OrganizationTests(unittest.TestCase):
         # A job with no participant list reserves the profile it was created for.
         self.assertTrue(reserves(dict(state='running', profile_id='a'), 'a'))
         self.assertFalse(reserves(dict(state='running', profile_id='a'), 'b'))
+        # A null participant list must fall back, not raise on `in None`.
+        self.assertTrue(reserves(dict(state='running', participants=None, profile_id='a'), 'a'))
+        self.assertFalse(reserves(dict(state='running', participants=None, profile_id='a'), 'b'))
 
     def test_a_launch_generates_a_scoped_agent_file_without_extra_overrides(self):
         # Every OpenCode launch selects a dashboard primary agent, so the

@@ -68,7 +68,7 @@ void main() {
       await tester.tap(find.text('Open draft PR'));
       await tester.pumpAndSettle();
       expect(find.text('Preview draft pull request'), findsOneWidget);
-      expect(find.textContaining('Exact commit: $head'), findsOneWidget);
+      expect(find.textContaining('Exact candidate: $head'), findsOneWidget);
       expect(posts, isEmpty);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
@@ -195,6 +195,126 @@ void main() {
     });
   }
 
+  testWidgets('fork publication states both destinations and the qualified head', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final head = 'b' * 40;
+    final branch = 'herdr/task-123456abcdef';
+    final task = <String, dynamic>{
+      'id': 'task',
+      'title': 'Ready task',
+      'state': 'published',
+      'repository': 'repo',
+      'github_repository': 'owner/repo',
+      'publishing_repository': 'contributor/repo',
+      'head_sha': head,
+      'branch': branch,
+      'base_ref': 'refs/remotes/origin/main',
+      'publish': {'head_sha': head, 'repository': 'contributor/repo'},
+      'pull_preview': {
+        'title': 'Suggested title',
+        'body': '## Summary\nSuggested evidence.',
+        'excerpt': '',
+        'head_sha': head,
+        'repository': 'owner/repo',
+        'publishing_repository': 'contributor/repo',
+        'fork': true,
+        'head': 'contributor:$branch',
+        'branch': branch,
+        'base': 'main',
+      },
+    };
+    final posts = <Map<String, dynamic>>[];
+    final connection = DashboardBloc(
+      client: MockClient((request) async {
+        if (request.url.path.endsWith('/tasks/pull'))
+          posts.add(Map<String, dynamic>.from(jsonDecode(request.body)));
+        return http.Response(
+          jsonEncode(
+            request.url.path.endsWith('/tasks')
+                ? {
+                    'tasks': [task],
+                    'github': {
+                      'configured': true,
+                      'login': 'contributor',
+                      'repositories': ['owner/repo'],
+                      'publication': {
+                        'owner/repo': {
+                          'mode': 'fork',
+                          'publishing_repository': 'contributor/repo',
+                          'verification': {
+                            'fork_access': 'verified',
+                            'account_write_to_publishing': 'verified',
+                            'token_write_capability': 'not_exercised',
+                            'upstream_pr_creation':
+                                'needs_different_authentication',
+                          },
+                        },
+                      },
+                    },
+                  }
+                : task,
+          ),
+          200,
+        );
+      }),
+    );
+    BlocScope.register<DashboardBloc>(() => connection);
+    connection.connect('token');
+    connection.operator.value = {'role': 'admin'};
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: TasksPage())),
+    );
+    await tester.pumpAndSettle();
+    // Setup reports capability, and never claims to have exercised a write.
+    expect(find.textContaining('token write not_exercised'), findsOneWidget);
+    expect(
+      find.textContaining('upstream PR needs_different_authentication'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open task'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Changes'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Open draft PR'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    // The branch destination and the pull request target are separate.
+    expect(
+      find.textContaining(
+        'Publish branch to: contributor/repo\nOpen draft PR into: owner/repo',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open draft PR'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining(
+        'Publish branch to: contributor/repo\n\nOpen draft PR into: owner/repo',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('Source branch: contributor:$branch'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Create draft PR'));
+    await tester.pumpAndSettle();
+    expect(posts.single['head_sha'], head);
+    expect(posts.single['reviewed'], isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await connection.disconnect();
+    await BlocScope.reset();
+  });
+
   test(
     'repository choices are relative, distinct, sorted and bounded to projects',
     () {
@@ -208,6 +328,14 @@ void main() {
           {'project': null},
         ], '/home/herdr/projects'),
         ['team/alpha', 'zeta'],
+      );
+      // An empty root would make the prefix '/' and match every absolute path.
+      expect(
+        taskRepositories([
+          {'project': '/home/herdr/projects/zeta'},
+          {'project': '/outside/repo'},
+        ], ''),
+        isEmpty,
       );
     },
   );
@@ -388,8 +516,6 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Implement feature'), findsOneWidget);
-        await tester.ensureVisible(find.text('Review and publish'));
-        await tester.pumpAndSettle();
         await tester.ensureVisible(find.text('Review and publish'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Review and publish'));

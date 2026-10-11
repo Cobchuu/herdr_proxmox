@@ -83,3 +83,16 @@ class PermissionTests(unittest.TestCase):
                              {str(home / 'outputs' / 'chat-replies' / '**')})
             # Without an output contract a default profile still writes nothing.
             self.assertEqual(prepare_permissions(profile, home / 'outputs', home), [])
+
+    def test_a_crafted_profile_identity_cannot_escape_the_agent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for crafted in ('../../evil', 'a/b', '..', 'a\\\\b'):
+                with self.assertRaises(ValueError):
+                    prepare_permissions({'id': crafted, 'runtime': 'opencode'},
+                                        home / 'outputs', home)
+            # A generated identity still works, and nothing was written outside.
+            self.assertEqual(prepare_permissions({'id': 'ab12', 'runtime': 'opencode'},
+                                                home / 'outputs', home), [])
+            self.assertFalse((home / 'evil.md').exists())
+            self.assertFalse((home / 'a').exists())

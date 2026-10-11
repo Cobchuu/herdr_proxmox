@@ -105,10 +105,19 @@ def action(store, db, name, body, org):
         ids = body.get('members')
         if not isinstance(ids, list) or not 2 <= len(ids) <= 6 or not all(isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
             raise ValueError('Choose 2–6 distinct agents for the group.')
+        members = []
         for profile_id in ids:
             member = store.get(db, 'profiles', profile_id, org_id)
             if member.get('group_id'):
                 raise ValueError('Select member agents, not other group conversations.')
+            members.append(member)
+        # Validate against every member's runtime. Reading the loop variable
+        # after the loop would check only the last member, so a mixed-runtime
+        # group could accept a mode that another member cannot use. Both
+        # helpers return the same value for every runtime and only differ in
+        # what they reject, so the first result is the group's policy.
+        policies = [(permission_mode(body, member['runtime']),
+                     accessible_paths(body, member['runtime'])) for member in members]
         item_id = text(body, 'id', 40, optional=True) or uuid.uuid4().hex
         if body.get('id'):
             store.get(db, 'groups', item_id, org_id)
@@ -116,8 +125,8 @@ def action(store, db, name, body, org):
         item = dict(id=item_id, organization_id=org_id, name=text(body, 'name'),
                     description=text(body, 'description', 8000), members=ids, updated_at=now(),
                     read_only=body.get('read_only', True),
-                    permission_mode=permission_mode(body, member['runtime']))
-        item['accessible_paths'] = accessible_paths(body, member['runtime'])
+                    permission_mode=policies[0][0])
+        item['accessible_paths'] = policies[0][1]
         item['use_worktree'] = body.get('use_worktree', True)
         if not isinstance(item['use_worktree'], bool):
             raise ValueError('Use worktree must be true or false.')
@@ -135,8 +144,8 @@ def action(store, db, name, body, org):
             item['create_tasks_since'] = (
                 previous.get('create_tasks_since') or previous.get('updated_at') or item['updated_at']
             ) if previous.get('create_tasks') is True else item['updated_at']
-        if (item['permission_mode'] != 'default' or item['accessible_paths']) and any(store.get(db, 'profiles', i, org_id)['runtime'] != 'opencode' for i in ids):
-            raise ValueError('Choose CLI defaults for groups containing other runtimes.')
+        # The per-member policy checks above already reject a non-default mode
+        # or accessible paths for a runtime that cannot use them.
         if previous.get('facilitator_id'):
             item['facilitator_id'] = previous['facilitator_id']
         run = launch_group(store, db, item, org)
@@ -180,7 +189,7 @@ def action(store, db, name, body, org):
     for job in jobs:
         if name == 'discuss' and job['id'] == group_run['id']:
             continue
-        if not ids.intersection(job.get('participants', [job.get('profile_id')])):
+        if not ids.intersection(job.get('participants') or [job.get('profile_id')]):
             continue
         if name == 'input':
             # Typing a key into a blocked agent is the operator's answer to the
@@ -482,7 +491,7 @@ def finalize_discussion(store, job_id, actor):
         others = [json.loads(row[0]) for row in
                   db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
     if any(other['id'] != job_id and session_reserves(other)
-           and participants.intersection(other.get('participants', [other.get('profile_id')]))
+           and participants.intersection(other.get('participants') or [other.get('profile_id')])
            for other in others):
         raise ValueError('Wait for other work using these agents before finalizing this discussion.')
     # Identity and settled state: the original conversations must still be the
@@ -495,6 +504,12 @@ def finalize_discussion(store, job_id, actor):
             raise ValueError('Run binding was released. Saved output cannot be recovered from this conversation.')
         try:
             store.identity(run)
+        except HerdrError as error:
+            # Preserve the structured outcome. Callers distinguish a blocked
+            # agent from an uncertain delivery without parsing prose, so
+            # re-wrapping as a plain ValueError would destroy that.
+            raise HerdrError(f"{run['profile']['name']}: {error}", error.code, error.operation,
+                             error.delivery) from error
         except ValueError as error:
             raise ValueError(f"{run['profile']['name']}: {error}") from error
     # Output. The receipt is hashed over the exact bytes the agent wrote, so
@@ -566,7 +581,11 @@ def recover_interrupted(store, offset=0, limit=20):
         except (ValueError, OSError, sqlite3.Error, HerdrError):
             continue
         recovered.append(finalized['id'])
-    return recovered, (offset + limit) % total
+    # Advance past the window actually scanned, minus the rows recovery removed,
+    # so the next pass continues where this one stopped instead of skipping a
+    # window. Normalized against what is left because the set shrank.
+    remaining = total - len(recovered)
+    return recovered, (offset + len(rows) - len(recovered)) % remaining if remaining else 0
 
 
 def inspect_discussion(store, db, body, org_id):
@@ -814,15 +833,20 @@ def execute(store, job):
     # A blocked facilitator is waiting on a decision, not finished. Keep the
     # discussion monitored and let the reconciler finalize it when it settles,
     # rather than failing a submission that was delivered correctly.
+    blocked = run
     try:
         current_run(store, run)
         for member in job['runs']:
+            blocked = member
             current_run(store, member)
     except HerdrError as error:
         if error.code != 'agent_blocked':
             raise
+        # Any participant can be the blocked one, so name the actual run rather
+        # than always blaming the facilitator.
+        name = str((blocked.get('profile') or {}).get('name') or 'A participant')
         store.update_job(job['id'], state='waiting_for_input',
                          execution=dict(state='waiting_for_input', since=now(), checked_at=now()),
-                         progress='Facilitator is waiting for a decision; monitoring continues')
+                         progress=f'{name} is waiting for a decision; monitoring continues')
         return
     finalize_discussion(store, job['id'], 'discussion_facilitator')

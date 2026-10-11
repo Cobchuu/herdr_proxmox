@@ -120,6 +120,88 @@ class GitHubTests(unittest.TestCase):
                 self.api.configure(dict(token='x' * 40, repositories=['owner/repo']))
         self.assertFalse(self.path.exists())
 
+    def test_fork_publication_does_not_require_upstream_push_access(self):
+        token = 'github_pat_' + 'x' * 50
+
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=False))
+            if path == '/repos/contributor/repo':
+                return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                            permissions=dict(push=True))
+            raise AssertionError(path)
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            result = self.api.configure(dict(
+                token=token, repositories=['owner/repo'],
+                publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')}))
+        entry = result['publication']['owner/repo']
+        self.assertEqual(entry['publishing_repository'], 'contributor/repo')
+        self.assertEqual(entry['verification']['fork_access'], 'verified')
+        self.assertEqual(entry['verification']['account_write_to_publishing'], 'verified')
+        # Setup never creates a branch or pull request to prove write access.
+        self.assertEqual(entry['verification']['token_write_capability'], 'not_exercised')
+        self.assertEqual(entry['verification']['upstream_pr_creation'], 'needs_different_authentication')
+        self.assertEqual(self.api.publication_options(), {'owner/repo': ['owner/repo', 'contributor/repo']})
+        self.api.allow_publishing('owner/repo', 'contributor/repo')
+        with self.assertRaisesRegex(ValueError, 'configured fork'):
+            self.api.allow_publishing('owner/repo', 'stranger/repo')
+
+    def test_direct_publication_keeps_requiring_upstream_push_access(self):
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'owner'}
+            return dict(full_name='owner/repo', fork=False, permissions=dict(push=False))
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            with self.assertRaisesRegex(ValueError, 'push access'):
+                self.api.configure(dict(token='x' * 40, repositories=['owner/repo']))
+        self.assertFalse(self.path.exists())
+
+    def test_fork_destination_must_be_in_the_same_fork_network(self):
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=True))
+            if path == '/repos/stranger/repo':
+                return dict(full_name='stranger/repo', fork=False, permissions=dict(push=True))
+            raise AssertionError(path)
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            with self.assertRaisesRegex(ValueError, 'is not a fork'):
+                self.api.configure(dict(
+                    token='github_pat_' + 'x' * 50, repositories=['owner/repo'],
+                    publication={'owner/repo': dict(mode='fork', publishing_repository='stranger/repo')}))
+        self.assertFalse(self.path.exists())
+
+    def test_pull_discovery_uses_the_fork_owner(self):
+        calls = []
+
+        def answer(path, *arguments, **keywords):
+            calls.append(path)
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=False))
+            if path == '/repos/contributor/repo':
+                return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                            permissions=dict(push=True))
+            return []
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            self.api.configure(dict(
+                token='github_pat_' + 'x' * 50, repositories=['owner/repo'],
+                publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')}))
+            self.api.find_pull('owner/repo', 'herdr/task-abcdefabcdef', 'contributor')
+        # Matching only the branch name could attach another account's pull
+        # request to this task, so the head owner is part of the query.
+        self.assertEqual(
+            calls[-1],
+            '/repos/owner/repo/pulls?head=contributor%3Aherdr%2Ftask-abcdefabcdef&state=all&per_page=100')
+
     def test_errors_and_oversized_responses_never_expose_credentials(self):
         secret = 'github_pat_' + 's' * 40
         opener = MagicMock()
@@ -175,6 +257,8 @@ class ContributionTests(unittest.TestCase):
         self.api = MagicMock()
         self.api.path = self.root / 'github.json'
         self.api.snapshot.return_value = dict(configured=True)
+        self.api.publication_settings.return_value = {}
+        self.api.publication_options.return_value = {}
         self.profile = dict(id='worker', organization_id='org', project=str(self.repo), use_worktree=True)
         self.store = MagicMock()
         self.store.agent_locks = {}
@@ -538,8 +622,10 @@ class ContributionTests(unittest.TestCase):
         self.assertIn('needs_review', packet)
 
     def pull_data(self, task, **changes):
-        result = dict(number=7, state='open', draft=True, head=dict(ref=task['branch'], sha=task['head_sha'],
-                      repo=dict(full_name='owner/repo')), base=dict(ref='main'), mergeable=None)
+        destination = task.get('publishing_repository') or task['github_repository']
+        result = dict(number=7, state='open', draft=True,
+                      head=dict(ref=task['branch'], sha=task['head_sha'], repo=dict(full_name=destination)),
+                      base=dict(ref='main', repo=dict(full_name=task['github_repository'])), mergeable=None)
         result.update(changes)
         return result
 
@@ -652,13 +738,23 @@ class ContributionTests(unittest.TestCase):
         self.service.save(task, 'publish', 'admin')
         pull = self.pull_data(task)
         self.api.find_pull.side_effect = [[], [pull]]
-        self.api.request.side_effect = GitHubError(422)
+
+        def answer(path, *arguments, **keywords):
+            if '/branches/' in path:
+                return dict(name='main')
+            raise GitHubError(422)
+
+        self.api.request.side_effect = answer
         with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
             preview = contributions.pull_preview(task)
             result = self.service.action('pull', dict(request_id='pull', task_id=task['id'], head_sha=task['head_sha'],
                                                      title=preview['title'], body=preview['body'], reviewed=True), 'admin', 'admin')
         self.assertEqual(result['pull']['number'], 7)
         self.assertIn('existing PR was reused', result['pull_notice'])
+        # The reused pull request keeps its own description, so no approved text
+        # may be recorded as applied to it.
+        self.assertFalse(result['pull_approval']['applied'])
+        self.assertNotIn('body_sha256', result['pull_approval'])
         payload = self.api.request.call_args.args[2]
         self.assertTrue(payload['draft'])
         self.assertIn('not verified', payload['body'])
@@ -736,7 +832,13 @@ class ContributionTests(unittest.TestCase):
         task.update(state='published', publish=dict(head_sha=task['head_sha']))
         self.service.save(task, 'publish', 'admin')
         self.api.find_pull.return_value = []
-        self.api.request.side_effect = GitHubError(403)
+
+        def answer(path, *arguments, **keywords):
+            if '/branches/' in path:
+                return dict(name='main')
+            raise GitHubError(403)
+
+        self.api.request.side_effect = answer
         with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
             with self.assertRaisesRegex(ValueError, 'branch is already published'):
                 self.service.action('pull', dict(request_id='denied-pr', task_id=task['id'], head_sha=task['head_sha'],
@@ -745,6 +847,170 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(saved['state'], 'published')
         self.assertEqual(saved['publish']['head_sha'], task['head_sha'])
         self.assertNotIn('pull', saved)
+
+    def fork(self, task, fork='contributor/repo'):
+        upstream = task['github_repository']
+        self.api.publication_settings.return_value = {upstream: dict(mode='fork', publishing_repository=fork)}
+        self.api.publication_options.return_value = {upstream: [upstream, fork]}
+        task['publishing_repository'] = fork
+        self.service.save(task, 'publication', 'admin')
+        return task
+
+    def test_direct_publication_still_targets_the_upstream(self):
+        task = self.candidate()
+        self.assertEqual(task['publishing_repository'], task['github_repository'])
+        with patch.object(self.service, 'remote_head', side_effect=[None, task['head_sha']]), \
+                patch('contributions.push') as push:
+            published = self.service.action('publish', dict(request_id='direct-push', task_id=task['id'],
+                                                           head_sha=task['head_sha']), 'admin', 'admin')
+        self.assertEqual(push.call_args.args[4], task['github_repository'])
+        self.assertEqual(published['publish']['repository'], task['github_repository'])
+
+    def test_fork_publication_pushes_to_the_fork_and_never_the_upstream(self):
+        task = self.fork(self.candidate())
+        with patch.object(self.service, 'remote_head', side_effect=[None, task['head_sha']]), \
+                patch('contributions.push') as push:
+            published = self.service.action('publish', dict(request_id='fork-push', task_id=task['id'],
+                                                           head_sha=task['head_sha']), 'admin', 'admin')
+        self.assertEqual(push.call_args.args[4], 'contributor/repo')
+        self.assertNotEqual(push.call_args.args[4], task['github_repository'])
+        self.assertEqual(published['publish']['repository'], 'contributor/repo')
+        self.api.allow_publishing.assert_called_once_with(task['github_repository'], 'contributor/repo')
+
+    def test_unrelated_repository_is_rejected_before_any_push(self):
+        task = self.candidate()
+        task['publishing_repository'] = 'stranger/repo'
+        self.service.save(task, 'publication', 'admin')
+        self.api.allow_publishing.side_effect = ValueError('Repository is not the configured fork for this project.')
+        with patch.object(self.service, 'remote_head', return_value=None), patch('contributions.push') as push:
+            with self.assertRaisesRegex(ValueError, 'configured fork'):
+                self.service.action('publish', dict(request_id='stranger-push', task_id=task['id'],
+                                                   head_sha=task['head_sha']), 'admin', 'admin')
+        self.api.allow_publishing.assert_called_once_with(task['github_repository'], 'stranger/repo')
+        push.assert_not_called()
+
+    def test_fork_pull_request_targets_upstream_with_a_qualified_head(self):
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        pull = self.pull_data(task)
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = pull
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            self.service.action('pull', dict(request_id='fork-pr', task_id=task['id'], head_sha=task['head_sha'],
+                                            title='Title', body='Body', reviewed=True), 'admin', 'admin')
+        self.assertEqual(self.api.find_pull.call_args.args,
+                         (task['github_repository'], task['branch'], 'contributor', 'main'))
+        self.assertEqual(self.api.request.call_args.args[0], '/repos/owner/repo/pulls')
+        payload = self.api.request.call_args.args[2]
+        self.assertEqual(payload['head'], 'contributor:' + task['branch'])
+        self.assertEqual(payload['base'], 'main')
+        self.assertTrue(payload['draft'])
+
+    def test_pull_head_and_base_repositories_are_both_checked(self):
+        task = self.fork(self.candidate())
+        wrong_head = self.pull_data(task, head=dict(ref=task['branch'], sha=task['head_sha'],
+                                                    repo=dict(full_name=task['github_repository'])))
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            self.service.record_pull(task, wrong_head)
+        wrong_base = self.pull_data(task, base=dict(ref='main', repo=dict(full_name='contributor/repo')))
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            self.service.record_pull(task, wrong_base)
+        self.assertNotIn('pull', task)
+        self.service.record_pull(task, self.pull_data(task))
+        self.assertEqual(task['pull']['number'], 7)
+
+    def test_merged_fork_pull_request_stays_with_its_task(self):
+        task = self.fork(self.candidate())
+        pull = self.pull_data(task, state='closed', draft=False, merged=True, merge_commit_sha='c' * 40,
+                              merged_at='2026-01-01T00:00:00Z')
+        self.service.record_pull(task, pull)
+        self.assertEqual(task['state'], 'merged')
+        self.assertEqual(task['merge_sha'], 'c' * 40)
+        self.assertEqual(task['pull']['url'], 'https://github.com/owner/repo/pull/7')
+
+    def test_fork_recovery_reuses_the_existing_pull_request(self):
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        pull = self.pull_data(task)
+        self.api.find_pull.side_effect = [[], [pull]]
+
+        def answer(path, *arguments, **keywords):
+            if '/branches/' in path:
+                return dict(name='main')
+            raise GitHubError(422)
+
+        self.api.request.side_effect = answer
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            preview = contributions.pull_preview(task)
+            result = self.service.action('pull', dict(request_id='fork-reconcile', task_id=task['id'],
+                                                      head_sha=task['head_sha'], title=preview['title'],
+                                                      body=preview['body'], reviewed=True), 'admin', 'admin')
+        self.assertEqual(result['pull']['number'], 7)
+        self.assertIn('existing PR was reused', result['pull_notice'])
+        self.assertEqual(self.api.find_pull.call_args.args[2], 'contributor')
+
+    def test_publication_destination_is_frozen_once_published(self):
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'], repository='contributor/repo')
+        self.service.save(task, 'publish', 'admin')
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            with self.assertRaisesRegex(ValueError, 'already published'):
+                self.service.action('publication', dict(request_id='move-destination', task_id=task['id'],
+                                                       mode='direct'), 'admin', 'admin')
+        self.assertEqual(self.service.get(task['id'])['publishing_repository'], 'contributor/repo')
+
+    def test_publication_action_switches_to_the_configured_fork(self):
+        task = self.candidate()
+        upstream = task['github_repository']
+        self.api.publication_settings.return_value = {upstream: dict(mode='fork', publishing_repository='contributor/repo')}
+        self.api.publication_options.return_value = {upstream: [upstream, 'contributor/repo']}
+        with patch.object(self.service, 'remote_head', return_value=None):
+            switched = self.service.action('publication', dict(request_id='switch-to-fork', task_id=task['id'],
+                                                              mode='fork',
+                                                              publishing_repository='contributor/repo'), 'admin', 'admin')
+            self.assertEqual(switched['publishing_repository'], 'contributor/repo')
+            self.api.verify_fork.assert_called_once_with(upstream, 'contributor/repo')
+            with self.assertRaisesRegex(ValueError, 'configured fork'):
+                self.service.action('publication', dict(request_id='switch-to-stranger', task_id=task['id'],
+                                                       mode='fork',
+                                                       publishing_repository='stranger/repo'), 'admin', 'admin')
+        self.assertEqual(self.service.get(task['id'])['publishing_repository'], 'contributor/repo')
+
+    def test_same_organization_fork_includes_head_repo(self):
+        # GitHub requires head_repo when both repositories share an owner.
+        # Without it the push succeeds and only PR creation fails, so setup
+        # would accept a configuration that cannot complete.
+        task = self.fork(self.candidate(), fork='owner/fork')
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = self.pull_data(task)
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            self.service.action('pull', dict(request_id='same-org-pr', task_id=task['id'],
+                                            head_sha=task['head_sha'], title='Title', body='Body',
+                                            reviewed=True), 'admin', 'admin')
+        payload = self.api.request.call_args.args[2]
+        self.assertEqual(payload['head'], 'owner:' + task['branch'])
+        self.assertEqual(payload['head_repo'], 'fork')
+
+    def test_recovery_skips_a_pull_request_for_another_base(self):
+        # Selection is by identity, not position: the first result targeting a
+        # different base must not abort recovery when a match follows it.
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        other = self.pull_data(task, number=9,
+                               base=dict(ref='release', repo=dict(full_name=task['github_repository'])))
+        self.api.find_pull.return_value = [other, self.pull_data(task)]
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            result = self.service.action('pull', dict(request_id='select-pr', task_id=task['id'],
+                                                     head_sha=task['head_sha'], title='T', body='B',
+                                                     reviewed=True), 'admin', 'admin')
+        self.assertEqual(result['pull']['number'], 7)
+        self.assertIn('existing PR was reused', result['pull_notice'])
+        self.api.request.assert_not_called()
 
     def test_pr_changed_head_and_resulting_merge_sha_are_distinct(self):
         task = self.candidate()
@@ -970,7 +1236,7 @@ class ContributionTests(unittest.TestCase):
         for branch, sha in [('main', task['head_sha']), (task['branch'], task['head_sha'][:12]),
                             ('herdr/task-abcdefabcdef', task['head_sha'] + '0')]:
             with self.assertRaisesRegex(ValueError, 'task branch and full reviewed commit'):
-                contributions.push(Path(task['worktree']), branch, sha, self.api)
+                contributions.push(Path(task['worktree']), branch, sha, self.api, task['github_repository'])
         self.api.allow.assert_not_called()
 
     def test_push_releases_the_repository_lock_before_the_network_call(self):
@@ -997,7 +1263,7 @@ class ContributionTests(unittest.TestCase):
 
         with patch.object(contributions.sys, 'platform', 'linux'), patch.object(contributions, 'repository_lock', tracked_lock), \
                 patch.object(contributions.subprocess, 'run', side_effect=run):
-            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api)
+            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api, task['github_repository'])
         self.assertEqual(held.count('held'), held.count('released'))
 
 
@@ -1071,6 +1337,37 @@ class ContributionTests(unittest.TestCase):
             gateway.server_close()
             thread.join(timeout=2)
 
+    def test_every_dashboard_task_action_is_routed(self):
+        # The dashboard builds /api/tasks/<action> from the action name, so a
+        # missing allowlist entry is a 404 that never reaches the service.
+        # Calling service.action directly cannot catch that, and it silently
+        # blocked switching an existing task to fork publication.
+        gateway = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        gateway.token = 'a' * 48
+        gateway.github = self.api
+        gateway.contributions = self.service
+        gateway.operators = SimpleNamespace(identify=lambda token: dict(name='admin', role='admin'))
+        thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+        thread.start()
+        base = 'http://127.0.0.1:' + str(gateway.server_port)
+        headers = {'Authorization': 'Bearer ' + gateway.token}
+        try:
+            # `launch` and `candidate` need a live session and drop the
+            # connection instead of replying, so they cannot be probed here.
+            # Registration is one allowlist tuple, so the rest cover the risk.
+            for action in ('publication', 'publish', 'pull', 'refresh', 'complete',
+                           'discuss', 'proposal', 'handover', 'consult', 'acceptance', 'assignment',
+                           'build', 'policy', 'review_policy', 'automation'):
+                body = json.dumps(dict(request_id='route-' + action, task_id=self.task['id'])).encode()
+                try:
+                    urlopen(Request(base + '/api/tasks/' + action, headers=headers, data=body))
+                except HTTPError as error:
+                    self.assertNotIn('Unknown endpoint', error.read().decode(), action)
+        finally:
+            gateway.shutdown()
+            gateway.server_close()
+            thread.join(timeout=2)
+
     def test_push_isolated_config_exact_sha_no_force_and_local_bare_rejection(self):
         task = self.candidate()
         remote = self.root / 'remote.git'
@@ -1083,10 +1380,10 @@ class ContributionTests(unittest.TestCase):
             result = real_run(arguments, **kwargs)
             return result
         with patch.object(contributions.sys, 'platform', 'linux'), patch.object(contributions.subprocess, 'run', side_effect=run):
-            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api)
+            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api, task['github_repository'])
             # A rewind to the original base is non-fast-forward and rejected.
             with self.assertRaisesRegex(ValueError, 'rejected'):
-                contributions.push(Path(task['worktree']), task['branch'], self.base, self.api)
+                contributions.push(Path(task['worktree']), task['branch'], self.base, self.api, task['github_repository'])
         pushed = [args for args, _ in calls if 'push' in args]
         self.assertEqual(len(pushed), 2)
         self.assertIn('--no-force', pushed[0])

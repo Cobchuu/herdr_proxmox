@@ -56,6 +56,32 @@ def report_digest(reports, bounded):
     return identity('summary-only-v5', signature, bounded)
 
 
+def prompt_payload(events, budget):
+    """Render events for the prompt, shrinking evidence before dropping any.
+
+    The chat submission refuses a prompt over 8000 characters, so an oversized
+    payload would block the report indefinitely: every pass would build the same
+    rejected prompt. Event identity and state are always kept; only the evidence
+    fields are shortened, and the caller states that they were.
+    """
+    rendered = [dict(event) for event in events]
+    shortened = False
+    for limit in (400, 160, 60, 0):
+        encoded = json.dumps(rendered)
+        if len(encoded) <= budget:
+            return encoded, shortened
+        shortened = True
+        for event in rendered:
+            event['reason'] = str(event.get('reason') or '')[:limit]
+            event['checkpoint'] = str(event.get('checkpoint') or '')[:limit]
+            if event.get('validation_run'):
+                event['validation_run'] = str(event['validation_run'])[:limit]
+            for key in ('tests', 'verification', 'recovery'):
+                if isinstance(event.get(key), dict):
+                    event[key] = {name: str(value)[:limit] for name, value in event[key].items()}
+    return json.dumps(rendered), True
+
+
 class IntegrationCoordinator:
     def __init__(self, path, store, sdk_request=None):
         self.path, self.store = Path(path), store
@@ -160,7 +186,7 @@ class IntegrationCoordinator:
                     # launches once even if coordination is enabled repeatedly.
                     runs = [job for job in self.store.job_records(launches_only=True)
                             if job.get('profile_id') == profile_id]
-                    if not any(job.get('state') != 'released' for job in runs):
+                    if not any(job.get('state') not in ('released', 'finished') for job in runs):
                         self.store.action('launch', dict(request_id=identity(profile_id, 'launch', len(runs)),
                                                          organization_id=org_id, profile_id=profile_id))
                 profiles = self.store.snapshot(directory=True)['profiles']
@@ -677,6 +703,7 @@ class IntegrationCoordinator:
                     if previous.get('state') in ('queued', 'running') or not released:
                         continue
                 bounded = []
+                size = 0
                 for event in reports:
                     entry = {k: event.get(k) for k in ('name', 'path', 'target', 'state')}
                     entry.update(reason=str(event.get('reason', ''))[:500], checkpoint=str(event.get('checkpoint', ''))[:200])
@@ -687,19 +714,29 @@ class IntegrationCoordinator:
                                  blocker_label=blocker_label(event.get('blocker')) if event.get('blocker') else '')
                     recovery = event.get('recovery') or {}
                     entry['recovery'] = {k: recovery.get(k) for k in ('ref', 'commit')}
-                    if len(json.dumps([*bounded, entry])) > 6000:
+                    # Measure the entry once instead of re-serializing the whole
+                    # growing list, and always keep the most recent event even if
+                    # it alone exceeds the budget. Separators and brackets are
+                    # counted so the estimate is not optimistic.
+                    encoded = len(json.dumps(entry)) + (2 if bounded else 0)
+                    if bounded and size + encoded > 6000:
                         break
                     bounded.append(entry)
-                payload = json.dumps(bounded)
+                    size += encoded
                 digest = identity(report_digest(reports, bounded), config.get('report_epoch', 0))
                 if config.get('report_digest') == digest:
                     continue
                 report = dict(id=digest, profile_id=config['profile_id'], run_id='', attempt=0)
-                prompt = ('Integration coordinator report. Summarize these actual worker responses and recommend next steps. '
-                          'This is a summary-only task: use only the supplied payload. Do not inspect repositories or other worktrees, run shell commands, or use tools to revalidate evidence. '
-                          'Distinguish gateway Git verification from worker-reported tests. Missing evidence is unknown; report it without investigating or requesting directory access. '
-                          'Do not prompt workers directly or modify their files; the durable inbox handles delivery. '
-                          f'Respect deferrals; identify checkpoints and blockers. Do not claim tests passed without evidence. Showing {len(bounded)} of {len(reports)} worker events; pending entries have no decision yet.\n' + payload)
+                preamble = ('Integration coordinator report. Summarize these actual worker responses and recommend next steps. '
+                            'This is a summary-only task: use only the supplied payload. Do not inspect repositories or other worktrees, run shell commands, or use tools to revalidate evidence. '
+                            'Distinguish gateway Git verification from worker-reported tests. Missing evidence is unknown; report it without investigating or requesting directory access. '
+                            'Do not prompt workers directly or modify their files; the durable inbox handles delivery. '
+                            f'Respect deferrals; identify checkpoints and blockers. Do not claim tests passed without evidence. Showing {len(bounded)} of {len(reports)} worker events; pending entries have no decision yet.\n')
+                # The chat submission refuses a prompt over 8000 characters, so
+                # the payload must fit rather than block delivery forever.
+                notice = ' Evidence fields were shortened to fit the report budget; the full evidence remains in storage.'
+                payload, shortened = prompt_payload(bounded, 8000 - len(preamble) - len(notice))
+                prompt = preamble + (notice if shortened else '') + payload
                 try:
                     job_id = self.submit(report, 'report', prompt, config['profile_id'])
                 except ValueError:

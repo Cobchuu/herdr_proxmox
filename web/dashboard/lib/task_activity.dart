@@ -85,7 +85,10 @@ String taskNextStep(Map task, {String executor = 'service'}) {
   if (task['state'] == 'closed') return 'Task closed.';
   final target = task['merge_sha'] ?? task['head_sha'];
   final build = (task['builds'] as Map?)?[target];
-  if (build is Map) {
+  // The map is keyed by target, but a record can carry a different `target`
+  // field. Without this check a stale build reports the current candidate as
+  // validated.
+  if (build is Map && build['target'] == target) {
     if (build['state'] == 'complete')
       return build['required_checks_verified'] == true
           ? 'Current candidate validated; ready for review.'

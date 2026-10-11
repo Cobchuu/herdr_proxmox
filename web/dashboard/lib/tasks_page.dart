@@ -65,8 +65,10 @@ List<String> taskRepositories(
   List<Map<String, dynamic>> profiles,
   String root,
 ) {
-  final prefix =
-      '${root.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '')}/';
+  final base = root.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+  // An empty root would make the prefix '/' and match every absolute path.
+  if (base.isEmpty) return const [];
+  final prefix = '$base/';
   return (profiles
       .map((p) {
         final project = '${p['project'] ?? ''}'.replaceAll('\\', '/');
@@ -277,53 +279,114 @@ class _TasksPageState extends State<TasksPage> {
     final repos = TextEditingController(
       text: (github['repositories'] as List? ?? []).join('\n'),
     );
+    final configured = (github['publication'] as Map?) ?? const {};
+    final modes = <String, String>{};
+    final forks = <String, TextEditingController>{};
+    for (final entry in configured.entries) {
+      final value = entry.value is Map ? entry.value as Map : const {};
+      modes['${entry.key}'] = '${value['mode'] ?? 'direct'}';
+      if (value['mode'] == 'fork') {
+        forks['${entry.key}'] = TextEditingController(
+          text: '${value['publishing_repository'] ?? ''}',
+        );
+      }
+    }
+    List<String> listed() => repos.text
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
     final epoch = connection.generation;
     try {
       final setupRoute = DialogRoute<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('GitHub publishing'),
-          content: SizedBox(
-            width: 540,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
-                  ),
-                  TextField(
-                    controller: token,
-                    obscureText: true,
-                    enableSuggestions: false,
-                    autocorrect: false,
-                    decoration: const InputDecoration(
-                      labelText: 'Personal access token',
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('GitHub publishing'),
+            content: SizedBox(
+              width: 540,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
                     ),
-                    maxLength: 255,
-                  ),
-                  TextField(
-                    controller: repos,
-                    minLines: 2,
-                    maxLines: 5,
-                    decoration: const InputDecoration(
-                      labelText: 'Allowed owner/repository (one per line)',
+                    TextField(
+                      controller: token,
+                      obscureText: true,
+                      enableSuggestions: false,
+                      autocorrect: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Personal access token',
+                      ),
+                      maxLength: 255,
                     ),
-                  ),
-                ],
+                    TextField(
+                      controller: repos,
+                      minLines: 2,
+                      maxLines: 5,
+                      onChanged: (_) => setDialogState(() {}),
+                      decoration: const InputDecoration(
+                        labelText: 'Allowed owner/repository (one per line)',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access.',
+                    ),
+                    for (final name in listed()) ...[
+                      Row(
+                        children: [
+                          Expanded(child: Text(name)),
+                          DropdownButton<String>(
+                            value: modes[name] ?? 'direct',
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'direct',
+                                child: Text('Direct'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'fork',
+                                child: Text('Through a fork'),
+                              ),
+                            ],
+                            onChanged: (value) => setDialogState(() {
+                              modes[name] = value ?? 'direct';
+                              if (modes[name] == 'fork') {
+                                forks.putIfAbsent(
+                                  name,
+                                  () => TextEditingController(),
+                                );
+                              }
+                            }),
+                          ),
+                        ],
+                      ),
+                      if (modes[name] == 'fork')
+                        TextField(
+                          controller: forks[name],
+                          decoration: InputDecoration(
+                            labelText: 'Fork for $name (owner/repository)',
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
               ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Validate and save'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Validate and save'),
-            ),
-          ],
         ),
       );
       final confirmed = await Navigator.of(context).push(setupRoute);
@@ -335,13 +398,19 @@ class _TasksPageState extends State<TasksPage> {
         busy = true;
         error = null;
       });
+      final publication = <String, dynamic>{};
+      for (final name in listed()) {
+        publication[name] = modes[name] == 'fork'
+            ? {
+                'mode': 'fork',
+                'publishing_repository': '${forks[name]?.text.trim() ?? ''}',
+              }
+            : {'mode': 'direct'};
+      }
       await connection.request('github/configure', {
         'token': token.text.trim(),
-        'repositories': repos.text
-            .split('\n')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList(),
+        'repositories': listed(),
+        'publication': publication,
       });
       await refresh();
     } catch (e) {
@@ -351,6 +420,9 @@ class _TasksPageState extends State<TasksPage> {
       token.clear();
       token.dispose();
       repos.dispose();
+      for (final controller in forks.values) {
+        controller.dispose();
+      }
       if (mounted) setState(() => busy = false);
     }
   }
@@ -646,7 +718,11 @@ class _TasksPageState extends State<TasksPage> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       SelectableText(
-                        'Repository: ${preview['repository']}\nBranch: ${preview['branch']} → ${preview['base']}\nExact commit: ${preview['head_sha']}',
+                        'Publish branch to: ${preview['publishing_repository']}\n\n'
+                        'Open draft PR into: ${preview['repository']}\n\n'
+                        'Source branch: ${preview['head']}\n\n'
+                        'Target branch: ${preview['base']}\n\n'
+                        'Exact candidate: ${preview['head_sha']}',
                       ),
                       const Text(
                         'This title and Markdown description will be public on the selected repository. The branch is already published. Creating a draft PR does not merge or deploy it.',
@@ -746,6 +822,85 @@ class _TasksPageState extends State<TasksPage> {
     }
   }
 
+  Future<void> choosePublication(Map<String, dynamic> task) async {
+    final epoch = connection.generation;
+    final upstream = '${task['github_repository'] ?? ''}';
+    final configured = (github['publication'] as Map?)?[upstream] as Map?;
+    final fork = configured?['mode'] == 'fork'
+        ? '${configured?['publishing_repository'] ?? ''}'
+        : '';
+    if (upstream.isEmpty || fork.isEmpty) {
+      setState(
+        () => error =
+            'Configure fork publication for $upstream before choosing a destination.',
+      );
+      return;
+    }
+    final current = '${task['publishing_repository'] ?? upstream}';
+    var mode = current == upstream ? 'direct' : 'fork';
+    try {
+      final route = DialogRoute<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Publication destination'),
+            content: SizedBox(
+              width: 480,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Publish branch to: ${mode == 'fork' ? fork : upstream}'),
+                  Text('Open draft PR into: $upstream'),
+                  const Text(
+                    'The destination is recorded with this task and cannot change once the branch is published. The upstream repository is never force-pushed.',
+                  ),
+                  DropdownButton<String>(
+                    value: mode,
+                    items: [
+                      DropdownMenuItem(
+                        value: 'direct',
+                        child: Text('Direct \u00b7 $upstream'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'fork',
+                        child: Text('Through a fork \u00b7 $fork'),
+                      ),
+                    ],
+                    onChanged: (value) =>
+                        setDialogState(() => mode = value ?? 'direct'),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Record destination'),
+              ),
+            ],
+          ),
+        ),
+      );
+      final confirmed = await Navigator.of(context).push(route);
+      await route.completed;
+      if (confirmed == true && mounted && epoch == connection.generation) {
+        await act('publication', {
+          'task_id': task['id'],
+          'mode': mode,
+          'publishing_repository': fork,
+        });
+      }
+    } catch (exception) {
+      if (mounted && epoch == connection.generation)
+        setState(() => error = '$exception');
+    }
+  }
+
   Widget _buildEvidence(String target, Map<dynamic, dynamic> build) {
     final unverified =
         build['state'] == 'complete' &&
@@ -838,12 +993,23 @@ class _TasksPageState extends State<TasksPage> {
               Text(
                 github['configured'] == true
                     ? admin
-                          ? 'GitHub account: ${github['login']} · ${github['repositories']}'
+                          ? 'GitHub account: ${github['login']} \u00b7 ${github['repositories']}'
                           : 'GitHub publishing is configured. Publishing requires an administrator.'
                     : github['error'] != null
                     ? 'GitHub publishing is unavailable: ${github['error']}'
                     : 'GitHub publishing is not configured. Local task work is available.',
               ),
+              if (admin && github['publication'] is Map)
+                for (final entry
+                    in (github['publication'] as Map).entries)
+                  if (entry.value is Map && entry.value['mode'] == 'fork')
+                    Text(
+                      '${entry.key} \u2192 fork ${entry.value['publishing_repository']} \u00b7 '
+                      'fork access ${entry.value['verification']?['fork_access'] ?? 'unknown'} \u00b7 '
+                      'account write ${entry.value['verification']?['account_write_to_publishing'] ?? 'unknown'} \u00b7 '
+                      'token write ${entry.value['verification']?['token_write_capability'] ?? 'unknown'} \u00b7 '
+                      'upstream PR ${entry.value['verification']?['upstream_pr_creation'] ?? 'unknown'}',
+                    ),
               if (busy) const LinearProgressIndicator(),
               if ((error ?? readError) != null)
                 Padding(
@@ -2340,7 +2506,7 @@ class _TasksPageState extends State<TasksPage> {
                   ),
                   children: [
                     SelectableText(
-                      '${consult['answer'] ?? ''}${(consult['error'] as String? ?? '').isNotEmpty ? '\n' + consult['error'] : ''}',
+                      '${consult['answer'] ?? ''}${(consult['error'] as String? ?? '').isNotEmpty ? '\n${consult['error']}' : ''}',
                     ),
                   ],
                 ),
@@ -2535,6 +2701,11 @@ class _TasksPageState extends State<TasksPage> {
             SelectableText(
               'Branch: ${task['branch']}\nBase: ${task['base_ref']} \u00b7 ${task['base_sha']}\nCandidate: ${task['head_sha'] ?? 'Not captured'}',
             ),
+            if (task['github_repository'] != null)
+              SelectableText(
+                'Publish branch to: ${task['publishing_repository'] ?? task['github_repository']}\n'
+                'Open draft PR into: ${task['github_repository']}',
+              ),
             if (task['pull'] is Map) ...[
               SelectableText(
                 'PR #${task['pull']['number']} \u00b7 ${pullStatus(task)}\n${task['pull']['url']}',
@@ -2665,6 +2836,16 @@ class _TasksPageState extends State<TasksPage> {
               ? () => review(task)
               : null,
           child: const Text('Review and publish'),
+        ),
+      if (task['publish'] == null &&
+          task['github_repository'] != null &&
+          (github['publication'] as Map?)?[task['github_repository']]?['mode'] ==
+              'fork')
+        OutlinedButton(
+          onPressed: admin && !busy && github['configured'] == true
+              ? () => choosePublication(task)
+              : null,
+          child: const Text('Publication destination'),
         ),
       if (task['publish'] != null && task['pull'] == null)
         FilledButton(

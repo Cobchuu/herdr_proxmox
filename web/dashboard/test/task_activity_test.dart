@@ -30,4 +30,38 @@ void main() {
     expect(taskNextStep(completed, executor: 'unavailable'),
         taskNextStep(completed, executor: 'service'));
   });
+
+  test('a build for another target never validates the current candidate', () {
+    const head = 'b';
+    const base = 'a';
+    final task = {
+      'state': 'review_ready',
+      'head_sha': head,
+      'builds': {
+        // Keyed by the current candidate, but the record's own target is the
+        // base: a stale build must not report this candidate as validated.
+        head: {
+          'state': 'complete',
+          'target': base,
+          'required_checks_verified': true,
+        },
+      },
+    };
+    final step = taskNextStep(task);
+    expect(step, isNot(contains('validated')));
+    expect(step, isNot(contains('ready for review')));
+    // The same build keyed and targeted at the candidate does validate it.
+    final exact = {
+      'state': 'review_ready',
+      'head_sha': head,
+      'builds': {
+        head: {
+          'state': 'complete',
+          'target': head,
+          'required_checks_verified': true,
+        },
+      },
+    };
+    expect(taskNextStep(exact), contains('ready for review'));
+  });
 }

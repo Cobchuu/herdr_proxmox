@@ -27,4 +27,6 @@ def reserves(job, profile_id=None):
         return False
     if profile_id is None:
         return True
-    return profile_id in job.get('participants', [job.get('profile_id')])
+    # `participants` may be present and null, so `or` rather than a `.get`
+    # default: a null list must fall back, not raise on `in None`.
+    return profile_id in (job.get('participants') or [job.get('profile_id')])

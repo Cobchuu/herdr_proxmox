@@ -28,19 +28,57 @@ Set up GitHub publishing on a task. Supply:
   repository that is `Ultarius/herdr_proxmox`. The task's GitHub origin must match
   an allowlisted repository.
 
-Validate and save checks the GitHub account and push access for every repository.
-It does not exercise every later operation or guarantee all token permissions.
+Each allowlisted repository also chooses a publication mode:
+
+- **Direct** pushes the task branch and opens the pull request in the same
+  repository. The account needs push access there, as before.
+- **Through a fork** pushes the task branch to your fork and opens the pull
+  request upstream. The fork must be created on GitHub first; Herdr selects an
+  existing fork rather than creating one. Setup verifies that the fork belongs
+  to the upstream's fork network and that the account can write to it, and it
+  no longer requires push access to the upstream — that requirement would
+  contradict the purpose of contributing through a fork.
+
+The upstream repository always remains the source of the base branch and the
+pull request target. Only the branch destination moves to the fork.
+
+Validate and save reports capability rather than asserting it. Account access
+and token permission are separate, and setup is read-only:
+
+```
+Fork access: verified
+Account write access to the fork: verified
+Token write capability: not yet exercised
+Upstream PR creation: supported | needs different authentication
+```
+
+Setup never creates a branch or pull request to prove write access. A
+fine-grained token is limited to its resource owner's repositories, so it
+generally cannot open a pull request on another account's repository; in that
+case Herdr reports that upstream PR creation needs different authentication, and
+a classic token with `public_repo` (plus `workflow` when publishing workflow
+changes) is the narrower supported option. A classic token cannot grant
+repository privileges the account itself lacks.
+
 The gateway needs working Internet routing and DNS. Publishing uploads the exact
 reviewed commit; it does not merge or deploy it. Pull request creation and
 subsequent GitHub review are separate actions in the task workflow.
 
+A task records the destination used for it. Before publication an administrator
+can switch between the upstream repository and its configured fork; the change
+is audited. Once the branch is published the destination is frozen, so a retry
+can never be redirected to a different repository. Tasks created before fork
+mode existed keep publishing directly.
+
 After publication, open Changes → Open draft PR. The dashboard fetches a fresh
-preview, shows the repository, source branch, base branch and exact candidate
-SHA, and lets you edit the public title and Markdown description. Cancel sends
-no PR request. Create draft PR submits the edited text with explicit approval
-for that SHA; a changed candidate requires a new preview. New PR creation
-without this approval is rejected by the gateway, including requests from an
-older dashboard version. Existing PR reconciliation remains available.
+preview and states both destinations — the repository the branch is published to
+and the repository the draft PR is opened into — together with the source branch
+in `owner:branch` form, the target branch and the exact candidate SHA. It lets
+you edit the public title and Markdown description. Cancel sends no PR request.
+Create draft PR submits the edited text with explicit approval for that SHA; a
+changed candidate requires a new preview. New PR creation without this approval
+is rejected by the gateway, including requests from an older dashboard version.
+Existing PR reconciliation remains available.
 
 The suggested body includes task context, current-candidate validation and
 check results, acceptance-review state, discussion references, follow-up task
@@ -56,20 +94,37 @@ itself. The description already exists on GitHub, and the task record is served
 in full by the task list, so storing it there would add up to 30 KB per task for
 no reader.
 
-Publication and PR creation remain separate. A PR permission failure retains
-the published branch and reports that fact. Retrying reconciles any existing
-PR rather than pushing again or updating its title/body silently. Both account
-repository access and token permissions limit authority; setup's read-only
-account-access check cannot guarantee token write permission. Fine-grained
-tokens need Contents write, plus Workflows write when workflows change;
-classic tokens use the corresponding repo and workflow scopes.
+Publication and PR creation remain separate. Recovery distinguishes the cases
+explicitly:
+
+- **Push failed:** nothing is published; no branch exists at the destination.
+- **Push succeeded, PR denied:** the branch is published at the recorded
+  destination and the failure says so. Fix PR authentication and retry; no
+  second push is attempted.
+- **PR response lost:** retrying searches upstream and reconciles the existing
+  pull request rather than creating a duplicate.
+- **Existing PR found:** it is reused, and its title and description are not
+  silently replaced.
+- **Branch moved at the destination:** Herdr stops for inspection and never
+  force-pushes.
+
+Pull request discovery and validation both check identities: the head must be
+the recorded publishing repository and branch, and the base must be the upstream
+repository and the task's recorded base branch. Matching a branch name alone
+would not be enough — it could attach another account's pull request to this
+task. Checks, reviews and merge status are always read from the upstream pull
+request, and the upstream base branch must exist before a pull request is
+created. Both account repository access and token permissions limit authority;
+setup's read-only account-access check cannot guarantee token write permission.
+Fine-grained tokens need Contents write, plus Workflows write when workflows
+change; classic tokens use the corresponding repo and workflow scopes.
 
 Tokens are stored server-side with restrictive file permissions and omitted from
 snapshots. Gateway and agents currently share a Linux user, so this is not
 credential isolation from same-user agents. The setup dialog explains this.
 
 GitHub reference:
-https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+[managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 
 ## Agent ownership and follow-ups
 

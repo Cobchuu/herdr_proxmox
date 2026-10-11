@@ -8,6 +8,15 @@ import 'artifact_download.dart';
 import 'routes.dart';
 import 'remove_entry_dialog.dart';
 
+/// Job states that keep a group conversation live. Shared so the poll interval
+/// and the live-streaming guard cannot drift apart.
+const _activeJobStates = [
+  'queued',
+  'running',
+  'needs_attention',
+  'waiting_for_input',
+];
+
 class GroupPage extends StatefulWidget {
   const GroupPage({super.key, required this.id, required this.coordinator});
   final String id;
@@ -44,9 +53,7 @@ class _GroupPageState extends State<GroupPage> {
     connection.notificationRevision.addListener(notificationRefresh);
     refresh();
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final active = jobs.any(
-        (j) => ['queued', 'running', 'waiting_for_input'].contains(j['state']),
-      );
+      final active = jobs.any((j) => _activeJobStates.contains(j['state']));
       final interval = active && tab == 'posts' ? 1 : 10;
       if (++pollTick % interval == 0) refresh();
     });
@@ -110,13 +117,13 @@ class _GroupPageState extends State<GroupPage> {
       if (current != null)
         connection.selectedOrganization.value =
             current['organization_id'] as String;
-      final active = jobs.firstOrNull;
-      if (tab == 'posts' &&
-          active != null &&
-          ['queued', 'running', 'needs_attention', 'waiting_for_input'].contains(active['state'])) {
+      final active = jobs
+          .where((j) => _activeJobStates.contains(j['state']))
+          .firstOrNull;
+      if (tab == 'posts' && current != null && active != null) {
         try {
           final result = await connection.request('organizations/inspect', {
-            'organization_id': current!['organization_id'],
+            'organization_id': current['organization_id'],
             'job_id': active['id'],
             'request_id':
                 'group_stream_${DateTime.now().microsecondsSinceEpoch}',
@@ -562,7 +569,7 @@ class _GroupPageState extends State<GroupPage> {
                         SelectableText(
                           group!['description'] as String,
                           key: PageStorageKey(
-                            'group-purpose-text-${widget.id}',
+                            'group-header-purpose-${widget.id}',
                           ),
                         ),
                       ],
@@ -999,7 +1006,7 @@ class _GroupPageState extends State<GroupPage> {
               ),
               const SizedBox(height: 24),
               const Text(
-                'This group has its own Herdr agent conversation. Your messages go to that agent, which coordinates the selected members and synthesizes an discussion artifact. It chooses the discussion rounds and follow-ups. Posts and artifacts preserve the group description and members used for that discussion. Review recommendations before taking action.',
+                'This group has its own Herdr agent conversation. Your messages go to that agent, which coordinates the selected members and synthesizes a discussion artifact. It chooses the discussion rounds and follow-ups. Posts and artifacts preserve the group description and members used for that discussion. Review recommendations before taking action.',
               ),
             ],
           ],

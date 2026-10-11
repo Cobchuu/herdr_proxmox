@@ -56,6 +56,9 @@ class _UpdateCardState extends State<UpdateCard> {
 
   Future<void> install({bool alpha = false}) async {
     final version = alpha ? alphaVersion : info?['latest'];
+    // A null version would otherwise produce an "Install null?" confirmation
+    // and send a meaningless install request.
+    if (version == null) return;
     final epoch = connection.generation;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -202,7 +205,7 @@ class _UpdateCardState extends State<UpdateCard> {
             ),
             if (alphaVersion != null)
               Text(
-                '${alphas.firstWhere((r) => r['version'] == alphaVersion)['notes']}',
+                '${alphas.where((r) => r['version'] == alphaVersion).firstOrNull?['notes'] ?? ''}',
               ),
             FilledButton(
               onPressed:
