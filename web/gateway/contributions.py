@@ -26,11 +26,13 @@ from project_files import project_directory
 import project_git
 from repository_lock import repository_lock
 from herdr_errors import HerdrError, format_handover, parse_handover
+from session_ownership import reserves as session_reserves
 MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
 BRANCH = re.compile(r'herdr/task-[a-f0-9]{12}')
 REQUEST = re.compile(r'[A-Za-z0-9_-]{1,64}')
+REPOSITORY = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 
 
 class NonGitStartup(ValueError):
@@ -105,11 +107,28 @@ def push_detail(folder):
     return (' Git reported: ' + tail[-300:]) if tail else ''
 
 
-def push(repository, branch, sha, github):
+def publishing_repository(task):
+    """Where the task branch is pushed. Legacy tasks published to the upstream.
+
+    The upstream repository always remains the source of the base branch and the
+    pull request target; only the branch destination moves to a fork.
+    """
+    upstream = task['github_repository']
+    destination = task.get('publishing_repository') or upstream
+    if not isinstance(destination, str) or not REPOSITORY.fullmatch(destination):
+        raise ValueError('Invalid publishing repository for this task.')
+    return destination
+
+
+def fork_publication(task):
+    return publishing_repository(task).lower() != task['github_repository'].lower()
+
+
+def push(repository, branch, sha, github, publishing):
     if not BRANCH.fullmatch(branch) or not SHA.fullmatch(sha):
         raise ValueError('Only a task branch and full reviewed commit may be published.')
-    remote = remote_info(repository)
-    github.allow(remote)
+    if not isinstance(publishing, str) or not REPOSITORY.fullmatch(publishing):
+        raise ValueError('Invalid publishing repository.')
     if sys.platform == 'win32':
         raise ValueError('Authenticated publishing runs on the Linux LXC.')
     # Only resolve the object store under the repository lock. Holding it across
@@ -141,7 +160,7 @@ def push(repository, branch, sha, github):
         # and credential helpers; token-bearing URLs are never persisted.
         arguments = ['git', '-c', 'credential.helper=', '-c', 'core.hooksPath=' + folder,
                      '-c', 'http.followRedirects=false', '--git-dir=' + str(bare), 'push', '--no-force',
-                     'https://github.com/' + remote + '.git', sha + ':refs/heads/' + branch]
+                     'https://github.com/' + publishing + '.git', sha + ':refs/heads/' + branch]
         try:
             # Capture to a file so a large transfer cannot grow gateway memory,
             # and report a bounded, redacted tail on failure.
@@ -152,7 +171,90 @@ def push(repository, branch, sha, github):
             raise ValueError('Publish outcome is uncertain; repeat this request to reconcile the remote.') from None
         if result.returncode:
             raise ValueError('Branch push was rejected or authentication failed. '
-                             'Refresh GitHub status; never force-push.' + push_detail(folder))
+                             'Account access and token write permissions are separate: check the publishing account, '
+                             'repository selection and Contents write (or classic repo scope). Workflow changes also '
+                             'need Workflows write (or classic workflow scope). No force-push was attempted.' + push_detail(folder))
+
+
+def matching_pull(task, pulls):
+    """Select the pull request that fully matches this task, if any.
+
+    Selection is by identity, not position. Taking the first result would fail
+    recovery whenever an earlier result targets another base branch, even
+    though a matching pull request follows it.
+    """
+    if not isinstance(pulls, list):
+        return None
+    upstream = str(task.get('github_repository') or '').lower()
+    destination = str(task.get('publishing_repository') or task.get('github_repository') or '').lower()
+    base = str(task.get('base_ref') or '').removeprefix('refs/remotes/origin/')
+    for pull in pulls:
+        if not isinstance(pull, dict):
+            continue
+        head, target = pull.get('head'), pull.get('base')
+        if not isinstance(head, dict) or not isinstance(target, dict):
+            continue
+        if (head.get('ref') == task['branch'] and target.get('ref') == base
+                and isinstance(head.get('repo'), dict) and isinstance(target.get('repo'), dict)
+                and head['repo'].get('full_name', '').lower() == destination
+                and target['repo'].get('full_name', '').lower() == upstream):
+            return pull
+    return None
+
+
+def pull_preview(task):
+    """Prepare editable public text using only evidence for the candidate SHA.
+
+    The discussion excerpt is returned separately rather than embedded: it is
+    internal deliberation, so publishing it is an explicit operator decision.
+    Missing task fields degrade to empty strings; the pull action still
+    enforces every publish guard before a pull request is created.
+    """
+    head = task.get('head_sha')
+    evidence = task.get('builds', {}).get(head, {})
+    if evidence.get('target') != head:
+        evidence = {}
+    verified = evidence.get('state') == 'complete' and evidence.get('required_checks_verified') is True
+    acceptance = task.get('acceptance') or {}
+    acceptance_text = (str(acceptance.get('state', 'not recorded')) + ': ' + str(acceptance.get('reason', ''))
+                       if acceptance.get('sha') == head else 'No acceptance review recorded for this candidate.')
+    checks = '\n'.join('| ' + str(c.get('id', 'unknown')).replace('|', '/').replace('\n', ' ')[:120]
+                       + ' | ' + str(c.get('status', 'not_run')).replace('|', '/').replace('\n', ' ')[:40] + ' |'
+                       for c in evidence.get('checks', []) if isinstance(c, dict))
+    review_lines, excerpts = [], []
+    for meeting in task.get('meeting_results', task.get('meetings', []))[-10:]:
+        review_lines.append('- ' + str(meeting.get('group_name', 'Group')) + ': candidate `'
+                            + str(meeting.get('candidate', 'not recorded')) + '`; discussion `'
+                            + str(meeting.get('job_id', 'unknown')) + '`')
+        if meeting.get('candidate') == head and meeting.get('state') == 'artifact_ready' and meeting.get('result'):
+            excerpts.append(str(meeting['result'])[:1500])
+    reviews = '\n'.join(review_lines) or '- No group review recorded.'
+    receipt = task.get('completion_receipt') or {}
+    reported_tests = ((receipt.get('tests') or {}).get('summary') or '') if receipt.get('commit') == head else ''
+    follows = '\n'.join('- Task `' + str(task_id) + '` — relationship to completion needs review.'
+                        for task_id in (task.get('follow_up_tasks') or {}).values()) or '- No follow-up tasks recorded.'
+    text = ('## Problem and changes\n\n' + str(task.get('description') or '') + '\n\n## Acceptance criteria\n\n'
+            + acceptance_text + '\n\nReview each criterion from the task description before merging.\n\n'
+            + '## Validation\n\nSource: `' + str(head) + '`\nRequired checks: '
+            + ('verified for this candidate.' if verified else 'not verified for this candidate.')
+            + '\nPublication itself does not validate the change.\n\n'
+            + ('| Check | Status |\n| --- | --- |\n' + checks if checks else 'No individual check results recorded.')
+            + ('\n\nWorker-reported checks (separate from required-check verification):\n\n' + str(reported_tests)[:2000] if reported_tests else '')
+            + '\n\n## Reviews and follow-ups\n\n' + reviews + '\n\nDiscussion records are not approval verdicts; '
+            + 'older candidates do not approve this commit.\n\n' + follows
+            + '\n\n## Risks and limitations\n\nDescribe remaining risks, skipped checks and deployment considerations before submitting.'
+            + '\n\nTask: ' + str(task.get('id') or ''))
+    excerpt = ('Finalized discussion excerpt (not an approval verdict):\n\n' + '\n\n'.join(excerpts)) if excerpts else ''
+    # The upstream stays the base source and pull request target; the branch
+    # destination may be a fork, so both are reported separately.
+    upstream = str(task.get('github_repository') or '')
+    destination = str(task.get('publishing_repository') or upstream)
+    branch = str(task.get('branch') or '')
+    fork = bool(upstream) and destination.lower() != upstream.lower()
+    return dict(title=str(task.get('title') or ''), body=text[:30000], excerpt=excerpt[:6000], head_sha=head,
+                repository=upstream, publishing_repository=destination, fork=fork,
+                head=(destination.split('/')[0] + ':' + branch) if fork else branch,
+                branch=branch, base=str(task.get('base_ref') or '').removeprefix('refs/remotes/origin/'))
 
 
 def task_base(repository, requested):
@@ -297,6 +399,7 @@ class Contributions:
                     self.poll_once()
                     self.reap_instances()
                     self.reap_sessions()
+                    self.recover_discussions()
                 except (ValueError, OSError, sqlite3.Error):
                     pass
                 next_housekeeping = time.monotonic() + 60
@@ -381,9 +484,8 @@ class Contributions:
                     if run['state'] == 'persona_sent':
                         from collaboration import current_run
                         current_run(self.store, run)
-                        if any(j['state'] in ('queued', 'running') and task['profile_id'] in
-                               j.get('participants', [j.get('profile_id')]) for j in runs):
-                            raise ValueError('Awaiting queued or running agent work.')
+                    if any(session_reserves(j, task['profile_id']) for j in runs):
+                        raise ValueError('Awaiting queued or running agent work.')
                     with repository_lock(path):
                         if project_git.git(path, 'symbolic-ref', '--short', 'HEAD').strip() != task['branch']:
                             raise ValueError('Task branch changed; inspect before continuing.')
@@ -459,7 +561,7 @@ class Contributions:
                     if evidence.get('target') != head or evidence.get('state') != 'complete' or evidence.get('required_checks_verified') is not True:
                         continue
                     jobs = self.store.snapshot(live_status=False).get('jobs', [])
-                    if any(j.get('state') in ('queued', 'running') and task['profile_id'] in j.get('participants', [j.get('profile_id')]) for j in jobs):
+                    if any(session_reserves(j, task['profile_id']) for j in jobs):
                         continue
                     run = next((j for j in jobs if j.get('id') == task.get('run_id')), None)
                     if run and run.get('alias'):
@@ -1098,11 +1200,16 @@ class Contributions:
         return active + queued
 
     def auto_created_today(self, organization_id):
+        # auto_queued is canonical. Only pre-unification taskless records use
+        # source.discussion; an old duplicate must never override the canonical decision.
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         with closing(self.connect()) as db:
             return db.execute("SELECT COUNT(*) FROM tasks WHERE json_extract(data, '$.organization_id')=? "
-                              "AND json_extract(data, '$.source.auto_queued') IS NOT NULL "
-                              "AND json_extract(data, '$.created_at') > ?", (organization_id, cutoff)).fetchone()[0]
+                              "AND CASE WHEN json_type(data, '$.source.auto_queued')='object' "
+                              "THEN json_extract(data, '$.source.auto_queued.queued') "
+                              "ELSE json_extract(data, '$.source.discussion.queued') END=1 "
+                              "AND COALESCE(json_extract(data, '$.source.auto_queued.at'), "
+                              "json_extract(data, '$.source.discussion.at'), json_extract(data, '$.created_at')) > ?", (organization_id, cutoff)).fetchone()[0]
 
     @staticmethod
     def active_session_jobs(jobs, organization_id):
@@ -1160,7 +1267,11 @@ class Contributions:
             rows = db.execute(
                 "SELECT t.id, json_extract(t.data, '$.organization_id'), json_extract(m.value, '$.job_id'), "
                 "json_extract(m.value, '$.at'), json_extract(m.value, '$.group_id') FROM tasks t, json_each(t.data, '$.meetings') m "
-                "WHERE json_extract(t.data, '$.state') IN ('review_ready','completed','merged','closed') "
+                # Every task state, including the open ones: a discussion about
+                # work in progress proposes follow-ups just as a review of a
+                # finished task does, and the taskless path excludes anything
+                # carrying a task id, so excluding these would orphan them.
+                "WHERE json_extract(t.data, '$.state') IN ('draft','implementing','review_ready','published','pr_open','completed','merged','closed') "
                 "AND json_type(t.data, '$.meetings') = 'array' "
                 "AND json_extract(m.value, '$.job_id') IS NOT NULL "
                 "AND (json_extract(t.data, '$.organization_id') IN (" + org_placeholders + ") "
@@ -1206,8 +1317,157 @@ class Contributions:
                 continue
             except (ValueError, OSError, sqlite3.Error, KeyError, TypeError) as error:
                 self.record_error(task_id, error, 'auto_queue', 'group_auto_queue')
+        # A group-level discussion belongs to no task, so it has no task to hang
+        # its meetings on and would otherwise never be evaluated at all.
+        # Discussions that do belong to a task are excluded: the task-linked
+        # path already materializes them, and the two paths use different
+        # deterministic ids, so processing both would create the same proposal
+        # twice.
+        with closing(self.store.connect()) as db:
+            discussions = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM jobs WHERE json_extract(data,'$.kind')='discussion' "
+                "AND json_extract(data,'$.state')='artifact_ready' "
+                "AND json_extract(data,'$.task_id') IS NULL "
+                "AND json_extract(data,'$.group_id') IN (" + group_placeholders + ") "
+                "AND json_extract(data,'$.proposals') IS NULL ORDER BY rowid DESC LIMIT 20",
+                proposing)]
+        for job in discussions:
+            policy = policies.get(job.get('organization_id')) or dict(AUTOMATION_DEFAULTS)
+            group = groups.get(job.get('group_id')) or {}
+            if policy['paused'] or not group:
+                continue
+            since = (policy.get('auto_queue_since') or policy.get('updated_at') or ''
+                     if policy['auto_queue_proposals']
+                     else group.get('create_tasks_since') or group.get('updated_at') or '')
+            if str(job.get('created_at') or '') < since:
+                self.store.update_job(job['id'], proposals=dict(
+                    at=stamp(), queued=[], drafts=[], skipped={}, created={},
+                    unavailable='Discussion created before automatic follow-up was enabled.'))
+                continue
+            try:
+                self.materialize_discussion(job, policy, 'group_auto_queue',
+                                            queue_allowed=bool(policy['auto_queue_proposals']
+                                                               or group.get('create_tasks') is True))
+            except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
+                continue
+
+    def proposal_skip_reason(self, profile, organization_id, policy, wants_queue, count, jobs=None):
+        """Shared eligibility and admission limits for all discussion proposals.
+
+        Callers that already hold an organization snapshot pass its jobs so the
+        queue-limit check does not rebuild every job for each proposal.
+        """
+        if (not profile or profile.get('archived') or profile.get('ephemeral')
+                or profile.get('group_id') or not profile.get('use_worktree', True)):
+            return 'assignee is not an eligible worktree agent'
+        if profile.get('organization_id') != organization_id:
+            return 'assignee belongs to another organization'
+        if count >= policy['max_per_meeting']:
+            return 'meeting limit reached'
+        if wants_queue:
+            if self.open_work_count(profile['id'], jobs) >= policy['max_open_per_agent']:
+                return 'assignee queue limit reached'
+            if self.auto_created_today(organization_id) >= policy['daily_cap']:
+                return 'daily automation limit reached'
+        return None
+
+    def record_automatic_proposal(self, task, job, policy, wants_queue, actor, proposal_key):
+        # Both task-linked and taskless proposals must contribute to the same
+        # durable daily budget. Preserve the first record when replaying.
+        task.setdefault('source', {}).setdefault('auto_queued', dict(
+            at=stamp(), meeting_id=job['id'], group_id=job.get('group_id'), proposal_key=proposal_key,
+            queued=wants_queue, policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
+        self.save(task, 'auto_queued', actor)
+
+    def resume_automatic_proposal(self, task_id, job, actor):
+        """Recover a proposal recorded before a crash, without spending twice."""
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT data FROM tasks WHERE id=?', (task_id,)).fetchone()
+        if not row:
+            return None
+        task = json.loads(row[0])
+        if task.get('organization_id') != job['organization_id']:
+            return None
+        source = task.get('source') or {}
+        record = source.get('auto_queued') or source.get('discussion') or {}
+        if record.get('meeting_id', record.get('job_id')) != job['id']:
+            return None
+        if record.get('queued') and task['state'] == 'draft' and not task.get('assignment'):
+            task = self.enqueue_assignment(task, actor)
+            self.save(task, 'assignment_queued', actor)
+        return task, bool(record.get('queued'))
+
+    # Task-linked callers may already hold their host's task guard. Under the
+    # budget guard, call perform() directly: action() would acquire another
+    # task-operation lock and could introduce the reverse lock order.
+    def materialize_discussion(self, job, policy, actor, queue_allowed=True):
+        with self.operation('proposal-budget:' + job['organization_id']):
+            return self._materialize_discussion(job, policy, actor, queue_allowed)
+
+    def _materialize_discussion(self, job, policy, actor, queue_allowed=True):
+        """Create follow-up tasks from a discussion that belongs to no task.
+
+        The repository and base come from the assignee's own profile, which is
+        also what the same-repository rule checks, so a group cannot route work
+        into a checkout its assignee does not already work in.
+        """
+        job_id = job['id']
+        if job.get('proposals') is not None:
+            return
+        proposals = self.discussion_proposals(job)
+        queued, drafts, skipped, created = [], [], {}, {}
+        # One snapshot per evaluation, reused for every proposal below, so the
+        # cost does not grow with the number of proposals.
+        snapshot = self.store.snapshot(live_status=False)
+        profiles = {p['id']: p for p in snapshot.get('profiles', [])}
+        jobs = snapshot.get('jobs', [])
+        for proposal in proposals:
+            new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + job_id + ':' + proposal['key']).hex
+            resumed = self.resume_automatic_proposal(new_id, job, actor)
+            if resumed:
+                made, was_queued = resumed
+                (queued if was_queued else drafts).append(proposal['key'])
+                created[proposal['key']] = made['id']
+                continue
+            profile = profiles.get(proposal['profile_id'])
+            review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
+            wants_queue = queue_allowed and not review
+            reason = self.proposal_skip_reason(profile, job['organization_id'], policy, wants_queue,
+                                               len(queued) + len(drafts), jobs)
+            if reason:
+                skipped[proposal['key']] = reason
+                continue
+            try:
+                repository = Path(profile['project']).resolve().relative_to(self.projects).as_posix()
+            except (ValueError, OSError, TypeError):
+                skipped[proposal['key']] = 'assignee is not assigned to a managed repository'
+                continue
+            try:
+                # base_ref is resolved from the repository, as for a manual task.
+                made = self.perform('create', dict(title=proposal['title'], description=proposal['description'],
+                                                   repository=repository, base_ref='',
+                                                   profile_id=proposal['profile_id']), new_id, actor, snapshot=snapshot)
+            except (ValueError, OSError) as error:
+                skipped[proposal['key']] = str(error)[:300]
+                continue
+            self.record_automatic_proposal(made, job, policy, wants_queue, actor, proposal['key'])
+            if wants_queue:
+                made = self.enqueue_assignment(made, actor)
+                self.save(made, 'assignment_queued', actor)
+                queued.append(proposal['key'])
+            else:
+                drafts.append(proposal['key'])
+            created[proposal['key']] = made['id']
+        self.store.update_job(job_id, proposals=dict(
+            at=stamp(), queued=queued, drafts=drafts, skipped=skipped, created=created,
+            policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
 
     def materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True, snapshot=None):
+        organization_id = self.get(task_id)['organization_id']
+        with self.operation('proposal-budget:' + organization_id):
+            return self._materialize_meeting(task_id, job_id, policy, actor, queue_allowed, snapshot)
+
+    def _materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True, snapshot=None):
         """Create follow-up tasks from one finalized discussion.
 
         A finalized discussion that reports proposals always creates the
@@ -1242,47 +1502,42 @@ class Contributions:
             profiles = {p['id']: p for p in snapshot.get('profiles', [])}
             repository = self.path_for(task)
             for proposal in proposals:
+                new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + job_id + ':' + proposal['key']).hex
+                resumed = self.resume_automatic_proposal(new_id, job, actor)
+                if resumed:
+                    made, was_queued = resumed
+                    task = self.get(task_id)
+                    task.setdefault('follow_up_tasks', {})[proposal['key']] = made['id']
+                    self.save(task, 'proposal_recovered', actor)
+                    (queued if was_queued else drafts).append(proposal['key'])
+                    continue
                 profile = profiles.get(proposal['profile_id'])
-                if (not profile or profile.get('archived') or profile.get('ephemeral')
-                        or not profile.get('use_worktree', True)):
-                    skipped[proposal['key']] = 'assignee is not an eligible worktree agent'
+                review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
+                wants_queue = queue_allowed and not review
+                reason = self.proposal_skip_reason(profile, task['organization_id'], policy, wants_queue,
+                                                   len(queued) + len(drafts), jobs)
+                if reason:
+                    skipped[proposal['key']] = reason
                     continue
                 if not profile.get('project') or Path(profile['project']).resolve() != repository:
                     skipped[proposal['key']] = 'assignee is assigned to another repository'
                     continue
-                review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
-                wants_queue = queue_allowed and not review
-                if len(queued) + len(drafts) >= policy['max_per_meeting']:
-                    skipped[proposal['key']] = 'meeting limit reached'
-                    continue
-                if wants_queue:
-                    if self.open_work_count(proposal['profile_id'], jobs) >= policy['max_open_per_agent']:
-                        skipped[proposal['key']] = 'assignee queue limit reached'
-                        continue
-                    if self.auto_created_today(task['organization_id']) >= policy['daily_cap']:
-                        skipped[proposal['key']] = 'daily automation limit reached'
-                        continue
                 try:
                     self.perform('proposal', dict(meeting_id=job_id, proposal_key=proposal['key'],
-                                                 queue=wants_queue), task_id, actor, snapshot=snapshot)
+                                                 queue=wants_queue), task_id, actor, snapshot=snapshot,
+                                                 automation_policy=policy)
                 except (ValueError, OSError) as error:
                     skipped[proposal['key']] = str(error)[:300]
                     continue
                 origin = self.get(task_id)
                 created_id = (origin.get('follow_up_tasks') or {}).get(proposal['key'])
                 if created_id:
-                    created = self.get(created_id)
-                    created.setdefault('source', {})['auto_queued'] = dict(
-                        at=stamp(), meeting_id=job_id, group_id=job.get('group_id'),
-                        queued=wants_queue, policy={k: policy[k] for k in AUTOMATION_DEFAULTS})
-                    self.save(created, 'auto_queued', actor)
                     (queued if wants_queue else drafts).append(proposal['key'])
         task = self.get(task_id)
         task.setdefault('auto_queue', {})[job_id] = dict(
             at=stamp(), queued=queued, drafts=drafts, skipped=skipped,
             policy={k: policy[k] for k in AUTOMATION_DEFAULTS})
         self.save(task, 'auto_queue_checked', actor)
-
 
     def get(self, task_id):
         with closing(self.connect()) as db:
@@ -1457,10 +1712,12 @@ class Contributions:
                 proposals = [dict(p, assignee=names.get(p['profile_id'], 'Agent identity unavailable'))
                              for p in self.discussion_proposals(job)]
                 meetings.append(dict(reference, state=job['state'], result=job.get('result', ''),
+                    candidate=reference.get('candidate'),
                     error=job.get('error', ''), proposals=proposals))
             else:
                 meetings.append(dict(reference, state='unavailable', proposals=[]))
         task['meeting_results'] = meetings
+        task['pull_preview'] = pull_preview(task) if task.get('head_sha') else None
         task['participants'] = participants
         consultations = []
         for job in jobs:
@@ -1637,8 +1894,10 @@ class Contributions:
         launch = next((j for j in jobs if j.get('id') == run_id), {})
         profile_id = launch.get('profile_id')
         for job in jobs:
-            reserved = bool(profile_id and job.get('state') in ('queued', 'running') and
-                            profile_id in job.get('participants', [job.get('profile_id')]))
+            # A discussion waiting on an operator decision still owns its
+            # participants: the agent can resume later and would collide with
+            # anything that reused its session.
+            reserved = bool(profile_id and session_reserves(job, profile_id))
             if job.get('id') == run_id or not (reserved or self.session_reference(job, run_id)):
                 continue
             kind = job.get('kind')
@@ -1930,6 +2189,21 @@ class Contributions:
         task['assigned_agent'] = {k: template.get(k) for k in ('id', 'name', 'role', 'runtime')}
         return self.save(task, 'instance_launch', actor)
 
+    def recover_discussions(self):
+        """Finalize interrupted discussions whose verified output is complete.
+
+        A discussion that was blocked, timed out, or interrupted by a restart
+        can still finish correctly. Recovering it is a read that re-checks every
+        prerequisite, so it never resends a prompt and never means "trust these
+        files anyway". Runs in the bounded housekeeping pass, rotating through
+        the interrupted set so a few unresolved discussions cannot starve the
+        rest.
+        """
+        from collaboration import recover_interrupted
+        recovered, self.discussion_recovery_cursor = recover_interrupted(
+            self.store, getattr(self, 'discussion_recovery_cursor', 0))
+        return recovered
+
     def reap_sessions(self):
         """Close finished sessions and reclaim panes orphaned by a restart.
 
@@ -2115,7 +2389,7 @@ class Contributions:
             task.pop('assignment_error', None)
             return self.save(task, 'launch', actor)
 
-    def perform(self, action, body, task_id, actor, snapshot=None):
+    def perform(self, action, body, task_id, actor, snapshot=None, automation_policy=None):
         if action == 'automation':
             return self.set_automation_policy(body, actor)
         if action == 'create':
@@ -2149,6 +2423,7 @@ class Contributions:
             project_git.configured_base(repository, base)
             task = dict(id=task_id, title=body['title'].strip(), description=body['description'],
                         repository=repository.relative_to(self.projects).as_posix(), github_repository=remote,
+                        publishing_repository=self.publishing_default(remote),
                         base_ref=base, base_sha=sha, branch='herdr/task-' + task_id[:12],
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
                         created_at=stamp(), checks=[], audit=[], auto_validate=False,
@@ -2343,7 +2618,8 @@ class Contributions:
                 job = self.store.action('discuss', dict(request_id='task-review-' + task_id + '-' + signature,
                     organization_id=task['organization_id'], group_id=group['id'], prompt=topic))
                 self.store.update_job(job['id'], task_id=task_id, review_signature=signature)
-                task.setdefault('meetings', []).append(dict(job_id=job['id'], group_id=group['id'], group_name=group['name'], at=stamp(), signature=signature))
+                task.setdefault('meetings', []).append(dict(job_id=job['id'], group_id=group['id'], group_name=group['name'], at=stamp(), signature=signature,
+                                                           candidate=task.get('head_sha')))
                 task['meetings'] = task['meetings'][-30:]
                 task['review_signature'] = self.review_signature(task)
                 task.pop('review_error', None)
@@ -2365,10 +2641,12 @@ class Contributions:
             new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + reference['job_id'] + ':' + proposal['key']).hex
             created = self.perform('create', dict(title=proposal['title'], description=proposal['description'],
                 repository=task['repository'], base_ref=task['base_ref'], profile_id=proposal['profile_id']), new_id, actor, snapshot=snapshot)
-            created['source'] = dict(task_id=task_id, meeting_id=reference['job_id'], group_id=reference['group_id'],
+            created.setdefault('source', {}).update(task_id=task_id, meeting_id=reference['job_id'], group_id=reference['group_id'],
                                      proposal_key=proposal['key'], depth=(task.get('source', {}).get('depth') or 0) + 1)
             self.save(created, 'proposal_accepted', actor)
             task.setdefault('follow_up_tasks', {})[proposal['key']] = new_id
+            if automation_policy is not None:
+                self.record_automatic_proposal(created, job, automation_policy, body.get('queue') is True, actor, proposal['key'])
             if body.get('queue') is True:
                 created = self.enqueue_assignment(created, actor)
                 self.save(created, 'assignment_queued', actor)
@@ -2416,8 +2694,31 @@ class Contributions:
                 task.update(head_sha=head, diff=diff[:65536], diff_truncated=len(diff) > 65536,
                             diff_stat=project_git.git(path, 'diff', '--stat', task['base_sha'], head, '--')[:12000],
                             state='review_ready', candidate_changed=bool(task.get('pull') and task['pull']['head_sha'] != head))
+        elif action == 'publication':
+            upstream = task['github_repository']
+            self.github.allow(upstream)
+            # The recorded destination freezes once anything is published, so a
+            # retry can never be redirected to a different repository.
+            if task.get('publish') or self.remote_head(task):
+                raise ValueError('The branch is already published; its destination cannot change. '
+                                 'Close this task and create a new one for a different destination.')
+            mode = body.get('mode')
+            if mode not in ('direct', 'fork'):
+                raise ValueError('Choose direct publication or a fork repository.')
+            destination = upstream if mode == 'direct' else body.get('publishing_repository')
+            options = self.github.publication_options().get(upstream) or [upstream]
+            if destination not in options:
+                raise ValueError('Choose the upstream repository or its configured fork.')
+            if destination != upstream:
+                self.github.verify_fork(upstream, destination)
+            task['publishing_repository'] = destination
         elif action == 'publish':
-            self.github.allow(task['github_repository'])
+            upstream = task['github_repository']
+            self.github.allow(upstream)
+            # The upstream stays the base source and pull request target; only
+            # the branch destination may be a fork.
+            destination = publishing_repository(task)
+            self.github.allow_publishing(upstream, destination)
             head = body.get('head_sha')
             if not SHA.fullmatch(str(head)) or head != task.get('head_sha'):
                 raise ValueError('Refresh and review the exact candidate commit before publishing.')
@@ -2434,41 +2735,91 @@ class Contributions:
                     # that history, so this task can only be closed.
                     raise ValueError('The published branch moved on the remote. This task cannot be '
                                      'republished; close it and create a new task.')
-                push(path, task['branch'], head, self.github)
+                push(path, task['branch'], head, self.github, destination)
                 remote_head = self.remote_head(task)
             if remote_head != head:
                 raise ValueError('Remote branch does not match the reviewed commit; refresh before retrying.')
-            task.update(publish=dict(state='complete', head_sha=head, at=stamp()), candidate_changed=False)
+            # Record the destination with the published commit so a retry cannot
+            # be redirected elsewhere by a later configuration change.
+            task.update(publish=dict(state='complete', head_sha=head, at=stamp(), repository=destination),
+                        candidate_changed=False)
             # A task that already has a pull request stays in its pull state.
             task['state'] = 'pr_open' if task.get('pull') else 'published'
         elif action == 'pull':
             published = task.get('publish', {}).get('head_sha')
+            # Two related guards that must not be merged. This one defaults a
+            # missing head_sha so an older client can still reconcile an
+            # existing PR; the check below requires the SHA explicitly once the
+            # public title or description is edited.
+            if body.get('head_sha', task.get('head_sha')) != task.get('head_sha'):
+                raise ValueError('Candidate changed. Preview the current commit before creating its PR.')
+            preview = pull_preview(task)
+            title, description = body.get('title', preview['title']), body.get('body', preview['body'])
+            if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 256 or '\n' in title or '\r' in title
+                    or not isinstance(description, str) or not 1 <= len(description.strip()) <= 30000):
+                raise ValueError('Enter a PR title (1–256 characters) and description (1–30000 characters).')
+            if ('title' in body or 'body' in body) and body.get('head_sha') != task.get('head_sha'):
+                raise ValueError('Edited PR text must be approved for the exact candidate commit.')
             if not published or published != task.get('head_sha') or self.remote_head(task) != published:
                 raise ValueError('Publish the current reviewed candidate before opening a pull request.')
-            self.github.allow(task['github_repository'])
-            found = self.github.find_pull(task['github_repository'], task['branch'])
+            # The pull request always targets the upstream. Its head is the
+            # branch destination, which may be a fork, so discovery and the
+            # qualified head both use that owner.
+            upstream = task['github_repository']
+            destination = publishing_repository(task)
+            owner = destination.split('/')[0]
+            fork = destination.lower() != upstream.lower()
+            self.github.allow(upstream)
+            found = self.github.find_pull(upstream, task['branch'], owner, preview['base'])
             if not isinstance(found, list):
                 raise ValueError('GitHub returned an invalid pull request list.')
-            if found:
-                pull = found[0]
-            else:
-                evidence = task.get('builds', {}).get(published)
-                checks = ('\n\n| Check | Status |\n| --- | --- |\n' + '\n'.join(
-                    '| ' + str(c.get('id', 'unknown')).replace('|', '/')[:120] + ' | ' +
-                    str(c.get('status', 'not_run')).replace('|', '/')[:40] + ' |' for c in evidence.get('checks', []))) if evidence else ''
-                payload = dict(title=task['title'], head=task['branch'], base=task['base_ref'].removeprefix('refs/remotes/origin/'),
-                    draft=True, body=task['description'] + '\n\nTask: ' + task['id'] + '\nSource: `' + published +
-                    '`\n\nValidation: not verified by this publication operation. Review checks and evidence before merging.' + checks)
+            pull = matching_pull(task, found)
+            reused = pull is not None
+            if pull is None:
+                if (body.get('head_sha') != published or body.get('reviewed') is not True
+                        or 'title' not in body or 'body' not in body):
+                    raise ValueError('Preview and confirm the PR title and description for the published commit before creating a PR.')
+                base = preview['base']
                 try:
-                    pull = self.github.request('/repos/' + task['github_repository'] + '/pulls', 'POST', payload)
+                    self.github.request('/repos/' + upstream + '/branches/' + quote(base, safe=''))
+                except GitHubError as error:
+                    if error.status == 404:
+                        raise ValueError('The upstream base branch ' + base + ' does not exist. Refresh the task '
+                                         'base before opening a pull request.') from None
+                    raise
+                payload = dict(title=title.strip(),
+                               head=(owner + ':' + task['branch']) if fork else task['branch'],
+                               base=base, draft=True, body=description)
+                if fork and owner.lower() == upstream.split('/')[0].lower():
+                    # GitHub requires head_repo when both repositories belong to
+                    # the same organization; without it the push succeeds and
+                    # only PR creation fails.
+                    payload['head_repo'] = destination.split('/')[1]
+                try:
+                    pull = self.github.request('/repos/' + upstream + '/pulls', 'POST', payload)
                 except GitHubError as error:
                     if error.status != 422:
-                        raise
-                    found = self.github.find_pull(task['github_repository'], task['branch'])
-                    if not isinstance(found, list) or not found:
-                        raise
-                    pull = found[0]
+                        raise ValueError('The branch is already published, but PR creation failed. ' + str(error)) from None
+                    found = self.github.find_pull(upstream, task['branch'], owner, preview['base'])
+                    pull = matching_pull(task, found)
+                    if pull is None:
+                        raise ValueError('The branch is already published, but GitHub rejected PR creation and no existing PR could be reconciled.') from None
+                    reused = True
+                except (ValueError, OSError) as error:
+                    raise ValueError('The branch is already published. PR creation has an uncertain result; retry to reconcile any existing PR. ' + str(error)) from None
             self.record_pull(task, pull)
+            task['pull_notice'] = ('An existing PR was reused. Its title and description were not changed.'
+                                   if reused else 'Draft PR created with the approved title and description.')
+            if body.get('reviewed') is True:
+                # Record only text that was actually applied. A reused pull
+                # request keeps its existing description, so claiming this text
+                # was published would be a false audit entry. The approved text
+                # is not stored either: it already exists on GitHub, and the
+                # task list serves the whole task record.
+                approval = dict(head_sha=published, title=title.strip(), at=stamp(), applied=not reused)
+                if not reused:
+                    approval['body_sha256'] = hashlib.sha256(description.encode()).hexdigest()
+                task['pull_approval'] = approval
         elif action == 'build':
             target = task.get('merge_sha') if task['state'] == 'merged' else task.get('head_sha')
             if not self.validation or not SHA.fullmatch(str(target)):
@@ -2527,10 +2878,28 @@ class Contributions:
             return task
         return self.save(task, action, actor)
 
-    def remote_head(self, task):
-        self.github.allow(task['github_repository'])
+    def publishing_default(self, upstream):
+        """The configured branch destination for a project, else the upstream.
+
+        A task records the result so a later configuration change cannot move
+        an already published branch.
+        """
         try:
-            data = self.github.request('/repos/' + task['github_repository'] + '/git/ref/heads/' + quote(task['branch'], safe='/'))
+            entry = self.github.publication_settings().get(upstream) or {}
+        except ValueError:
+            return upstream
+        if entry.get('mode') == 'fork' and isinstance(entry.get('publishing_repository'), str):
+            return entry['publishing_repository']
+        return upstream
+
+    def remote_head(self, task):
+        # Reads are authorized against the upstream only. A published branch
+        # must stay readable even if the fork mapping is later reconfigured.
+        upstream = task['github_repository']
+        self.github.allow(upstream)
+        repository = publishing_repository(task)
+        try:
+            data = self.github.request('/repos/' + repository + '/git/ref/heads/' + quote(task['branch'], safe='/'))
         except GitHubError as error:
             if error.status == 404:
                 return None
@@ -2543,12 +2912,19 @@ class Contributions:
     def record_pull(self, task, pull):
         if (not isinstance(pull, dict) or pull.get('state') not in ('open', 'closed')
                 or not isinstance(pull.get('head'), dict) or not isinstance(pull.get('base'), dict)
-                or not isinstance(pull['head'].get('repo'), dict)):
+                or not isinstance(pull['head'].get('repo'), dict)
+                or not isinstance(pull['base'].get('repo'), dict)):
             raise ValueError('GitHub returned an invalid pull request record.')
-        if (pull.get('head', {}).get('ref') != task['branch']
-                or pull.get('base', {}).get('ref') != task['base_ref'].removeprefix('refs/remotes/origin/')
-                or pull.get('head', {}).get('repo', {}).get('full_name', '').lower() != task['github_repository'].lower()):
-            raise ValueError('Pull request does not match this task repository and branches.')
+        # Both identities are checked. Matching the branch name alone must not
+        # attach another account's pull request to this task, and the base must
+        # be the upstream rather than the fork.
+        upstream = task['github_repository']
+        destination = publishing_repository(task)
+        if (pull['head'].get('ref') != task['branch']
+                or pull['base'].get('ref') != task['base_ref'].removeprefix('refs/remotes/origin/')
+                or pull['head']['repo'].get('full_name', '').lower() != destination.lower()
+                or pull['base']['repo'].get('full_name', '').lower() != upstream.lower()):
+            raise ValueError('Pull request does not match this task repositories and branches.')
         head = pull['head']['sha']
         if not SHA.fullmatch(str(head)) or not isinstance(pull.get('number'), int):
             raise ValueError('GitHub returned an invalid pull request identity.')

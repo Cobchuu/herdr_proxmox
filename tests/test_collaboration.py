@@ -1,6 +1,8 @@
 """Discussion workflow tests with simulated agent file-writing, not live models."""
 from pathlib import Path
+import sys
 import re
+import hashlib
 import json
 import types
 import uuid
@@ -9,7 +11,9 @@ import threading
 import time
 from unittest.mock import patch
 from contextlib import closing
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'web/gateway'))
 import test_organizations as fixtures
+from collaboration import recover_interrupted
 
 
 class CollaborationTests(unittest.TestCase):
@@ -24,6 +28,7 @@ class CollaborationTests(unittest.TestCase):
         fixtures.OrganizationTests.setUp(self)
         self.original = self.store.command
         self.writes = True
+        self.block_discussion = False
         self.store.command = self.simulate
         self.org = self.organization()
         self.max = self.hire(self.org, 'Max')
@@ -40,15 +45,35 @@ class CollaborationTests(unittest.TestCase):
                     del self.agents[alias]
         if args[:2] == ('agent', 'read'):
             return {'output': 'Agent response in terminal'}
+        if args[:2] == ('agent', 'prompt') and 'Discussion directory:' in args[3] and self.block_discussion:
+            # The facilitator raises a permission or question prompt mid-turn.
+            self.agents[args[2]]['agent_status'] = 'blocked'
         if args[:2] == ('agent', 'prompt') and '--wait' in args and self.writes:
             match = re.search(r'exactly (?:this new file: )?(.+?\.md)', args[3])
             if match:
-                Path(match[1]).write_text('# Recommended actions\nReview evidence before implementation.', encoding='utf-8')
+                artifact = Path(match[1])
+                # A real agent writes a trailing newline. The receipt must hash
+                # these exact bytes, so normalizing them would break every
+                # verification by one byte.
+                artifact.write_text('# Recommended actions\nReview evidence before implementation.\n',
+                                    encoding='utf-8')
                 transcript = re.search(r'Also write (.+?discussion\.json)', args[3])
                 if transcript:
                     ids = json.loads(re.search(r'Profile IDs: (.+?)\. Record', args[3])[1])
                     parts = [dict(profile_id=i, name='simulated', round=r, content='Evidence-backed proposal') for r in (1, 2) for i in ids.values()]
-                    Path(transcript[1]).write_text(json.dumps({'contributions': parts}), encoding='utf-8')
+                    Path(transcript[1]).write_text(json.dumps({'contributions': parts}) + '\n', encoding='utf-8')
+                # The completion receipt binds this attempt to the final bytes.
+                receipt = re.search(r'Then write (.+?receipt\.json)', args[3])
+                if receipt:
+                    job_id = Path(receipt[1]).parent.name
+                    current = next(j for j in self.store.snapshot()['jobs'] if j['id'] == job_id)
+                    Path(receipt[1]).write_text(json.dumps(dict(
+                        discussion_id=job_id,
+                        attempt_id=(current.get('submission') or {}).get('attempt_id'),
+                        artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                        transcript_sha256=hashlib.sha256(
+                            Path(transcript[1]).read_bytes()).hexdigest() if transcript else None)),
+                        encoding='utf-8')
         return response
 
     def job(self, job_id):
@@ -170,7 +195,7 @@ class CollaborationTests(unittest.TestCase):
         self.drain()
         job = self.job(meeting)
         self.assertEqual(job['state'], 'artifact_ready', job.get('error'))
-        self.assertTrue(job['discussion_submitted_at'])
+        self.assertEqual((job.get('submission') or {}).get('stage'), 'sent')
         prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
         self.assertEqual(len(prompts), 1)
 
@@ -181,7 +206,7 @@ class CollaborationTests(unittest.TestCase):
         meeting = self.action('discuss', organization_id=self.org, group_id=group)
         self.drain()
         self.assertEqual(self.job(meeting)['state'], 'needs_attention')
-        self.assertFalse(self.job(meeting).get('discussion_submitted_at'))
+        self.assertFalse((self.job(meeting).get('submission') or {}).get('stage'))
         self.agents[run['alias']]['agent_status'] = 'idle'
         self.action('retry_discussion', organization_id=self.org, job_id=meeting, inspected=True)
         self.drain()
@@ -207,7 +232,7 @@ class CollaborationTests(unittest.TestCase):
         group = self.group()
         meeting = self.action('discuss', organization_id=self.org, group_id=group)
         self.drain()
-        self.store.update_job(meeting, state='needs_attention', preparation_version=None, discussion_submitted_at=None)
+        self.store.update_job(meeting, state='needs_attention', preparation_version=None, submission=None)
         with self.assertRaisesRegex(ValueError, 'submitted'):
             self.action('retry_discussion', organization_id=self.org, job_id=meeting, inspected=True)
 
@@ -276,6 +301,304 @@ class CollaborationTests(unittest.TestCase):
         self.assertFalse(ids[outsider], 'a non-attendee must still be assignable')
         self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
 
+    def test_discussion_uses_settled_wait_without_cli_deadline(self):
+        # The CLI wait has no separate deadline; the gateway still retains its
+        # subprocess backstop. A blocked settled state is not completion.
+        group = self.group()
+        self.action('discuss', organization_id=self.org, group_id=group, prompt='Long discussion')
+        self.drain()
+        for _ in range(3):
+            self.store.advance_discussions()
+            self.drain()
+        prompts = [a for a, _ in self.calls
+                   if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
+        self.assertTrue(prompts)
+        args = prompts[0]
+        self.assertIn('--wait', args)
+        self.assertNotIn('--timeout', args)
+
+    def test_a_blocked_facilitator_is_watched_and_finalized_once_it_settles(self):
+        # The incident this replaces: a delivered discussion whose facilitator
+        # raised a prompt was recorded as a failure, and the work that finished
+        # afterwards was never noticed.
+        group = self.group()
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        job = self.job(meeting)
+        self.assertNotEqual(job['state'], 'artifact_ready')
+        self.assertEqual((job.get('submission') or {}).get('stage'), 'sent')
+        self.assertEqual((job.get('execution') or {}).get('state'), 'waiting_for_input')
+        # The operator answers the prompt; the agent settles.
+        facilitator = self.job(job['group_run']['id'])
+        self.agents[facilitator['alias']]['agent_status'] = 'idle'
+        prompts = len([a for a, _ in self.calls if a[:2] == ('agent', 'prompt')])
+        self.assertIn(meeting, recover_interrupted(self.store)[0])
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+        self.assertEqual((self.job(meeting).get('completion') or {}).get('state'), 'receipt_verified')
+        # Recovery is a read: no prompt is ever resent.
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('agent', 'prompt')]), prompts)
+
+    def test_valid_files_from_a_still_blocked_facilitator_never_complete(self):
+        # The prompt tells the facilitator to update the artifact while it
+        # synthesises, so valid-looking files can be drafts.
+        group = self.group()
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.assertEqual(recover_interrupted(self.store)[0], [])
+        self.assertNotEqual(self.job(meeting)['state'], 'artifact_ready')
+
+    def test_a_new_discussion_without_its_receipt_does_not_fall_back(self):
+        # A new agent that skips its receipt must not silently get the weaker
+        # legacy path.
+        group = self.group()
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        (self.store.path.parent / 'discussion-artifacts' / meeting / 'receipt.json').unlink()
+        self.assertEqual(self.job(meeting)['contract'], 2)
+        self.store.update_job(meeting, state='needs_attention')
+        self.assertEqual(recover_interrupted(self.store)[0], [])
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+
+    def test_a_mismatched_receipt_requires_inspection_rather_than_falling_back(self):
+        group = self.group()
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        receipt = self.store.path.parent / 'discussion-artifacts' / meeting / 'receipt.json'
+        data = json.loads(receipt.read_text(encoding='utf-8'))
+        receipt.write_text(json.dumps(dict(data, artifact_sha256='0' * 64)), encoding='utf-8')
+        self.store.update_job(meeting, state='needs_attention')
+        self.assertEqual(recover_interrupted(self.store)[0], [])
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+
+    def test_current_receipt_must_bind_the_transcript(self):
+        for value in ('missing', None):
+            with self.subTest(value=value):
+                meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+                self.drain()
+                path = self.store.path.parent / 'discussion-artifacts' / meeting / 'receipt.json'
+                receipt = json.loads(path.read_text(encoding='utf-8'))
+                if value == 'missing':
+                    receipt.pop('transcript_sha256')
+                else:
+                    receipt['transcript_sha256'] = value
+                path.write_text(json.dumps(receipt), encoding='utf-8')
+                self.store.update_job(meeting, state='needs_attention')
+                from collaboration import finalize_discussion
+                with self.assertRaisesRegex(ValueError, 'final transcript'):
+                    finalize_discussion(self.store, meeting, 'admin')
+                self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+                self.store.update_job(meeting, state='cancelled')
+
+    def test_completion_consumes_the_hashed_transcript_snapshot(self):
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        path = self.store.path.parent / 'discussion-artifacts' / meeting / 'discussion.json'
+        original = path.read_bytes()
+        replacement = json.loads(original)
+        replacement['contributions'][0]['content'] = 'Unverified replacement'
+        self.store.update_job(meeting, state='needs_attention')
+        import collaboration
+        read = collaboration.read_document
+        def replace_after_read(target, *args, **kwargs):
+            result = read(target, *args, **kwargs)
+            if target == path:
+                path.write_text(json.dumps(replacement), encoding='utf-8')
+            return result
+        with patch('collaboration.read_document', side_effect=replace_after_read):
+            result = collaboration.finalize_discussion(self.store, meeting, 'admin')
+        self.assertEqual(result['contributions'][0]['content'], 'Evidence-backed proposal')
+        self.assertNotEqual(path.read_bytes(), original)
+
+    def test_decision_input_is_refused_if_agent_resumed(self):
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        owner = self.job(meeting)
+        run = self.job(owner['group_run']['id'])
+        self.agents[run['alias']]['agent_status'] = 'working'
+        with self.assertRaisesRegex(ValueError, 'no longer blocked'):
+            self.action('input', organization_id=self.org, profile_id=run['profile_id'], key='ctrl+c')
+        self.assertFalse(any(args[:2] == ('agent', 'send-keys') for args, _ in self.calls))
+
+    def test_decision_admission_holds_no_sqlite_read_cursor(self):
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        run = self.job(self.job(meeting)['group_run']['id'])
+        original_command = self.store.command
+        original_connect = self.store.connect
+        cursors, checked = [], []
+        class Cursor:
+            closed = False
+            def __init__(self, cursor):
+                self.cursor = cursor
+            def __iter__(self):
+                return iter(self.cursor)
+            def fetchall(self):
+                return self.cursor.fetchall()
+            def close(self):
+                self.cursor.close()
+                self.closed = True
+        class Connection:
+            def __init__(self, db):
+                self.db = db
+            def __getattr__(self, name):
+                return getattr(self.db, name)
+            def __enter__(self):
+                self.db.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.db.__exit__(*args)
+            def execute(self, sql, *args):
+                cursor = self.db.execute(sql, *args)
+                if sql == 'SELECT data FROM jobs':
+                    cursor = Cursor(cursor)
+                    cursors.append(cursor)
+                return cursor
+        def command(*args, **kwargs):
+            if args[:2] == ('agent', 'get'):
+                # WAL allows another writer even with a live reader, so a
+                # successful concurrent write alone would not prove closure.
+                self.assertTrue(cursors)
+                self.assertTrue(all(c.closed for c in cursors), 'CLI ran with an open job cursor')
+                checked.append(True)
+            return original_command(*args, **kwargs)
+        with patch.object(self.store, 'connect', side_effect=lambda: Connection(original_connect())), \
+                patch.object(self.store, 'command', side_effect=command):
+            result = self.action('input', organization_id=self.org, profile_id=run['profile_id'], key='enter')
+            self.drain()
+        self.assertTrue(result)
+        self.assertTrue(checked)
+
+    def test_queued_decision_input_rechecks_before_sending(self):
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        owner = self.job(meeting)
+        run = self.job(owner['group_run']['id'])
+        input_id = self.action('input', organization_id=self.org, profile_id=run['profile_id'], key='enter')
+        self.agents[run['alias']]['agent_status'] = 'working'
+        self.drain()
+        self.assertEqual(self.job(input_id)['state'], 'needs_attention')
+        self.assertIn('no longer blocked', self.job(input_id)['error'])
+        self.assertFalse(any(args[:2] == ('agent', 'send-keys') for args, _ in self.calls))
+
+    def test_present_invalid_legacy_receipt_never_uses_the_fallback(self):
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        self.store.update_job(meeting, state='needs_attention', contract=1)
+        path = self.store.path.parent / 'discussion-artifacts' / meeting / 'receipt.json'
+        from collaboration import finalize_discussion
+        for malformed in ('not JSON', '[]'):
+            path.write_text(malformed, encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'receipt rejected'):
+                finalize_discussion(self.store, meeting, 'admin')
+        path.unlink()
+        path.mkdir()
+        with self.assertRaisesRegex(ValueError, 'regular file'):
+            finalize_discussion(self.store, meeting, 'admin')
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+
+    def test_queued_decision_cannot_target_a_replacement_conversation(self):
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        owner = self.job(meeting)
+        run = self.job(owner['group_run']['id'])
+        input_id = self.action('input', organization_id=self.org, profile_id=run['profile_id'], key='enter')
+        self.agents[run['alias']]['agent_session'] = {'value': 'replacement'}
+        self.drain()
+        self.assertEqual(self.job(input_id)['state'], 'needs_attention')
+        self.assertFalse(any(args[:2] == ('agent', 'send-keys') for args, _ in self.calls))
+
+    def test_a_legacy_discussion_recovers_without_a_receipt(self):
+        # Discussions created before the contract existed keep the conservative
+        # path: identity, settled state and validated documents, no receipt.
+        group = self.group()
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        job = self.job(meeting)
+        (self.store.path.parent / 'discussion-artifacts' / meeting / 'receipt.json').unlink()
+        # Normalize the job back to the legacy contract and its single marker.
+        self.store.update_job(meeting, state='needs_attention', contract=1, submission=None,
+                              execution=None, artifact=None, completion=None,
+                              discussion_submitted_at=job['discussion_submitted_at'])
+        self.assertIn(meeting, recover_interrupted(self.store)[0])
+        recovered = self.job(meeting)
+        self.assertEqual(recovered['state'], 'artifact_ready')
+        self.assertEqual((recovered.get('completion') or {}).get('state'), 'legacy_verified')
+
+    def test_a_blocked_discussion_prevents_releasing_its_participants(self):
+        # The generic release action checked only queued/running, so it could
+        # detach a binding a blocked discussion still owned, leaving that
+        # discussion permanently unfinalizable and its reservation gone.
+        group = self.group()
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        job = self.job(meeting)
+        self.assertEqual(job['state'], 'waiting_for_input')
+        run = self.job(job['group_run']['id'])
+        with self.assertRaisesRegex(ValueError, 'still owns this session'):
+            self.action('release', organization_id=self.org, job_id=run['id'])
+        self.assertEqual(self.job(run['id'])['state'], 'persona_sent')
+        # Once the decision is made and the discussion finalizes, the binding
+        # is released by completion rather than by the generic action.
+        self.agents[run['alias']]['agent_status'] = 'idle'
+        self.assertIn(meeting, recover_interrupted(self.store)[0])
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+
+    def test_a_blocked_discussion_prevents_closing_or_restarting_its_participants(self):
+        # The reservation check sat under an unconditional raise inside the
+        # restart branch, so close, finish and restart had no protection at all.
+        group = self.group()
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        job = self.job(meeting)
+        self.assertEqual(job['state'], 'waiting_for_input')
+        # An idle member is protected only by the reservation, which is exactly
+        # the case that succeeded while the check was unreachable.
+        member = self.job(job['runs'][0]['id'])
+        self.agents[member['alias']]['agent_status'] = 'idle'
+        for mode in ('close', 'finish', 'restart'):
+            with self.assertRaisesRegex(ValueError, 'still owns this session'):
+                self.store.manage_session(dict(request_id=uuid.uuid4().hex, organization_id=self.org,
+                                               job_id=member['id'], mode=mode, inspected=True), 'admin')
+        self.assertEqual(self.job(member['id'])['state'], 'persona_sent')
+        self.assertFalse(any(a[:2] == ('pane', 'close') for a, _ in self.calls))
+
+    def test_an_operator_can_answer_a_blocked_agent_without_starting_work(self):
+        # Input is the audited answer to the decision holding the reservation,
+        # not new work. Refusing it made the state unresolvable from the UI.
+        group = self.group()
+        self.block_discussion = True
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        job = self.job(meeting)
+        self.assertEqual(job['state'], 'waiting_for_input')
+        facilitator = self.job(job['group_run']['id'])
+        result = self.action('input', organization_id=self.org, profile_id=facilitator['profile_id'], key='enter')
+        self.assertTrue(result)
+        # An agent that is actually working is still protected.
+        self.store.update_job(meeting, state='running')
+        with self.assertRaisesRegex(ValueError, 'queued or running task work'):
+            self.action('input', organization_id=self.org, profile_id=facilitator['profile_id'], key='enter')
+
+    def test_a_blocked_discussion_blocks_a_new_meeting_with_the_same_members(self):
+        group = self.group()
+        self.block_discussion = True
+        first = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.assertEqual(self.job(first)['state'], 'waiting_for_input')
+        self.block_discussion = False
+        second = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        # The second meeting waits rather than reusing reserved participants.
+        self.assertNotEqual(self.job(second)['state'], 'artifact_ready')
+
     def test_waiting_batch_does_not_starve_meetings_beyond_twenty(self):
         with self.store.lock, closing(self.store.connect()) as db, db:
             for index in range(21):
@@ -302,7 +625,7 @@ class CollaborationTests(unittest.TestCase):
         self.store.advance_discussions(); self.drain()
         self.assertEqual(self.job(meeting)['state'], 'needs_attention')
         self.assertIn('24 hours', self.job(meeting)['error'])
-        self.assertFalse(self.job(meeting).get('discussion_submitted_at'))
+        self.assertFalse((self.job(meeting).get('submission') or {}).get('stage'))
 
     def test_discovery_can_prepare_a_closed_facilitator_once(self):
         from discussion_scheduler import ensure_facilitator
@@ -567,7 +890,11 @@ class CollaborationTests(unittest.TestCase):
         other = self.organization('Other')
         with self.assertRaises(ValueError):
             inspect(other)
-        self.action('release', organization_id=self.org, job_id=job['runs'][0]['id'])
+        # A live discussion owns its participants, so releasing one is refused.
+        with self.assertRaisesRegex(ValueError, 'still owns this session'):
+            self.action('release', organization_id=self.org, job_id=job['runs'][0]['id'])
+        # Inspection still handles a binding that is gone, however it went.
+        self.store.update_job(job['runs'][0]['id'], state='released')
         self.assertEqual(inspect()['streams'][1]['status'], 'unavailable')
 
     def test_group_paths_are_saved_in_facilitator_policy(self):

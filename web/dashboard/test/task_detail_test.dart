@@ -170,14 +170,25 @@ void main() {
         );
         await tester.tap(find.text('Changes'));
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('Add agent search'));
+        // The detail page is a lazily built ListView, so a narrow viewport can
+        // leave the section content unmounted. Scroll the page itself rather
+        // than assuming the content is already in the tree.
+        await tester.scrollUntilVisible(
+          find.text('Add agent search'),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.text('Add agent search'));
         await tester.pumpAndSettle();
         expect(find.text('+search feature'), findsOneWidget);
         await tester.tap(find.text('Close'));
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('Checks & builds'));
+        await tester.scrollUntilVisible(
+          find.text('Checks & builds'),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.text('Checks & builds'));
         await tester.pumpAndSettle();

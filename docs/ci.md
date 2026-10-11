@@ -20,6 +20,27 @@ using the installed `herdr-session` user service. It verifies that a repeat star
 reuses the server and that workspace/organization controls still work after the
 dashboard gateway restarts.
 
+The same smoke run now asks the installed OpenCode binary to resolve the generated
+agent files with `debug agent`. It checks default, model-only, reasoning,
+discussion-output, explicit-permission and full-autonomy configurations, including
+inherited denials, output grants and the absence of a system-prompt override.
+The probe uses a temporary home and a local fixture provider; it sends no prompts,
+executes no tools and reads no operator credentials. Missing or incompatible CLIs
+fail this smoke check rather than producing a skipped pass. Run it separately on
+an installed LXC as the `herdr` user:
+
+```sh
+python3 tests/ci/opencode_config.py --binary /home/herdr/.local/bin/opencode \
+  --gateway /opt/herdr-web/web/gateway
+```
+
+When adding a regression test, also run it against an isolated copy of the code
+with the relevant fix removed. Record the expected failure and the passing result
+with the fix. Keep this mutation local to the temporary copy; do not revert or
+reset the working tree. A test that passes both versions has not demonstrated the
+regression it claims to prevent. Runtime probes should likewise reject a known
+bad configuration before they certify the corrected one.
+
 Pushes to the default branch and manual runs on that branch additionally provision
 a fresh Debian 13 systemd Docker container with the actual installers. The host
 runner is Ubuntu 24.04; the installation target is Debian 13, matching the LXC.

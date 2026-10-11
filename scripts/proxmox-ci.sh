@@ -79,7 +79,15 @@ run_test() (
   grep -qx 'unprivileged: 1' <<<"$config"
   owns_config "$config" "$marker"
   # Verify the actual SSH login, with a host key read through the trusted PVE channel.
-  ip=$(pct exec "$ctid" -- hostname -I | python3 -c 'import ipaddress,sys; print(next(str(a) for v in sys.stdin.read().split() if (a:=ipaddress.ip_address(v)).version == 4))')
+  # DHCP may not have assigned an address the instant the container starts, so wait
+  # for one instead of aborting the run.
+  ip=''
+  for _ in $(seq 1 15); do
+    ip=$(pct exec "$ctid" -- hostname -I 2>/dev/null | python3 -c 'import ipaddress,sys; print(next((str(a) for v in sys.stdin.read().split() if (a:=ipaddress.ip_address(v)).version == 4), ""))' 2>/dev/null) || true
+    [[ -n "$ip" ]] && break
+    sleep 1
+  done
+  [[ -n "$ip" ]] || { echo "Container $ctid has no IPv4 address after 15s." >&2; exit 1; }
   public_key=$(pct exec "$ctid" -- cat /etc/ssh/ssh_host_ed25519_key.pub)
   printf '%s %s\n' "$ip" "$public_key" >"$state.known_hosts"
   ssh -i "$state.key" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
@@ -88,6 +96,7 @@ run_test() (
   pct exec "$ctid" -- install -d -m 0755 /opt/herdr-ci
   pct push "$ctid" "$repo/tests/ci/smoke.sh" /opt/herdr-ci/smoke.sh --perms 0755
   pct push "$ctid" "$repo/tests/ci/runtime.py" /opt/herdr-ci/runtime.py --perms 0644
+  pct push "$ctid" "$repo/tests/ci/opencode_config.py" /opt/herdr-ci/opencode_config.py --perms 0644
   pct exec "$ctid" -- bash /opt/herdr-ci/smoke.sh >"$results/smoke.log" 2>&1 || {
     local smoke_rc=$?
     cat "$results/smoke.log" >&2

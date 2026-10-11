@@ -14,6 +14,7 @@ import uuid
 
 from project_files import project_directory
 from permissions import accessible_paths, permission_mode, prepare_permissions
+from session_ownership import active, reserves
 from herdr_ids import is_pane_id, is_workspace_id
 from herdr_errors import HerdrError, delivery_for, parse_completion, parse_resume, preview as preview_text
 
@@ -422,9 +423,9 @@ class OrganizationStore:
                 raise ValueError('Remove this agent from these groups first: ' + ', '.join(names))
         jobs = [json.loads(row['data']) for row in db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
         profile_id = profile['id'] if profile else None
-        if any(job['state'] in ('queued', 'running') and
+        if any(active(job) and
                ((table == 'groups' and job.get('group_id') == item['id']) or
-                (profile_id and profile_id in job.get('participants', [job.get('profile_id')]))) for job in jobs):
+                (profile_id and reserves(job, profile_id))) for job in jobs):
             raise ValueError('Wait for active work to finish before removing this entry.')
         runs = [job for job in jobs if profile_id and job['kind'] == 'launch' and
                 job.get('profile_id') == profile_id and job['state'] not in ('released', 'finished')]
@@ -566,8 +567,8 @@ class OrganizationStore:
                         if sender['id'] == profile['id']:
                             raise ValueError('Select two different agents.')
                         participants = {sender['id'], profile['id']}
-                        if any(j['state'] in ('queued', 'running') and participants.intersection(j.get('participants', [j.get('profile_id')])) for j in jobs):
-                            raise ValueError('An agent already has a queued or running task. Wait for it to finish.')
+                        if any(reserves(j, sender['id']) or reserves(j, profile['id']) for j in jobs):
+                            raise ValueError('An agent already has queued or running task work. Wait for it to finish.')
                         runs = {}
                         for p in (sender, profile):
                             runs[p['id']] = next((j for j in reversed(jobs) if j['kind'] == 'launch' and j['profile_id'] == p['id'] and j['state'] == 'persona_sent'), None)
@@ -582,7 +583,7 @@ class OrganizationStore:
                     submitted = item['id']
                 elif action in ('release', 'report', 'resolve_delegation'):
                     item = self.get(db, 'jobs', text(body, 'job_id', 40), org_id)
-                    if item['state'] in ('queued', 'running'):
+                    if active(item):
                         raise ValueError('Wait for the running job to finish.')
                     if action == 'resolve_delegation':
                         if item['kind'] != 'delegate' or item['state'] not in ('delivered', 'reported_complete', 'needs_attention', 'uncertain', 'completed', 'cancelled'):
@@ -601,6 +602,15 @@ class OrganizationStore:
                     elif action == 'release':
                         if item['kind'] != 'launch':
                             raise ValueError('Only run bindings can be released.')
+                        # The binding itself is persona_sent; what matters is
+                        # whether another job still owns it. A blocked or
+                        # running discussion must not have its participants
+                        # detached, which would leave it unfinalizable forever.
+                        others = [json.loads(row['data']) for row in
+                                  db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
+                        if any(j['id'] != item['id'] and reserves(j, item.get('profile_id'))
+                               for j in others):
+                            raise ValueError('A discussion or meeting still owns this session; resolve it before releasing.')
                         item['state'] = 'released'
                     else:
                         if item['kind'] != 'delegate' or item['state'] not in ('delivered', 'reported_complete'):
@@ -637,7 +647,7 @@ class OrganizationStore:
             self.put(db, 'jobs', job)
         if changes.get('state') in ('answered', 'persona_sent', 'needs_attention', 'delivered', 'artifact_ready',
                                     'finished', 'released', 'cancelled', 'completed', 'reported_complete',
-                                    'uncertain', 'waiting_for_members'):
+                                    'uncertain', 'waiting_for_members', 'waiting_for_input'):
             self.jobs_changed.set()
         return job
 
@@ -687,9 +697,10 @@ class OrganizationStore:
                     raise ValueError('Select a completed launch binding.')
                 if mode == 'restart' and run['state'] != 'persona_sent':
                     raise ValueError('Restart only the currently bound session.')
-                if any(j['state'] in ('queued', 'running') and run['profile_id'] in
-                       j.get('participants', [j.get('profile_id')]) for j in self.job_records()):
-                    raise ValueError('Wait for queued or running agent work.')
+                # Applies to every mode: a discussion that still owns this
+                # binding must not have it closed, finished or restarted.
+                if any(reserves(j, run['profile_id']) for j in self.job_records()):
+                    raise ValueError('A discussion or meeting still owns this session; resolve it before changing it.')
                 if run.get('session_closed_at') and mode in ('close', 'finish'):
                     return {'id': run['id'], 'status': 'already_closed', 'archive_id': run.get('session_archive_id')}
             from session_archives import archive, read, context
@@ -825,8 +836,7 @@ class OrganizationStore:
                 raise ValueError('Guidance recovery requires one unchanged worker session.')
             if not runs[0].get('worktree_path'):
                 raise ValueError('Guidance recovery requires an isolated worker worktree, not a shared checkout.')
-            if any(j['state'] in ('queued', 'running') and profile_id in
-                   j.get('participants', [j.get('profile_id')]) for j in jobs):
+            if any(reserves(j, profile_id) for j in jobs):
                 raise ValueError('Wait for queued or running worker jobs before repairing guidance.')
             if any(pid != profile_id and Path(path).resolve() == Path(checkout).resolve()
                    for pid, _, _, path in self.active_checkouts()):
@@ -855,8 +865,7 @@ class OrganizationStore:
                 if job['state'] not in ('answered', 'uncertain', 'needs_attention'):
                     raise ValueError('Only answered or interrupted worker jobs can be recovered.')
                 jobs = [json.loads(row['data']) for row in db.execute('SELECT data FROM jobs')]
-                if any(j['state'] in ('queued', 'running') and profile_id in
-                       j.get('participants', [j.get('profile_id')]) for j in jobs):
+                if any(reserves(j, profile_id) for j in jobs):
                     raise ValueError('Wait for queued or running worker jobs before recovering.')
             from collaboration import current_run
             if not job.get('runs'):
@@ -897,8 +906,7 @@ class OrganizationStore:
                 if job['state'] not in ('uncertain', 'needs_attention'):
                     raise ValueError('Only interrupted chat replies can be repaired.')
                 jobs = [json.loads(row['data']) for row in db.execute('SELECT data FROM jobs ORDER BY rowid')]
-                if any(j['state'] in ('queued', 'running') and profile_id in
-                       j.get('participants', [j.get('profile_id')]) for j in jobs):
+                if any(reserves(j, profile_id) for j in jobs):
                     raise ValueError('Wait for this agent\'s queued or running work before repairing.')
                 runs = [j for j in jobs if j['kind'] == 'launch' and j.get('profile_id') == profile_id and j['state'] not in ('released', 'finished')]
             if mode == 'recover':
@@ -1087,6 +1095,16 @@ class OrganizationStore:
             raise ValueError('Legacy session has no verifiable pane identity; inspect its run.')
         if len([item for item in live if item.get('pane_id') == pane]) != 1:
             raise ValueError('Legacy session pane has ambiguous agent ownership; inspect its run.')
+        response = self.command('pane', 'list', '--workspace', workspace_id)
+        panes = response if isinstance(response, list) else response.get('panes') if isinstance(response, dict) else None
+        if not isinstance(panes, list) or any(not isinstance(item, dict) for item in panes):
+            raise ValueError('Cannot verify legacy session pane inventory.')
+        matches = [item for item in panes if item.get('pane_id') == pane]
+        if len(matches) != 1:
+            raise ValueError('Legacy session pane is absent or ambiguous; inspect its run.')
+        # Herdr reports no cwd or worktree on a workspace, so the pane's own
+        # directory is the authoritative checkout. A workspace-level path is
+        # still preferred if a future version adds one.
         response = self.command('workspace', 'list')
         workspaces = response if isinstance(response, list) else response.get('workspaces') if isinstance(response, dict) else None
         if not isinstance(workspaces, list) or any(not isinstance(item, dict) for item in workspaces):
@@ -1096,18 +1114,13 @@ class OrganizationStore:
             raise ValueError('Legacy session workspace is absent or ambiguous; inspect its run.')
         worktree = owners[0].get('worktree')
         checkout = worktree.get('checkout_path') if isinstance(worktree, dict) else None
-        checkout = checkout or owners[0].get('cwd')
+        checkout = (checkout or owners[0].get('cwd')
+                    or matches[0].get('cwd') or matches[0].get('foreground_cwd'))
         expected = run.get('worktree_path') or run.get('source_project') or run['profile'].get('project')
         if not isinstance(checkout, str) or not checkout or not isinstance(expected, str) or not expected:
             raise ValueError('Legacy session checkout identity is unavailable; inspect its run.')
         if project_directory(self.projects, checkout) != project_directory(self.projects, expected):
             raise ValueError('Legacy session checkout changed; the pane was not closed.')
-        response = self.command('pane', 'list', '--workspace', workspace_id)
-        panes = response if isinstance(response, list) else response.get('panes') if isinstance(response, dict) else None
-        if not isinstance(panes, list) or any(not isinstance(item, dict) for item in panes):
-            raise ValueError('Cannot verify legacy session pane inventory.')
-        if len([item for item in panes if item.get('pane_id') == pane]) != 1:
-            raise ValueError('Legacy session pane is absent or ambiguous; inspect its run.')
         return agent
 
     def check_contract(self):
@@ -1128,22 +1141,30 @@ class OrganizationStore:
             # Keep only valid metadata that belongs to the authoritative root pane.
             return pane, workspace if is_workspace_id(workspace) and is_pane_id(pane, workspace) else None
         # Some installed Herdr versions omit a usable root pane in creation
-        # responses. Re-read authoritative records for the exact created cwd.
+        # responses. Herdr reports no cwd or worktree on a workspace, so the
+        # pane directory is the only checkout evidence; re-read it for the
+        # exact created cwd. Rare path: 0.9.3 always returns a root pane.
         response = self.command('workspace', 'list')
         workspaces = response if isinstance(response, list) else response.get('workspaces', [])
-        matches = [w for w in workspaces if isinstance(w, dict) and
-                   (w.get('worktree') or {}).get('checkout_path', w.get('cwd')) and
-                   str(Path((w.get('worktree') or {}).get('checkout_path', w.get('cwd'))).resolve()) == str(Path(project).resolve())]
+        expected = Path(project).resolve()
+        matches = []
+        for workspace in workspaces:
+            if not isinstance(workspace, dict):
+                continue
+            workspace_id = workspace.get('workspace_id') or workspace.get('id')
+            if not is_workspace_id(workspace_id):
+                continue
+            response = self.command('pane', 'list', '--workspace', workspace_id)
+            panes = response if isinstance(response, list) else response.get('panes', [])
+            for candidate in panes:
+                if not isinstance(candidate, dict):
+                    continue
+                directory = candidate.get('cwd') or candidate.get('foreground_cwd')
+                if isinstance(directory, str) and Path(directory).resolve() == expected:
+                    matches.append((workspace_id, candidate.get('pane_id')))
         if len(matches) != 1:
             raise ValueError('Cannot uniquely resolve the created checkout workspace. Inspect its terminal before retrying.')
-        workspace = matches[0].get('workspace_id')
-        if not is_workspace_id(workspace):
-            raise ValueError('Created workspace has an unsupported ID.')
-        response = self.command('pane', 'list', '--workspace', workspace)
-        panes = response if isinstance(response, list) else response.get('panes', [])
-        if len(panes) != 1:
-            raise ValueError('Created workspace must have exactly one pane before agent launch.')
-        pane = panes[0].get('pane_id')
+        workspace, pane = matches[0]
         if not is_pane_id(pane, workspace):
             raise ValueError('Herdr did not return a valid root pane ID for the created workspace.')
         return pane, workspace
@@ -1296,7 +1317,17 @@ class OrganizationStore:
                 if job.get('task_prompt') or job.get('task_id'):
                     from worker_guidance import local_bundle
                     guidance = local_bundle(job.get('worktree_path', project))
-                arguments = launch_arguments(profile) + prepare_permissions(profile, self.path.parent)
+                # Any agent can be asked to save a chat reply: an operator
+                # message, a consultation, or a delegation reply all write under
+                # chat-replies. The launch happens before the chat exists, so
+                # the grant cannot be decided from the job kind here. Only a
+                # group facilitator or a discussion member also writes an
+                # artifact and transcript.
+                output_directories = ['chat-replies']
+                if profile.get('group_id') or job.get('session_purpose') == 'discussion':
+                    output_directories.append('discussion-artifacts')
+                arguments = launch_arguments(profile) + prepare_permissions(
+                    profile, self.path.parent, output_directories=tuple(output_directories))
                 # Native resume uses adapter arguments validated before they were
                 # recorded; free-form command text is never executed here.
                 resume_args = job.get('resume_args')
@@ -1401,6 +1432,10 @@ class OrganizationStore:
                 detail += ' The agent needs a decision; no prompt input was sent. Inspect the session and choose an action.'
             elif delivery == 'unknown' and code:
                 detail += ' Prompt delivery is unknown; inspect the terminal before retrying.'
-            else:
+            elif delivery in ('sent', 'unknown'):
                 detail += ' Inspect SSH before retrying; terminal input may have been sent.'
+            else:
+                # A delivery of 'none' wrote nothing, so claiming input may have
+                # been sent would send the operator hunting for nothing.
+                detail += ' Inspect SSH before retrying.'
             self.update_job(job_id, state='needs_attention', error=detail)

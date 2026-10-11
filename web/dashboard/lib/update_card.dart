@@ -56,6 +56,9 @@ class _UpdateCardState extends State<UpdateCard> {
 
   Future<void> install({bool alpha = false}) async {
     final version = alpha ? alphaVersion : info?['latest'];
+    // A null version would otherwise produce an "Install null?" confirmation
+    // and send a meaningless install request.
+    if (version == null) return;
     final epoch = connection.generation;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -136,12 +139,26 @@ class _UpdateCardState extends State<UpdateCard> {
           ),
           if (info != null) ...[
             Text(
-              'Installed: ${info!['installed']} \u00b7 Latest: ${info!['latest']}',
+              'Installed: ${info!['installed']} \u00b7 Latest: ${info!['latest'] ?? 'Unavailable'}',
             ),
             Text('Status: ${info!['state']}'),
-            if (info!['check_error'] != null)
+            // A diagnosis is the actionable message, so it replaces the raw
+            // exception rather than sitting beside it. The raw error stays the
+            // only signal when the failure is not a connectivity problem, and
+            // the journal always records it.
+            if (info!['check_diagnostic'] != null)
+              Text('${info!['check_diagnostic']}')
+            else if (info!['check_error'] != null)
               Text('Release lookup unavailable: ${info!['check_error']}'),
-            if (info!['state'] == 'complete')
+            if (info!['check_error'] != null && info!['check_failures'] != null)
+              Text(
+                'Release lookup failed ${info!['check_failures']} times since ${info!['check_failed_since'] ?? 'the first failed check'}. Counts reset when the gateway restarts.',
+              ),
+            if (info!['state'] == 'complete' && info!['check_error'] != null)
+              const Text(
+                'The previous installation completed. The current release check failed.',
+              ),
+            if (info!['state'] == 'complete' && info!['check_error'] == null)
               const Text(
                 'Update complete. Reload this page to use the new dashboard.',
               ),
@@ -188,7 +205,7 @@ class _UpdateCardState extends State<UpdateCard> {
             ),
             if (alphaVersion != null)
               Text(
-                '${alphas.firstWhere((r) => r['version'] == alphaVersion)['notes']}',
+                '${alphas.where((r) => r['version'] == alphaVersion).firstOrNull?['notes'] ?? ''}',
               ),
             FilledButton(
               onPressed:

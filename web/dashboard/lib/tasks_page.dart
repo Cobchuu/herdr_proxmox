@@ -65,8 +65,10 @@ List<String> taskRepositories(
   List<Map<String, dynamic>> profiles,
   String root,
 ) {
-  final prefix =
-      '${root.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '')}/';
+  final base = root.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+  // An empty root would make the prefix '/' and match every absolute path.
+  if (base.isEmpty) return const [];
+  final prefix = '$base/';
   return (profiles
       .map((p) {
         final project = '${p['project'] ?? ''}'.replaceAll('\\', '/');
@@ -277,68 +279,138 @@ class _TasksPageState extends State<TasksPage> {
     final repos = TextEditingController(
       text: (github['repositories'] as List? ?? []).join('\n'),
     );
+    final configured = (github['publication'] as Map?) ?? const {};
+    final modes = <String, String>{};
+    final forks = <String, TextEditingController>{};
+    for (final entry in configured.entries) {
+      final value = entry.value is Map ? entry.value as Map : const {};
+      modes['${entry.key}'] = '${value['mode'] ?? 'direct'}';
+      if (value['mode'] == 'fork') {
+        forks['${entry.key}'] = TextEditingController(
+          text: '${value['publishing_repository'] ?? ''}',
+        );
+      }
+    }
+    List<String> listed() => repos.text
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
     final epoch = connection.generation;
     try {
-      final confirmed = await showDialog<bool>(
+      final setupRoute = DialogRoute<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('GitHub publishing'),
-          content: SizedBox(
-            width: 540,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
-                  ),
-                  TextField(
-                    controller: token,
-                    obscureText: true,
-                    enableSuggestions: false,
-                    autocorrect: false,
-                    decoration: const InputDecoration(
-                      labelText: 'Personal access token',
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('GitHub publishing'),
+            content: SizedBox(
+              width: 540,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
                     ),
-                    maxLength: 255,
-                  ),
-                  TextField(
-                    controller: repos,
-                    minLines: 2,
-                    maxLines: 5,
-                    decoration: const InputDecoration(
-                      labelText: 'Allowed owner/repository (one per line)',
+                    TextField(
+                      controller: token,
+                      obscureText: true,
+                      enableSuggestions: false,
+                      autocorrect: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Personal access token',
+                      ),
+                      maxLength: 255,
                     ),
-                  ),
-                ],
+                    TextField(
+                      controller: repos,
+                      minLines: 2,
+                      maxLines: 5,
+                      onChanged: (_) => setDialogState(() {}),
+                      decoration: const InputDecoration(
+                        labelText: 'Allowed owner/repository (one per line)',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access.',
+                    ),
+                    for (final name in listed()) ...[
+                      Row(
+                        children: [
+                          Expanded(child: Text(name)),
+                          DropdownButton<String>(
+                            value: modes[name] ?? 'direct',
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'direct',
+                                child: Text('Direct'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'fork',
+                                child: Text('Through a fork'),
+                              ),
+                            ],
+                            onChanged: (value) => setDialogState(() {
+                              modes[name] = value ?? 'direct';
+                              if (modes[name] == 'fork') {
+                                forks.putIfAbsent(
+                                  name,
+                                  () => TextEditingController(),
+                                );
+                              }
+                            }),
+                          ),
+                        ],
+                      ),
+                      if (modes[name] == 'fork')
+                        TextField(
+                          controller: forks[name],
+                          decoration: InputDecoration(
+                            labelText: 'Fork for $name (owner/repository)',
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
               ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Validate and save'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Validate and save'),
-            ),
-          ],
         ),
       );
+      final confirmed = await Navigator.of(context).push(setupRoute);
+      // Keep controllers alive until the dialog has left the overlay.
+      await setupRoute.completed;
       if (confirmed != true || !mounted || epoch != connection.generation)
         return;
       setState(() {
         busy = true;
         error = null;
       });
+      final publication = <String, dynamic>{};
+      for (final name in listed()) {
+        publication[name] = modes[name] == 'fork'
+            ? {
+                'mode': 'fork',
+                'publishing_repository': '${forks[name]?.text.trim() ?? ''}',
+              }
+            : {'mode': 'direct'};
+      }
       await connection.request('github/configure', {
         'token': token.text.trim(),
-        'repositories': repos.text
-            .split('\n')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList(),
+        'repositories': listed(),
+        'publication': publication,
       });
       await refresh();
     } catch (e) {
@@ -348,6 +420,9 @@ class _TasksPageState extends State<TasksPage> {
       token.clear();
       token.dispose();
       repos.dispose();
+      for (final controller in forks.values) {
+        controller.dispose();
+      }
       if (mounted) setState(() => busy = false);
     }
   }
@@ -606,6 +681,226 @@ class _TasksPageState extends State<TasksPage> {
     }
   }
 
+  Future<void> previewPull(Map<String, dynamic> task) async {
+    final epoch = connection.generation;
+    // Created up front so the dialog builder captures non-nullable controllers.
+    final title = TextEditingController();
+    final description = TextEditingController();
+    try {
+      final fresh = Map<String, dynamic>.from(
+        await connection.request('tasks/detail?id=${task['id']}'),
+      );
+      if (!mounted || epoch != connection.generation) return;
+      final preview = fresh['pull_preview'] as Map?;
+      if (preview == null ||
+          preview['head_sha'] != (fresh['publish'] as Map?)?['head_sha']) {
+        throw StateError(
+          'Publish the current candidate before previewing its PR. Update the gateway if PR previews are unavailable.',
+        );
+      }
+      title.text = '${preview['title']}';
+      description.text = '${preview['body']}';
+      final excerpt = '${preview['excerpt'] ?? ''}';
+      var includeExcerpt = false;
+      final form = GlobalKey<FormState>();
+      final route = DialogRoute<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Preview draft pull request'),
+            content: SizedBox(
+              width: 760,
+              child: SingleChildScrollView(
+                child: Form(
+                  key: form,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SelectableText(
+                        'Publish branch to: ${preview['publishing_repository']}\n\n'
+                        'Open draft PR into: ${preview['repository']}\n\n'
+                        'Source branch: ${preview['head']}\n\n'
+                        'Target branch: ${preview['base']}\n\n'
+                        'Exact candidate: ${preview['head_sha']}',
+                      ),
+                      const Text(
+                        'This title and Markdown description will be public on the selected repository. The branch is already published. Creating a draft PR does not merge or deploy it.',
+                      ),
+                      TextFormField(
+                        controller: title,
+                        maxLength: 256,
+                        decoration: const InputDecoration(labelText: 'PR title'),
+                        validator: (value) =>
+                            value == null || value.trim().isEmpty
+                            ? 'Enter a title.'
+                            : null,
+                      ),
+                      TextFormField(
+                        controller: description,
+                        minLines: 10,
+                        maxLines: 20,
+                        maxLength: 30000,
+                        buildCounter:
+                            (
+                              context, {
+                              required currentLength,
+                              required isFocused,
+                              maxLength,
+                            }) => null,
+                        decoration: const InputDecoration(
+                          labelText: 'PR description (Markdown)',
+                        ),
+                        validator: (value) =>
+                            value == null || value.trim().isEmpty
+                            ? 'Enter a description.'
+                            : null,
+                      ),
+                      if (excerpt.isNotEmpty)
+                        CheckboxListTile(
+                          value: includeExcerpt,
+                          onChanged: (value) => setDialogState(() {
+                            includeExcerpt = value == true;
+                            final block = '\n\n$excerpt';
+                            if (includeExcerpt) {
+                              if (!description.text.contains(excerpt)) {
+                                description.text =
+                                    '${description.text.trimRight()}$block';
+                              }
+                            } else {
+                              description.text = description.text
+                                  .replaceFirst(block, '')
+                                  .trimRight();
+                            }
+                          }),
+                          title: const Text(
+                            'Include the finalized discussion excerpt',
+                          ),
+                          subtitle: const Text(
+                            'Off by default: the excerpt publishes the group discussion text verbatim.',
+                          ),
+                          controlAffinity: ListTileControlAffinity.leading,
+                          dense: true,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  if (form.currentState!.validate()) Navigator.pop(context, true);
+                },
+                child: const Text('Create draft PR'),
+              ),
+            ],
+          ),
+        ),
+      );
+      final confirmed = await Navigator.of(context).push(route);
+      await route.completed;
+      if (confirmed == true && mounted && epoch == connection.generation) {
+        await act('pull', {
+          'task_id': fresh['id'],
+          'head_sha': preview['head_sha'],
+          'reviewed': true,
+          'title': title.text.trim(),
+          'body': description.text,
+        });
+      }
+    } catch (exception) {
+      if (mounted && epoch == connection.generation)
+        setState(() => error = '$exception');
+    } finally {
+      title.dispose();
+      description.dispose();
+    }
+  }
+
+  Future<void> choosePublication(Map<String, dynamic> task) async {
+    final epoch = connection.generation;
+    final upstream = '${task['github_repository'] ?? ''}';
+    final configured = (github['publication'] as Map?)?[upstream] as Map?;
+    final fork = configured?['mode'] == 'fork'
+        ? '${configured?['publishing_repository'] ?? ''}'
+        : '';
+    if (upstream.isEmpty || fork.isEmpty) {
+      setState(
+        () => error =
+            'Configure fork publication for $upstream before choosing a destination.',
+      );
+      return;
+    }
+    final current = '${task['publishing_repository'] ?? upstream}';
+    var mode = current == upstream ? 'direct' : 'fork';
+    try {
+      final route = DialogRoute<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Publication destination'),
+            content: SizedBox(
+              width: 480,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Publish branch to: ${mode == 'fork' ? fork : upstream}'),
+                  Text('Open draft PR into: $upstream'),
+                  const Text(
+                    'The destination is recorded with this task and cannot change once the branch is published. The upstream repository is never force-pushed.',
+                  ),
+                  DropdownButton<String>(
+                    value: mode,
+                    items: [
+                      DropdownMenuItem(
+                        value: 'direct',
+                        child: Text('Direct \u00b7 $upstream'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'fork',
+                        child: Text('Through a fork \u00b7 $fork'),
+                      ),
+                    ],
+                    onChanged: (value) =>
+                        setDialogState(() => mode = value ?? 'direct'),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Record destination'),
+              ),
+            ],
+          ),
+        ),
+      );
+      final confirmed = await Navigator.of(context).push(route);
+      await route.completed;
+      if (confirmed == true && mounted && epoch == connection.generation) {
+        await act('publication', {
+          'task_id': task['id'],
+          'mode': mode,
+          'publishing_repository': fork,
+        });
+      }
+    } catch (exception) {
+      if (mounted && epoch == connection.generation)
+        setState(() => error = '$exception');
+    }
+  }
+
   Widget _buildEvidence(String target, Map<dynamic, dynamic> build) {
     final unverified =
         build['state'] == 'complete' &&
@@ -661,73 +956,120 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   @override
-  Widget build(BuildContext context) => selectedId == null
-      ? ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            Text('Tasks', style: Theme.of(context).textTheme.headlineLarge),
-            const SizedBox(height: 8),
-            const Text(
-              'Develop in a task branch, review the exact commit, publish and open a draft pull request. Merge on GitHub. Updating the base and deploying are separate operations.',
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: admin && !busy ? create : null,
-                  icon: const Icon(Icons.add),
-                  label: const Text('Create task'),
+  Widget build(BuildContext context) {
+    final drafts = tasks.where((t) => t['state'] == 'draft').toList();
+    final started = tasks.where((t) => t['state'] != 'draft').toList();
+    return selectedId == null
+        ? ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Text('Tasks', style: Theme.of(context).textTheme.headlineLarge),
+              const SizedBox(height: 8),
+              const Text(
+                'Develop in a task branch, review the exact commit, publish and open a draft pull request. Merge on GitHub. Updating the base and deploying are separate operations.',
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: admin && !busy ? create : null,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Create task'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: admin && !busy ? configure : null,
+                    icon: const Icon(Icons.key),
+                    label: const Text('GitHub publishing'),
+                  ),
+                  IconButton(
+                    onPressed: busy || refreshing ? null : refresh,
+                    tooltip: 'Refresh tasks',
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
+              ),
+              Text(
+                github['configured'] == true
+                    ? admin
+                          ? 'GitHub account: ${github['login']} \u00b7 ${github['repositories']}'
+                          : 'GitHub publishing is configured. Publishing requires an administrator.'
+                    : github['error'] != null
+                    ? 'GitHub publishing is unavailable: ${github['error']}'
+                    : 'GitHub publishing is not configured. Local task work is available.',
+              ),
+              if (admin && github['publication'] is Map)
+                for (final entry
+                    in (github['publication'] as Map).entries)
+                  if (entry.value is Map && entry.value['mode'] == 'fork')
+                    Text(
+                      '${entry.key} \u2192 fork ${entry.value['publishing_repository']} \u00b7 '
+                      'fork access ${entry.value['verification']?['fork_access'] ?? 'unknown'} \u00b7 '
+                      'account write ${entry.value['verification']?['account_write_to_publishing'] ?? 'unknown'} \u00b7 '
+                      'token write ${entry.value['verification']?['token_write_capability'] ?? 'unknown'} \u00b7 '
+                      'upstream PR ${entry.value['verification']?['upstream_pr_creation'] ?? 'unknown'}',
+                    ),
+              if (busy) const LinearProgressIndicator(),
+              if ((error ?? readError) != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    error ?? readError!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
                 ),
-                OutlinedButton.icon(
-                  onPressed: admin && !busy ? configure : null,
-                  icon: const Icon(Icons.key),
-                  label: const Text('GitHub publishing'),
+              if (tasks.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(
+                    !connected
+                        ? 'Not connected to the gateway.'
+                        : readError != null
+                        ? 'Task list unavailable.'
+                        : refreshing
+                        ? 'Loading tasks…'
+                        : 'No development tasks yet.',
+                  ),
                 ),
-                IconButton(
-                  onPressed: busy || refreshing ? null : refresh,
-                  tooltip: 'Refresh tasks',
-                  icon: const Icon(Icons.refresh),
+              for (final task in started) _summary(task),
+              // Drafts are proposals waiting on an operator, not work in flight.
+              // Grouping them keeps the active list readable when a group has
+              // proposed several follow-ups.
+              if (drafts.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Drafts (${drafts.length})',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Work that has not started. Open a task for its next step.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+                for (final task in drafts) _summary(task),
               ],
-            ),
-            Text(
-              github['configured'] == true
-                  ? admin
-                        ? 'GitHub account: ${github['login']} · ${github['repositories']}'
-                        : 'GitHub publishing is configured. Publishing requires an administrator.'
-                  : github['error'] != null
-                  ? 'GitHub publishing is unavailable: ${github['error']}'
-                  : 'GitHub publishing is not configured. Local task work is available.',
-            ),
-            if (busy) const LinearProgressIndicator(),
-            if ((error ?? readError) != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(
-                  error ?? readError!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            if (tasks.isEmpty)
-              Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(
-                  !connected
-                      ? 'Not connected to the gateway.'
-                      : readError != null
-                      ? 'Task list unavailable.'
-                      : refreshing
-                      ? 'Loading tasks…'
-                      : 'No development tasks yet.',
-                ),
-              ),
-            for (final task in tasks) _summary(task),
-            DiscoveryPanel(coordinator: widget.coordinator),
-          ],
-        )
-      : _detail();
+              DiscoveryPanel(coordinator: widget.coordinator),
+            ],
+          )
+        : _detail();
+  }
 
   Future<void> openTask(String id) async {
     if (widget.coordinator != null) {
@@ -769,7 +1111,7 @@ class _TasksPageState extends State<TasksPage> {
           ),
           Text('${taskState(task)} \u00b7 ${task['repository']}'),
           Text('${taskAgentName(task)}'),
-          Text(taskNextStep(task)),
+          Text(taskNextStep(task, executor: executor)),
           if (task['updated_at'] != null)
             Text('Last activity ${task['updated_at']}'),
           TextButton.icon(
@@ -1224,9 +1566,7 @@ class _TasksPageState extends State<TasksPage> {
                     value: reapOrphaned,
                     onChanged: (value) =>
                         update(() => reapOrphaned = value == true),
-                    title: const Text(
-                      'Reclaim panes orphaned by a restart',
-                    ),
+                    title: const Text('Reclaim panes orphaned by a restart'),
                     subtitle: const Text(
                       'After a Herdr restart, panes can return as plain shells that no agent holds. This closes them once the pane is proven to run nothing and to sit in the recorded checkout. Ambiguous panes are left for you.',
                     ),
@@ -1663,6 +2003,80 @@ class _TasksPageState extends State<TasksPage> {
       });
   }
 
+  Widget _groupReviewStatus(Map<String, dynamic> task) {
+    // Meetings carry no outcome flag, so the latest review is the one to show.
+    // Whether its proposals already became tasks is reported below instead of
+    // being used to hide the review and its acceptance state.
+    final meetings = (task['meeting_results'] as List? ?? [])
+        .whereType<Map>()
+        .toList();
+    if (meetings.isEmpty) return const SizedBox.shrink();
+    final meeting = meetings.last;
+    final ready = meeting['state'] == 'artifact_ready';
+    final candidate = meeting['candidate'];
+    final current = candidate != null && candidate == task['head_sha'];
+    final proposals = (meeting['proposals'] as List? ?? [])
+        .whereType<Map>()
+        .toList();
+    final created = (task['follow_up_tasks'] as Map?) ?? const {};
+    final converted = proposals
+        .where((proposal) => created.containsKey(proposal['key']))
+        .length;
+    final result = '${meeting['result'] ?? ''}'.trim();
+    final acceptance = task['acceptance'] as Map?;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Group review · ${meeting['group_name'] ?? 'Group'}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            Text(
+              ready
+                  ? 'Discussion finalized · ${proposals.length} follow-up proposals'
+                        '${converted > 0 ? ' ($converted already created as tasks)' : ''}. '
+                        'This is not an approval verdict.'
+                  : 'Discussion state: ${meeting['state'] ?? 'unavailable'}',
+            ),
+            if (candidate == null)
+              const Text(
+                'This older review has no recorded candidate. Compare its findings with the latest changes.',
+              )
+            else if (!current)
+              const Text(
+                'This review concerns an earlier candidate. Review the latest changes before completing the task.',
+              ),
+            if (acceptance != null)
+              Text(
+                'Acceptance review: ${acceptance['state'] ?? 'not recorded'} · ${acceptance['reason'] ?? ''}',
+              ),
+            if (result.isNotEmpty)
+              SelectableText(
+                result.length > 1200 ? '${result.substring(0, 1200)}…' : result,
+              ),
+            if (ready)
+              const Text(
+                'Before marking done, check whether each follow-up fixes an unmet acceptance criterion or is an independent improvement. A draft alone does not record that decision.',
+              ),
+            const Text(
+              'Follow-up drafts do not reserve agents. The original execution is handed off only after its completion evidence and session are verified.',
+            ),
+            TextButton(
+              onPressed: () => setState(() {
+                section = 'Activity & agents';
+                expandedMeetings.add('${meeting['job_id']}');
+              }),
+              child: const Text('Read full group review'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _nextAction(Map<String, dynamic> task) {
     final target = task['merge_sha'] ?? task['head_sha'];
     final evidence = (task['builds'] as Map?)?[target] as Map?;
@@ -1897,7 +2311,7 @@ class _TasksPageState extends State<TasksPage> {
               ? () => review(task)
               : null,
           icon: const Icon(Icons.rate_review),
-          label: const Text('Review latest commit'),
+          label: const Text('Review and publish on GitHub'),
         );
       }
       if (verified) return const SizedBox.shrink();
@@ -1960,7 +2374,7 @@ class _TasksPageState extends State<TasksPage> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Text(
-              taskNextStep(task),
+              taskNextStep(task, executor: executor),
               style: Theme.of(context).textTheme.titleMedium,
             ),
           ),
@@ -2014,10 +2428,21 @@ class _TasksPageState extends State<TasksPage> {
               ),
           if (task['review_error'] != null)
             Text('Group review waiting: ${task['review_error']}'),
+          if (task['pull_notice'] != null) Text('${task['pull_notice']}'),
 
           if (github['configured'] != true)
-            const Text(
-              'GitHub publishing is not configured. Local implementation and validation remain available.',
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'GitHub publishing is not configured. Local group review and validation remain available. Publishing requires GitHub setup.',
+                ),
+                TextButton.icon(
+                  onPressed: admin && !busy ? configure : null,
+                  icon: const Icon(Icons.key),
+                  label: const Text('Set up GitHub publishing'),
+                ),
+              ],
             ),
           const SizedBox(height: 12),
           Wrap(
@@ -2039,6 +2464,7 @@ class _TasksPageState extends State<TasksPage> {
           ),
           const SizedBox(height: 20),
           if (section == 'Overview') ...[
+            _groupReviewStatus(task),
             if (task['availability']?['state'] == 'decision') _decision(task),
             if (task['source'] is Map) ...[
               Text(
@@ -2080,7 +2506,7 @@ class _TasksPageState extends State<TasksPage> {
                   ),
                   children: [
                     SelectableText(
-                      '${consult['answer'] ?? ''}${(consult['error'] as String? ?? '').isNotEmpty ? '\n' + consult['error'] : ''}',
+                      '${consult['answer'] ?? ''}${(consult['error'] as String? ?? '').isNotEmpty ? '\n${consult['error']}' : ''}',
                     ),
                   ],
                 ),
@@ -2275,6 +2701,11 @@ class _TasksPageState extends State<TasksPage> {
             SelectableText(
               'Branch: ${task['branch']}\nBase: ${task['base_ref']} \u00b7 ${task['base_sha']}\nCandidate: ${task['head_sha'] ?? 'Not captured'}',
             ),
+            if (task['github_repository'] != null)
+              SelectableText(
+                'Publish branch to: ${task['publishing_repository'] ?? task['github_repository']}\n'
+                'Open draft PR into: ${task['github_repository']}',
+              ),
             if (task['pull'] is Map) ...[
               SelectableText(
                 'PR #${task['pull']['number']} \u00b7 ${pullStatus(task)}\n${task['pull']['url']}',
@@ -2406,10 +2837,20 @@ class _TasksPageState extends State<TasksPage> {
               : null,
           child: const Text('Review and publish'),
         ),
+      if (task['publish'] == null &&
+          task['github_repository'] != null &&
+          (github['publication'] as Map?)?[task['github_repository']]?['mode'] ==
+              'fork')
+        OutlinedButton(
+          onPressed: admin && !busy && github['configured'] == true
+              ? () => choosePublication(task)
+              : null,
+          child: const Text('Publication destination'),
+        ),
       if (task['publish'] != null && task['pull'] == null)
         FilledButton(
           onPressed: admin && !busy && github['configured'] == true
-              ? () => act('pull', {'task_id': task['id']})
+              ? () => previewPull(task)
               : null,
           child: const Text('Open draft PR'),
         ),

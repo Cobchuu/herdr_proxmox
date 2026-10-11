@@ -22,6 +22,97 @@ worker_spec.loader.exec_module(worker)
 
 
 class UpdateTests(unittest.TestCase):
+    def test_missing_routes_are_diagnosed_without_modifying_network(self):
+        error = updates.URLError(updates.socket.gaierror(-3, 'DNS unavailable'))
+        def command(args, **kwargs):
+            return MagicMock(returncode=2 if 'get' in args else 0, stdout='')
+        with patch.object(updates.subprocess, 'run', side_effect=command) as run:
+            message = updates.lookup_diagnostic(error)
+        self.assertIn('No route to the Internet', message)
+        self.assertIn('survives a reboot', message)
+        self.assertEqual([c.args[0] for c in run.call_args_list], [
+            ['ip', '-4', 'route', 'get', '8.8.8.8'],
+            ['ip', '-4', 'route', 'show', 'default'],
+            ['ip', '-6', 'route', 'get', '2001:4860:4860::8888'],
+            ['ip', '-6', 'route', 'show', 'default']])
+        self.assertIn('IPv4 default route: not configured', message)
+        self.assertIn('ip route add default is temporary', message)
+        self.assertTrue(all(c.kwargs['timeout'] == updates.ROUTE_TIMEOUT for c in run.call_args_list))
+
+    def test_dns_diagnosis_handles_ipv6_and_unavailable_ip_command(self):
+        error = updates.URLError(updates.socket.gaierror(-3, 'DNS unavailable'))
+        for results in ([MagicMock(returncode=2), MagicMock(returncode=0, stdout=''),
+                         MagicMock(returncode=0), MagicMock(returncode=0, stdout='default via fe80::1 dev eth0')], FileNotFoundError()):
+            with patch.object(updates.subprocess, 'run', side_effect=results):
+                self.assertIn('DNS lookup failed', updates.lookup_diagnostic(error))
+        with patch.object(updates.subprocess, 'run') as run:
+            self.assertIsNone(updates.lookup_diagnostic(updates.HTTPError('https://api.github.com', 403, 'Forbidden', {}, None)))
+            run.assert_not_called()
+
+    def test_configured_routes_are_not_claimed_reachable(self):
+        for lookup in (0, 2):
+            def command(args, **kwargs):
+                return MagicMock(returncode=lookup if 'get' in args else 0,
+                                 stdout='default via 10.0.0.1 dev eth0' if args[1] == '-4' else '')
+            with patch.object(updates.subprocess, 'run', side_effect=command):
+                message = updates.lookup_diagnostic(TimeoutError('Timed out'))
+            self.assertIn('default via 10.0.0.1 dev eth0', message)
+            self.assertIn('Gateway reachability was not tested', message)
+            self.assertNotIn('No route to the Internet was found', message)
+
+    def test_probe_limitations_are_reported(self):
+        for error, expected in ((FileNotFoundError(), 'ip is unavailable'),
+                                (updates.subprocess.TimeoutExpired('ip', 2), 'timed out')):
+            with patch.object(updates.subprocess, 'run', side_effect=error):
+                message = updates.lookup_diagnostic(updates.socket.gaierror(-3, 'DNS unavailable'))
+            self.assertIn(expected, message)
+            self.assertIn('Routing could not be fully checked', message)
+            self.assertNotIn('No route to the Internet was found', message)
+
+    def test_failures_log_on_change_count_retries_and_reset_on_recovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = updates.Updates(root, root / 'queue', root / 'status.json')
+            error = updates.URLError(updates.socket.gaierror(-3, 'DNS unavailable'))
+            release = dict(tag_name='v0.0.2', html_url='https://example.test/release')
+            with patch.object(updates, 'latest_release', side_effect=[error, error, TimeoutError('Timed out'), release, error]) as fetch, \
+                    patch.object(updates, 'lookup_diagnostic', return_value='Check gateway'), \
+                    patch.object(updates.logging, 'getLogger') as logger:
+                first = service.snapshot()
+                self.assertEqual(first['check_failures'], 1)
+                self.assertIn('T', first['check_failed_since'])
+                self.assertEqual(service.snapshot()['check_failures'], 1)
+                self.assertEqual(fetch.call_count, 1)  # Cached reads are not failed attempts.
+                second = service.snapshot(force=True)
+                self.assertEqual(second['check_failures'], 2)
+                self.assertEqual(first['check_failed_since'], second['check_failed_since'])
+                self.assertEqual(service.snapshot(force=True)['check_failures'], 3)
+                recovered = service.snapshot(force=True)
+                self.assertEqual(recovered['check_failures'], 0)
+                self.assertIsNone(recovered['check_failed_since'])
+                self.assertEqual(service.snapshot(force=True)['check_failures'], 1)
+                self.assertEqual([c.args[0] for c in logger.return_value.log.call_args_list],
+                                 [updates.logging.WARNING, updates.logging.DEBUG, updates.logging.WARNING, updates.logging.WARNING])
+                logger.return_value.info.assert_called_once_with(
+                    'Release lookup recovered after %d failures since %s', 3, first['check_failed_since'])
+
+    def test_manual_retry_recovers_immediately_and_clears_diagnosis(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = updates.Updates(root, root / 'queue', root / 'status.json')
+            release = dict(tag_name='v0.0.2', html_url='https://example.test/release')
+            with patch.object(updates, 'latest_release', side_effect=[
+                    updates.URLError(updates.socket.gaierror(-3, 'DNS unavailable')), release]) as fetch, \
+                    patch.object(updates, 'lookup_diagnostic', return_value='Missing gateway'):
+                self.assertEqual(service.snapshot()['check_diagnostic'], 'Missing gateway')
+                service.snapshot()
+                self.assertEqual(fetch.call_count, 1)
+                recovered = service.snapshot(force=True)
+                self.assertEqual(recovered['latest'], 'v0.0.2')
+                self.assertIsNone(recovered['check_error'])
+                self.assertIsNone(recovered['check_diagnostic'])
+                self.assertEqual(fetch.call_count, 2)
+
     def test_release_source_provenance_is_preserved_and_mismatches_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
@@ -133,7 +224,7 @@ class UpdateTests(unittest.TestCase):
                     finish.set()
                     worker_thread.join(3)
                 self.assertFalse(worker_thread.is_alive())
-                self.assertEqual(service.snapshot(force=True)['latest'], 'v0.0.2')
+                self.assertEqual(service.snapshot()['latest'], 'v0.0.2')
                 self.assertEqual(fetch.call_count, 1)
 
     def test_bad_checksum_does_not_stop_gateway(self):

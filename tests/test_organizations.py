@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 import uuid
 from types import SimpleNamespace
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('organization_gateway', Path(__file__).parents[1] / 'web/gateway/server.py')
 gateway = importlib.util.module_from_spec(spec)
@@ -21,6 +23,12 @@ class OrganizationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.projects = self.root / 'projects'
         self.projects.mkdir()
+        from permissions import prepare_permissions
+        self.permission_patch = patch('organizations.prepare_permissions',
+            side_effect=lambda profile, output_root, **kwargs: prepare_permissions(
+                profile, output_root, home=self.root / 'home', **kwargs))
+        self.permission_patch.start()
+        self.addCleanup(self.permission_patch.stop)
         self.calls = []
         self.agents = {}
         self.store = gateway.OrganizationStore(self.root / 'data/org.sqlite3', self.projects, self.command)
@@ -379,12 +387,17 @@ class OrganizationTests(unittest.TestCase):
         self.drain()
         run = self.store.update_job(run_id, agent_session=None)
         self.agents[run['alias']].pop('agent_session', None)
-        inventory = dict(cwd=run['source_project'], panes=[dict(pane_id=run['pane_id'])])
+        inventory = dict(cwd=run['source_project'], panes=None)
         original = self.store.command
         def command(*args, **kwargs):
             if args == ('workspace', 'list'):
-                return {'workspaces': [dict(workspace_id=run['pane_id'].split(':')[0], cwd=inventory['cwd'])]}
+                # Herdr 0.9.3 reports no cwd or worktree on a workspace, so the
+                # pane directory is the only checkout evidence available.
+                return {'workspaces': [dict(workspace_id=run['pane_id'].split(':')[0],
+                                            agent_status='idle', label='Agent')]}
             if args[:2] == ('pane', 'list'):
+                if inventory['panes'] is None:
+                    return {'panes': [dict(pane_id=run['pane_id'], cwd=inventory['cwd'])]}
                 return {'panes': inventory['panes']}
             return original(*args, **kwargs)
         self.store.command = command
@@ -440,23 +453,118 @@ class OrganizationTests(unittest.TestCase):
             self.store.manage_session(dict(job_id=run['id'], organization_id=run['organization_id'], mode='finish', inspected=True), 'admin')
         self.assertFalse(any(args[:2] == ('pane', 'close') for args, _ in self.calls))
 
+    def test_only_states_that_hold_sessions_count_as_owners(self):
+        # One predicate is shared by release, removal, task launch, meeting
+        # admission, integration work and finalization. Getting it wrong in one
+        # place is how a blocked discussion lost its participants.
+        from session_ownership import active, reserves
+        self.assertTrue(active(dict(state='queued')))
+        self.assertTrue(active(dict(state='running')))
+        self.assertTrue(active(dict(state='waiting_for_input')))
+        # A meeting waiting to acquire its members does not hold them.
+        self.assertFalse(active(dict(state='waiting_for_members')))
+        for terminal in ('artifact_ready', 'cancelled', 'completed', 'finished', 'released', 'answered'):
+            self.assertFalse(active(dict(state=terminal)), terminal)
+        self.assertFalse(active(None))
+        held = dict(state='waiting_for_input', participants=['a', 'b'])
+        self.assertTrue(reserves(held))
+        self.assertTrue(reserves(held, 'a'))
+        self.assertFalse(reserves(held, 'c'))
+        # A job with no participant list reserves the profile it was created for.
+        self.assertTrue(reserves(dict(state='running', profile_id='a'), 'a'))
+        self.assertFalse(reserves(dict(state='running', profile_id='a'), 'b'))
+        # A null participant list must fall back, not raise on `in None`.
+        self.assertTrue(reserves(dict(state='running', participants=None, profile_id='a'), 'a'))
+        self.assertFalse(reserves(dict(state='running', participants=None, profile_id='a'), 'b'))
+
+    def test_a_launch_generates_a_scoped_agent_file_without_extra_overrides(self):
+        # Every OpenCode launch selects a dashboard primary agent, so the
+        # generated file is part of the launch contract, not just a permission
+        # helper. Selecting an agent can change prompts and tool configuration,
+        # so only the declared policy, model and variant may appear.
+        org = self.organization()
+        profile = self.hire(org, runtime='opencode', provider='opencode-go',
+                            model='deepseek-v4.1-flash', reasoning='high')
+        job_id = self.action('launch', organization_id=org, profile_id=profile)
+        self.drain()
+        run = next(j for j in self.store.snapshot()['jobs'] if j['id'] == job_id)
+        self.assertEqual(run['state'], 'persona_sent', run.get('error'))
+        path = self.root / 'home/.config/opencode/agents' / ('herdr-dashboard-' + profile + '.md')
+        self.assertTrue(path.is_file(), 'the launch must generate its agent file')
+        self.assertFalse(path.is_symlink())
+        if os.name != 'nt':
+            # Windows chmod only toggles the read-only bit, so the mode is
+            # synthesized there and only meaningful on a POSIX host.
+            self.assertEqual(path.stat().st_mode & 0o077, 0, 'the agent file must stay private')
+        content = path.read_text(encoding='utf-8')
+        self.assertIn('mode: primary', content)
+        self.assertIn('permission: ', content)
+        self.assertIn('"opencode-go/deepseek-v4.1-flash"', content)
+        self.assertIn('"high"', content)
+        # Frontmatter only. OpenCode treats a Markdown body as a system-prompt
+        # override, so an empty body is what leaves the provider's own
+        # instructions in effect rather than merely reworded ones.
+        self.assertTrue(content.endswith('---\n'), content)
+        self.assertEqual(content.split('---\n')[-1], '', 'the agent must not override the system prompt')
+        for unexpected in ('temperature', 'max_tokens', 'max_steps', 'tools:', 'autonom'):
+            self.assertNotIn(unexpected, content)
+        # The arguments select that exact file and carry the same model.
+        arguments = list(run['launch_arguments'])
+        self.assertIn('--agent', arguments)
+        self.assertEqual(arguments[arguments.index('--agent') + 1], 'herdr-dashboard-' + profile)
+        self.assertIn('opencode-go/deepseek-v4.1-flash', arguments)
+
+    def test_every_launch_grants_the_chat_reply_directory(self):
+        # Any agent can be asked to save a chat reply, and the launch happens
+        # before that chat exists, so the grant cannot be decided from the job
+        # kind. A `kind == 'chat'` check here is unreachable: chats are handled
+        # by collaboration.execute, not the launch branch.
+        from unittest.mock import patch
+        granted = []
+        def permissions(profile, output_root, home=None, output_directories=()):
+            granted.append(tuple(output_directories))
+            return []
+        with patch('organizations.prepare_permissions', side_effect=permissions):
+            org = self.organization()
+            profile = self.hire(org)
+            self.action('launch', organization_id=org, profile_id=profile)
+            self.drain()
+        self.assertTrue(granted, 'the launch must prepare permissions')
+        self.assertTrue(all('chat-replies' in dirs for dirs in granted), granted)
+
     def test_created_pane_recovers_from_authoritative_checkout_records(self):
         def command(*args, **kwargs):
             if args == ('workspace', 'list'):
-                return {'workspaces': [dict(workspace_id='w42', worktree=dict(checkout_path=str(self.projects)))]}
+                # Herdr reports no cwd or worktree on a workspace, so the pane
+                # directory is the only checkout evidence available.
+                return {'workspaces': [dict(workspace_id='w42', agent_status='idle', label='Agent')]}
             if args == ('pane', 'list', '--workspace', 'w42'):
-                return {'panes': [dict(pane_id='w42:p1')]}
+                return {'panes': [dict(pane_id='w42:p1', cwd=str(self.projects))]}
             self.fail(f'Unexpected command: {args}')
         self.store.command = command
         self.assertEqual(self.store.created_pane({}, str(self.projects)), ('w42:p1', 'w42'))
+
+    def test_created_pane_refuses_an_ambiguous_checkout(self):
+        # Two panes in the created directory cannot identify one root pane.
+        def command(*args, **kwargs):
+            if args == ('workspace', 'list'):
+                return {'workspaces': [dict(workspace_id='w42', agent_status='idle')]}
+            if args == ('pane', 'list', '--workspace', 'w42'):
+                return {'panes': [dict(pane_id='w42:p1', cwd=str(self.projects)),
+                                  dict(pane_id='w42:p2', cwd=str(self.projects))]}
+            self.fail(f'Unexpected command: {args}')
+        self.store.command = command
+        with self.assertRaisesRegex(ValueError, 'uniquely resolve'):
+            self.store.created_pane({}, str(self.projects))
 
     def test_created_pane_accepts_letter_counters_in_both_response_paths(self):
         self.assertEqual(self.store.created_pane(
             {'root_pane': {'pane_id': 'wA:pB'}, 'workspace': {'workspace_id': 'wA'}},
             str(self.projects)), ('wA:pB', 'wA'))
         self.store.command = lambda *args, **kwargs: (
-            {'workspaces': [dict(workspace_id='wB', cwd=str(self.projects))]}
-            if args == ('workspace', 'list') else {'panes': [dict(pane_id='wB:pA')]})
+            {'workspaces': [dict(workspace_id='wB', agent_status='idle')]}
+            if args == ('workspace', 'list')
+            else {'panes': [dict(pane_id='wB:pA', cwd=str(self.projects))]})
         self.assertEqual(self.store.created_pane({}, str(self.projects)), ('wB:pA', 'wB'))
 
     def test_direct_root_pane_normalizes_unusable_workspace_metadata(self):
@@ -470,13 +578,19 @@ class OrganizationTests(unittest.TestCase):
             {'root_pane': {'pane_id': 'wA:pB'}}, str(self.projects)), ('wA:pB', None))
 
     def test_created_pane_rejects_ambiguous_checkout_or_wrong_workspace_pane(self):
-        self.store.command = lambda *args, **kwargs: {'workspaces': [
-            dict(workspace_id='w42', worktree=dict(checkout_path=str(self.projects))),
-            dict(workspace_id='w43', cwd=str(self.projects))]}
+        # Two panes in the created directory cannot identify one root pane.
+        self.store.command = lambda *args, **kwargs: (
+            {'workspaces': [dict(workspace_id='w42', agent_status='idle'),
+                            dict(workspace_id='w43', agent_status='idle')]}
+            if args == ('workspace', 'list')
+            else {'panes': [dict(pane_id=args[3] + ':p1', cwd=str(self.projects))]})
         with self.assertRaisesRegex(ValueError, 'uniquely'):
             self.store.created_pane({}, str(self.projects))
-        self.store.command = lambda *args, **kwargs: ({'workspaces': [dict(workspace_id='w42', worktree=dict(checkout_path=str(self.projects)))]}
-            if args == ('workspace', 'list') else {'panes': [dict(pane_id='w99:p1')]})
+        # A pane whose ID does not belong to its workspace is not a root pane.
+        self.store.command = lambda *args, **kwargs: (
+            {'workspaces': [dict(workspace_id='w42', agent_status='idle')]}
+            if args == ('workspace', 'list')
+            else {'panes': [dict(pane_id='w99:p1', cwd=str(self.projects))]})
         with self.assertRaisesRegex(ValueError, 'valid root pane'):
             self.store.created_pane({}, str(self.projects))
 
@@ -486,9 +600,9 @@ class OrganizationTests(unittest.TestCase):
             if args[:2] == ('workspace', 'create'):
                 return {'type': 'workspace_created'}
             if args == ('workspace', 'list'):
-                return {'workspaces': [dict(workspace_id='wB', worktree=dict(checkout_path=str(self.projects)))]}
+                return {'workspaces': [dict(workspace_id='wB', agent_status='idle')]}
             if args == ('pane', 'list', '--workspace', 'wB'):
-                return {'panes': [dict(pane_id='wB:pA')]}
+                return {'panes': [dict(pane_id='wB:pA', cwd=str(self.projects))]}
             return original(*args, **kwargs)
         self.store.command = command
         org = self.organization()
@@ -702,13 +816,63 @@ class OrganizationTests(unittest.TestCase):
             run = next(j for j in self.store.snapshot()['jobs'] if j['id'] == job_id)
             self.assertEqual(run['state'], 'persona_sent', run['error'])
             call = next(args for args, _ in self.calls if args[:3] == ('agent', 'start', run['alias']))
-            if runtime == 'opencode' and config.get('reasoning'):
+            # Every OpenCode launch selects a dashboard agent file: the
+            # chat-reply grant is part of the protocol, and a permission policy
+            # can only be attached through an agent. Other runtimes take their
+            # model arguments directly.
+            if runtime == 'opencode':
                 expected = expected + ['--agent', 'herdr-dashboard-' + profile_id]
             self.assertEqual(list(call[call.index('--') + 1:]), expected)
             self.assertEqual(run['launch_arguments'], expected)
         for config in [dict(provider='openai'), dict(model='test-model'), dict(provider='-bad', model='model')]:
             with self.assertRaises(ValueError):
                 self.hire(org, runtime='opencode', **config)
+
+    def test_launch_path_generates_neutral_scoped_opencode_configuration(self):
+        org = self.organization()
+        cases = [
+            ('opencode', {}),
+            ('opencode', dict(provider='openai', model='test-model')),
+            ('opencode', dict(provider='openai', model='test-model', reasoning='high')),
+            ('opencode', dict(permission_mode='dashboard_outputs', accessible_paths=['~/shared/**'])),
+            ('opencode', dict(permission_mode='full_autonomy')),
+            ('codex', {}), ('claude', {}),
+        ]
+        for runtime, config in cases:
+            with self.subTest(runtime=runtime, config=config):
+                profile_id = self.hire(org, runtime=runtime, **config)
+                job_id = self.action('launch', organization_id=org, profile_id=profile_id)
+                self.drain()
+                run = next(j for j in self.store.job_records() if j['id'] == job_id)
+                self.assertEqual(run['state'], 'persona_sent', run['error'])
+                path = self.root / 'home/.config/opencode/agents' / ('herdr-dashboard-' + profile_id + '.md')
+                if runtime != 'opencode':
+                    self.assertFalse(path.exists())
+                    self.assertNotIn('--agent', run['launch_arguments'])
+                    continue
+                text = path.read_text(encoding='utf-8')
+                frontmatter, instructions = text.split('---\n')[1:]
+                self.assertEqual(instructions, '')
+                fields = dict(line.split(': ', 1) for line in frontmatter.splitlines())
+                self.assertEqual(fields['mode'], 'primary')
+                policy = json.loads(fields['permission'])
+                mode = config.get('permission_mode', 'default')
+                if mode == 'full_autonomy':
+                    self.assertEqual(policy, 'allow')
+                else:
+                    expected = {str(self.store.path.parent / 'chat-replies' / '**')}
+                    if mode == 'dashboard_outputs':
+                        expected.update([str(self.store.path.parent / 'discussion-artifacts' / '**'), '~/shared/**'])
+                    self.assertEqual(policy, {'external_directory': {p: 'allow' for p in expected}})
+                if config.get('reasoning'):
+                    self.assertEqual(json.loads(fields['model']), 'openai/test-model')
+                    self.assertEqual(json.loads(fields['variant']), 'high')
+                else:
+                    self.assertNotIn('variant', fields)
+                    self.assertNotIn('model', fields)
+                self.assertEqual(run['launch_arguments'][-2:], ['--agent', 'herdr-dashboard-' + profile_id])
+                sent = next(a for a, _ in self.calls if a[:3] == ('agent', 'start', run['alias']))
+                self.assertEqual(list(sent[sent.index('--') + 1:]), run['launch_arguments'])
 
     def test_persistence_idempotency_and_payload_conflict(self):
         body = {'request_id': 'unique_request_1', 'name': 'Engineering', 'purpose': 'Build', 'instructions': ''}

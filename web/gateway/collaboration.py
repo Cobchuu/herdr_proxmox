@@ -1,14 +1,21 @@
 """Persisted agent chat and dedicated Herdr group conversations."""
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import sqlite3
 import subprocess
 import json
 from pathlib import Path
 import uuid
-
 from organizations import now, text
-from permissions import accessible_paths, permission_mode
-from herdr_errors import parse_completion
+from session_ownership import active as session_active, reserves as session_reserves
+from permissions import accessible_paths, permission_mode, prepare_permissions
+from herdr_errors import HerdrError, parse_completion
+
+# Backstop for a wedged socket, not a work budget. Herdr's settled-state wait
+# decides when a discussion has finished; this only prevents a hung call from
+# occupying the worker indefinitely.
+DISCUSSION_WAIT_SECONDS = 7200
 
 
 def active_run(store, db, organization_id, profile_id):
@@ -87,37 +94,30 @@ def action(store, db, name, body, org):
         job = store.get(db, 'jobs', text(body, 'job_id', 40), org_id)
         if job['kind'] != 'discussion' or job['state'] not in ('needs_attention', 'uncertain', 'artifact_ready'):
             raise ValueError('Only interrupted discussions can recover saved output.')
-        if job['state'] == 'artifact_ready':
+        if job['state'] == 'artifact_ready' and (job.get('completion') or {}).get('state'):
             return job
-        participants = set(job['participants'])
-        for row in db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,)):
-            other = json.loads(row['data'])
-            if other['id'] != job['id'] and other['state'] in ('queued', 'running') and participants.intersection(other.get('participants', [other.get('profile_id')])):
-                raise ValueError('Wait for other tasks using these agents before recovering output.')
-        for saved in [job['group_run'], *job['runs']]:
-            run = store.get(db, 'jobs', saved['id'], org_id)
-            if run['state'] != 'persona_sent':
-                raise ValueError('Run binding was released. Saved output cannot be recovered from this conversation.')
-            try:
-                store.identity(run)
-            except ValueError as error:
-                raise ValueError(f"{run['profile']['name']}: {error}") from error
-        result, contributions = discussion_documents(store, job)
-        job.update(state='artifact_ready', result=result, contributions=contributions, knowledge=discussion_transcript(store, job).get('knowledge', []),
-                   artifact_name='action-plan.md', progress='Saved group response recovered',
-                   previous_error=job.get('error', ''), error='', recovered_at=now(), updated_at=now())
-        store.put(db, 'jobs', job)
-        return job
+        # The button runs the same verified routine as automatic recovery, so
+        # it can never mean "trust these files anyway".
+        return finalize_discussion(store, job['id'], 'operator_recovery')
     if name == 'inspect' and body.get('job_id'):
         return inspect_discussion(store, db, body, org_id)
     if name == 'group':
         ids = body.get('members')
         if not isinstance(ids, list) or not 2 <= len(ids) <= 6 or not all(isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
             raise ValueError('Choose 2–6 distinct agents for the group.')
+        members = []
         for profile_id in ids:
             member = store.get(db, 'profiles', profile_id, org_id)
             if member.get('group_id'):
                 raise ValueError('Select member agents, not other group conversations.')
+            members.append(member)
+        # Validate against every member's runtime. Reading the loop variable
+        # after the loop would check only the last member, so a mixed-runtime
+        # group could accept a mode that another member cannot use. Both
+        # helpers return the same value for every runtime and only differ in
+        # what they reject, so the first result is the group's policy.
+        policies = [(permission_mode(body, member['runtime']),
+                     accessible_paths(body, member['runtime'])) for member in members]
         item_id = text(body, 'id', 40, optional=True) or uuid.uuid4().hex
         if body.get('id'):
             store.get(db, 'groups', item_id, org_id)
@@ -125,8 +125,8 @@ def action(store, db, name, body, org):
         item = dict(id=item_id, organization_id=org_id, name=text(body, 'name'),
                     description=text(body, 'description', 8000), members=ids, updated_at=now(),
                     read_only=body.get('read_only', True),
-                    permission_mode=permission_mode(body, member['runtime']))
-        item['accessible_paths'] = accessible_paths(body, member['runtime'])
+                    permission_mode=policies[0][0])
+        item['accessible_paths'] = policies[0][1]
         item['use_worktree'] = body.get('use_worktree', True)
         if not isinstance(item['use_worktree'], bool):
             raise ValueError('Use worktree must be true or false.')
@@ -144,8 +144,8 @@ def action(store, db, name, body, org):
             item['create_tasks_since'] = (
                 previous.get('create_tasks_since') or previous.get('updated_at') or item['updated_at']
             ) if previous.get('create_tasks') is True else item['updated_at']
-        if (item['permission_mode'] != 'default' or item['accessible_paths']) and any(store.get(db, 'profiles', i, org_id)['runtime'] != 'opencode' for i in ids):
-            raise ValueError('Choose CLI defaults for groups containing other runtimes.')
+        # The per-member policy checks above already reject a non-default mode
+        # or accessible paths for a runtime that cannot use them.
         if previous.get('facilitator_id'):
             item['facilitator_id'] = previous['facilitator_id']
         run = launch_group(store, db, item, org)
@@ -181,11 +181,29 @@ def action(store, db, name, body, org):
     ids = set(group['members']) if name == 'discuss' else {run['profile_id'] for run in runs}
     if name == 'discuss':
         ids.add(group_run['profile_id'])
-    for row in db.execute('SELECT data FROM jobs'):
-        job = json.loads(row['data'])
+    decision_job = None
+    # Exhaust and close the SQLite cursor before any live CLI verification.
+    # Admission remains serialized by the store lock, but holds no read cursor.
+    with closing(db.execute('SELECT data FROM jobs')) as cursor:
+        jobs = [json.loads(row['data']) for row in cursor.fetchall()]
+    for job in jobs:
         if name == 'discuss' and job['id'] == group_run['id']:
             continue
-        if name != 'discuss' and job['state'] in ('queued', 'running') and ids.intersection(job.get('participants', [job.get('profile_id')])):
+        if not ids.intersection(job.get('participants') or [job.get('profile_id')]):
+            continue
+        if name == 'input':
+            # Typing a key into a blocked agent is the operator's answer to the
+            # decision that holds its reservation, not new work. Without this
+            # exception a blocked discussion could never be resolved through
+            # the dashboard. Interrupting an agent that is actually working is
+            # still refused.
+            if job.get('state') in ('queued', 'running'):
+                raise ValueError('An agent already has queued or running task work. Wait for it to finish.')
+            if job.get('state') == 'waiting_for_input':
+                verify_decision_input(store, job, runs[0])
+                decision_job = job['id']
+            continue
+        if name != 'discuss' and session_active(job):
             raise ValueError('An agent already has a queued or running task. Wait for it to finish.')
     item = dict(id=uuid.uuid4().hex, organization_id=org_id,
                 kind=name if name in ('chat', 'input') else 'discussion', participants=list(ids), runs=runs,
@@ -194,7 +212,8 @@ def action(store, db, name, body, org):
         key = text(body, 'key', 16)
         if key not in ('enter', 'esc', 'up', 'down', 'tab', 'shift+tab', 'ctrl+c'):
             raise ValueError('Unsupported terminal key.')
-        item.update(profile_id=runs[0]['profile_id'], key=key, actor=str(body.get('_actor') or 'administrator')[:120])
+        item.update(profile_id=runs[0]['profile_id'], key=key, actor=str(body.get('_actor') or 'administrator')[:120],
+                    decision_job_id=decision_job)
     elif name == 'chat':
         item.update(profile_id=runs[0]['profile_id'], prompt=text(body, 'prompt', 8000),
                     wait_seconds=wait_seconds(body), integration_event=body.get('integration_event'))
@@ -216,6 +235,12 @@ def current_run(store, run, ready=True):
         raise ValueError('Run binding was released. Launch and select an agent again.')
     try:
         store.identity(current, ready=ready)
+    except HerdrError as error:
+        # Preserve the code and delivery certainty. Callers classify blocked and
+        # ambiguous delivery from them, and a plain ValueError loses both: a
+        # blocked agent reached through here was reported as an unknown failure.
+        raise HerdrError(f"{current['profile']['name']}: {error}", error.code,
+                         error.operation, error.delivery) from error
     except ValueError as error:
         raise ValueError(f"{current['profile']['name']}: {error}") from error
     return current
@@ -262,8 +287,13 @@ def wait_seconds(body):
     return value
 
 
-def read_contribution(path, limit=40000, label='discussion document'):
-    """Read bounded output; preserve the exact reason for operator recovery."""
+def read_document(path, limit=40000, label='discussion document'):
+    """Read one bounded UTF-8 document, returning the exact bytes and the text.
+
+    Completion receipts are hashed over the bytes the agent wrote, so the bytes
+    must survive to verification. Returning a normalized copy here would make
+    every receipt mismatch by a trailing newline.
+    """
     prefix = f'Agent did not produce a valid {label}'
     if path.is_symlink():
         raise ValueError(f'{prefix}: symlink rejected at {path}.')
@@ -278,14 +308,20 @@ def read_contribution(path, limit=40000, label='discussion document'):
             data = stream.read(limit + 1)
         if len(data) > limit:
             raise ValueError(f'{prefix}: exceeds maximum {limit} bytes at {path}.')
-        result = data.decode('utf-8').strip()
+        text = data.decode('utf-8')
     except FileNotFoundError:
         raise ValueError(f'{prefix}: file missing at {path}.') from None
     except (OSError, UnicodeError) as error:
         raise ValueError(f'{prefix}: unreadable UTF-8 file at {path} ({type(error).__name__}).') from error
-    if not result:
-        raise ValueError(f'{prefix}: empty file at {path}.')
-    return result
+    return data, text
+
+
+def read_contribution(path, limit=40000, label='discussion document'):
+    """Read bounded output; preserve the exact reason for operator recovery."""
+    text = read_document(path, limit, label)[1].strip()
+    if not text:
+        raise ValueError(f'Agent did not produce a valid {label}: empty file at {path}.')
+    return text
 
 
 def validate_contributions(contributions, runs):
@@ -309,18 +345,247 @@ def discussion_directory(store, job):
     return directory
 
 
-def discussion_transcript(store, job):
-    """Normalized export; the original agent-written document stays untouched."""
-    data = json.loads(read_contribution(discussion_directory(store, job) / 'discussion.json', 750000))
+def verify_decision_input(store, owner, run):
+    """Decision keys apply only to the original, currently blocked conversation."""
+    if owner.get('state') != 'waiting_for_input':
+        raise ValueError('The discussion is no longer waiting for a decision.')
+    saved = next((r for r in [owner.get('group_run', {}), *owner.get('runs', [])]
+                  if r.get('id') == run['id']), None)
+    if not saved:
+        raise ValueError('This conversation does not own the discussion decision.')
+    current = current_run(store, saved, ready=False)
+    if current.get('alias') != run.get('alias') or current.get('agent_session') != run.get('agent_session'):
+        raise ValueError('Original conversation was replaced; inspect the session again.')
+    agent = store.command('agent', 'get', current['alias'], timeout=2).get('agent')
+    store.identity(current, ready=False, agent=agent)
+    if agent.get('agent_status', agent.get('state')) != 'blocked':
+        raise ValueError('Agent is no longer blocked; inspect the session before sending a decision.')
+    return current
+
+
+def parse_discussion_transcript(text, job):
+    """Validate the same snapshot of the transcript that completion hashes."""
+    data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError('Discussion transcript must be a JSON object.')
     validate_contributions(data.get('contributions'), job['runs'])
     return data
 
 
+def discussion_transcript(store, job):
+    """Normalized export; the original agent-written document stays untouched."""
+    return parse_discussion_transcript(
+        read_contribution(discussion_directory(store, job) / 'discussion.json', 750000), job)
+
+
 def discussion_documents(store, job):
     result = read_contribution(discussion_directory(store, job) / 'action-plan.md')
     return result, discussion_transcript(store, job)['contributions']
+
+
+# Completion contract for discussions. 1 is the legacy contract, where a
+# validated artifact and transcript are the completion evidence. 2 requires the
+# facilitator to also write a receipt binding its final output, because the
+# prompt tells it to update the artifact while synthesising, so a valid-looking
+# file can still be a draft.
+DISCUSSION_CONTRACT = 2
+RECEIPT_NAME = 'receipt.json'
+
+
+def discussion_state(job):
+    """Normalized delivery, execution and output facts for one discussion.
+
+    One generic state conflated three independent facts, which is how a
+    submitted discussion came to be reported as "no prompt was sent". Legacy
+    jobs recorded only a submission timestamp, so they are normalized on read
+    rather than rewritten.
+    """
+    state = job.get('state')
+    submission = dict(job.get('submission') or {})
+    execution = dict(job.get('execution') or {})
+    artifact = dict(job.get('artifact') or {})
+    if not submission:
+        # `discussion_submitted_at` was written before the prompt was sent, so
+        # its presence means an attempt was made, and its absence means the
+        # discussion failed during preparation and was never submitted.
+        if job.get('discussion_submitted_at'):
+            submission = dict(attempt_id='legacy', stage='sent', at=job['discussion_submitted_at'])
+        else:
+            submission = dict(attempt_id='legacy', stage='not_submitted', at=job.get('created_at'))
+    if not execution:
+        if state == 'artifact_ready':
+            execution = dict(state='settled', checked_at=job.get('updated_at'))
+        elif job.get('discussion_submitted_at'):
+            execution = dict(state='working', since=job['discussion_submitted_at'])
+        else:
+            execution = dict(state='unknown', checked_at=job.get('updated_at'))
+    if not artifact:
+        artifact = dict(state='verified' if state == 'artifact_ready' else 'missing',
+                        verified_at=job.get('updated_at') if state == 'artifact_ready' else None)
+    return dict(contract=job.get('contract') or 1, submission=submission,
+                execution=execution, artifact=artifact)
+
+
+def read_receipt(store, job):
+    """The facilitator's completion receipt, or None when it wrote none."""
+    path = discussion_directory(store, job) / RECEIPT_NAME
+    if path.is_symlink():
+        return dict(invalid='Receipt must not be a symlink.')
+    if not path.exists():
+        return None
+    if not path.is_file():
+        return dict(invalid='Receipt must be a regular file.')
+    try:
+        data = json.loads(read_contribution(path, 40000))
+    except ValueError:
+        return dict(invalid='Receipt is not readable JSON.')
+    if not isinstance(data, dict):
+        return dict(invalid='Receipt must be a JSON object.')
+    return data
+
+
+def verify_receipt(receipt, job, digest, transcript_digest=None):
+    """A receipt establishes that the recorded output is final, not that the
+    conclusions are correct. It is never a substitute for identity checks."""
+    if receipt is None:
+        return None
+    if receipt.get('invalid'):
+        return receipt['invalid']
+    if receipt.get('discussion_id') != job['id']:
+        return 'Receipt names a different discussion.'
+    if receipt.get('attempt_id') != (job.get('submission') or {}).get('attempt_id'):
+        return 'Receipt names a different submission attempt.'
+    if receipt.get('artifact_sha256') != digest:
+        return 'Receipt does not match the final artifact.'
+    # The transcript carries knowledge consumed downstream, so bind it too.
+    transcript_required = discussion_state(job)['contract'] >= DISCUSSION_CONTRACT
+    if transcript_digest is not None and (transcript_required or 'transcript_sha256' in receipt) and (
+            receipt.get('transcript_sha256') != transcript_digest):
+        return 'Receipt does not match the final transcript.'
+    return None
+
+
+def finalize_discussion(store, job_id, actor):
+    """Finalize one discussion from verified output.
+
+    Normal completion, automatic recovery and the manual button all run this
+    routine, so a discussion cannot be finalized under weaker checks than any
+    other. It never sends a prompt, and it is idempotent: an already-finalized
+    discussion is returned unchanged.
+    """
+    with store.lock, closing(store.connect()) as db:
+        job = store.get(db, 'jobs', job_id)
+    if job.get('kind') != 'discussion':
+        raise ValueError('Only a discussion can be finalized.')
+    if job.get('state') == 'cancelled':
+        raise ValueError('This discussion was cancelled.')
+    if job.get('state') == 'artifact_ready' and (job.get('completion') or {}).get('state'):
+        return job
+    facts = discussion_state(job)
+    if facts['submission']['stage'] == 'not_submitted':
+        raise ValueError('The discussion prompt was never delivered; there is no output to recover.')
+    org_id = job['organization_id']
+    # Ownership: another job must not be using these agents right now.
+    participants = set(job.get('participants') or [])
+    with closing(store.connect()) as db:
+        others = [json.loads(row[0]) for row in
+                  db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
+    if any(other['id'] != job_id and session_reserves(other)
+           and participants.intersection(other.get('participants') or [other.get('profile_id')])
+           for other in others):
+        raise ValueError('Wait for other work using these agents before finalizing this discussion.')
+    # Identity and settled state: the original conversations must still be the
+    # ones that produced this output, and none may be working or blocked. A
+    # blocked facilitator is waiting for a decision, not finished.
+    for saved in [job['group_run'], *job['runs']]:
+        with closing(store.connect()) as db:
+            run = store.get(db, 'jobs', saved['id'], org_id)
+        if run['state'] != 'persona_sent':
+            raise ValueError('Run binding was released. Saved output cannot be recovered from this conversation.')
+        try:
+            store.identity(run)
+        except HerdrError as error:
+            # Preserve the structured outcome. Callers distinguish a blocked
+            # agent from an uncertain delivery without parsing prose, so
+            # re-wrapping as a plain ValueError would destroy that.
+            raise HerdrError(f"{run['profile']['name']}: {error}", error.code, error.operation,
+                             error.delivery) from error
+        except ValueError as error:
+            raise ValueError(f"{run['profile']['name']}: {error}") from error
+    # Output. The receipt is hashed over the exact bytes the agent wrote, so
+    # verification uses those bytes rather than a normalized copy.
+    artifact_bytes, artifact_text = read_document(discussion_directory(store, job) / 'action-plan.md')
+    transcript_bytes, transcript_text = read_document(discussion_directory(store, job) / 'discussion.json', 750000,
+                                        'discussion transcript')
+    result = artifact_text.strip()
+    if not result:
+        raise ValueError('Agent did not produce a valid discussion artifact: empty file.')
+    transcript = parse_discussion_transcript(transcript_text, job)
+    digest = hashlib.sha256(artifact_bytes).hexdigest()
+    transcript_digest = hashlib.sha256(transcript_bytes).hexdigest()
+    receipt = read_receipt(store, job)
+    problem = verify_receipt(receipt, job, digest, transcript_digest)
+    if problem:
+        raise ValueError('Completion receipt rejected: ' + problem)
+    if receipt is None and facts['contract'] >= DISCUSSION_CONTRACT:
+        raise ValueError('This discussion requires a completion receipt and none was written.')
+    checks = ['delivery_recorded', 'identity_verified', 'settled', 'artifact_validated',
+              'transcript_validated', 'receipt_verified' if receipt else 'legacy_evidence']
+    with store.lock, closing(store.connect()) as db, db:
+        current = store.get(db, 'jobs', job_id, org_id)
+        if current.get('state') in ('cancelled',) or (
+                current.get('state') == 'artifact_ready' and (current.get('completion') or {}).get('state')):
+            return current
+        current.update(
+            state='artifact_ready', result=result, contributions=transcript['contributions'],
+            knowledge=transcript.get('knowledge', []), artifact_name='action-plan.md',
+            artifact=dict(state='verified', sha256=digest, verified_at=now()),
+            execution=dict(facts['execution'], state='settled', checked_at=now()),
+            submission=facts['submission'], contract=facts['contract'],
+            completion=dict(state='receipt_verified' if receipt else 'legacy_verified',
+                            checks=checks, receipt_sha256=(
+                                hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()
+                                if receipt else None),
+                            at=now(), actor=actor),
+            progress='Group response verified', previous_error=current.get('error', ''), error='',
+            updated_at=now())
+        store.put(db, 'jobs', current)
+    return current
+
+
+def recover_interrupted(store, offset=0, limit=20):
+    """Finalize interrupted discussions whose output is complete and verified.
+
+    A discussion that was blocked, timed out or interrupted by a restart can
+    still finish correctly. Recovering it is a read: no prompt is resent, and
+    every prerequisite is re-checked. Anything that fails stays for inspection.
+
+    Selection rotates. A fixed oldest-first page would let a few permanently
+    broken discussions starve every later one, which is the same starvation the
+    task reconciler had. Returns the recovered ids and the next offset.
+    """
+    condition = ("json_extract(data,'$.kind')='discussion' "
+                 "AND json_extract(data,'$.state') IN ('needs_attention','uncertain','waiting_for_input')")
+    with closing(store.connect()) as db:
+        total = db.execute('SELECT COUNT(*) FROM jobs WHERE ' + condition).fetchone()[0]
+        if not total:
+            return [], 0
+        offset = offset % total
+        rows = [json.loads(row[0]) for row in db.execute(
+            'SELECT data FROM jobs WHERE ' + condition + ' ORDER BY rowid LIMIT ? OFFSET ?',
+            (limit, offset))]
+    recovered = []
+    for saved in rows:
+        try:
+            finalized = finalize_discussion(store, saved['id'], 'discussion_recovery')
+        except (ValueError, OSError, sqlite3.Error, HerdrError):
+            continue
+        recovered.append(finalized['id'])
+    # Advance past the window actually scanned, minus the rows recovery removed,
+    # so the next pass continues where this one stopped instead of skipping a
+    # window. Normalized against what is left because the set shrank.
+    remaining = total - len(recovered)
+    return recovered, (offset + len(rows) - len(recovered)) % remaining if remaining else 0
 
 
 def inspect_discussion(store, db, body, org_id):
@@ -378,6 +643,10 @@ def inspect_discussion(store, db, body, org_id):
 def execute(store, job):
     if job['kind'] == 'input':
         run = current_run(store, job['runs'][0], ready=False)
+        if job.get('decision_job_id'):
+            with store.lock, closing(store.connect()) as db:
+                owner = store.get(db, 'jobs', job['decision_job_id'], job['organization_id'])
+            run = verify_decision_input(store, owner, run)
         store.command('agent', 'send-keys', run['alias'], job['key'])
         current_run(store, run, ready=False)
         store.update_job(job['id'], state='input_sent')
@@ -426,6 +695,10 @@ def execute(store, job):
     directory.mkdir(parents=True, mode=0o700)
     artifact = directory / 'action-plan.md'
     transcript = directory / 'discussion.json'
+    receipt = directory / RECEIPT_NAME
+    # The submission attempt is bound into the receipt, so a late receipt from a
+    # previous attempt can never be mistaken for this one's.
+    attempt = uuid.uuid4().hex
     def workspace_context(run):
         live = store.identity(run)
         return {'name': run['profile']['name'], 'alias': run['alias'],
@@ -527,15 +800,53 @@ def execute(store, job):
         "Record actual member responses, never invent them. Update discussion.json after each member reply "
         "using a complete valid JSON document so the dashboard can show rounds as they arrive. "
         "Optionally add a top-level knowledge array to discussion.json, up to 10 items with kind=finding/decision/question/guidance, title and body. Cite the knowledge IDs considered; new claims stay reported, not verified. "
-        "Write and update the artifact as your synthesis develops. Save both files before finishing."
+        "Write and update the artifact as your synthesis develops. Save both files before finishing. "
+        f"Then write {receipt} as UTF-8 JSON, last of all: "
+        f'{{"discussion_id": "{job['id']}", "attempt_id": "{attempt}", '
+        '"artifact_sha256": "<sha256 of the exact action-plan.md bytes you wrote>", '
+        '"transcript_sha256": "<sha256 of the exact discussion.json bytes you wrote>"}}. '
+        "Hash the bytes on disk, not a re-encoded copy. This receipt is what marks the discussion "
+        "complete; without it the dashboard cannot distinguish a finished artifact from one you "
+        "were still revising."
     )
     run = current_run(store, group_run)
-    store.update_job(job['id'], discussion_submitted_at=now(), progress='Discussion submitted; awaiting saved artifacts')
-    store.command('agent', 'prompt', run['alias'], prompt, '--wait', '--timeout', '900000', timeout=910)
-    current_run(store, run)
-    for member in job['runs']:
-        current_run(store, member)
-    result, contributions = discussion_documents(store, job)
-    notes = discussion_transcript(store, job).get('knowledge', [])
-    store.update_job(job['id'], state='artifact_ready', result=result, contributions=contributions, knowledge=notes,
-                     artifact_name='action-plan.md', progress='Group response ready')
+    store.update_job(job['id'], contract=DISCUSSION_CONTRACT, discussion_submitted_at=now(),
+                     submission=dict(attempt_id=attempt, stage='submitting', at=now()),
+                     execution=dict(state='awaiting_start', since=now(), checked_at=now()),
+                     progress='Discussion submitted; awaiting saved artifacts')
+    # Herdr's --wait already waits indefinitely for the agent's settled state,
+    # which is the completion signal a discussion needs. Passing --timeout
+    # replaces that with a clock and reports a still-working agent as a failure:
+    # a 23-minute discussion used to be recorded as needs_attention. This bound
+    # only stops a wedged socket from holding the worker forever.
+    try:
+        store.command('agent', 'prompt', run['alias'], prompt, '--wait', timeout=DISCUSSION_WAIT_SECONDS)
+    except HerdrError as error:
+        # Record how far delivery got, so a later diagnostic can say whether
+        # input was actually sent instead of guessing from the job state.
+        store.update_job(job['id'], submission=dict(
+            attempt_id=attempt, at=now(), code=error.code or 'error',
+            stage='not_submitted' if error.delivery == 'none' else 'unknown'))
+        raise
+    store.update_job(job['id'], submission=dict(attempt_id=attempt, stage='sent', at=now()),
+                     execution=dict(state='working', since=now(), checked_at=now()))
+    # A blocked facilitator is waiting on a decision, not finished. Keep the
+    # discussion monitored and let the reconciler finalize it when it settles,
+    # rather than failing a submission that was delivered correctly.
+    blocked = run
+    try:
+        current_run(store, run)
+        for member in job['runs']:
+            blocked = member
+            current_run(store, member)
+    except HerdrError as error:
+        if error.code != 'agent_blocked':
+            raise
+        # Any participant can be the blocked one, so name the actual run rather
+        # than always blaming the facilitator.
+        name = str((blocked.get('profile') or {}).get('name') or 'A participant')
+        store.update_job(job['id'], state='waiting_for_input',
+                         execution=dict(state='waiting_for_input', since=now(), checked_at=now()),
+                         progress=f'{name} is waiting for a decision; monitoring continues')
+        return
+    finalize_discussion(store, job['id'], 'discussion_facilitator')

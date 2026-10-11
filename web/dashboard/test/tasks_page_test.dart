@@ -8,6 +8,313 @@ import 'package:herdr_dashboard/tasks_page.dart';
 import 'package:herdr_dashboard/routes.dart';
 
 void main() {
+  testWidgets(
+    'draft PR previews public text and sends only after confirmation',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final head = 'b' * 40;
+      final task = <String, dynamic>{
+        'id': 'task',
+        'title': 'Ready task',
+        'state': 'published',
+        'repository': 'repo',
+        'github_repository': 'owner/repo',
+        'head_sha': head,
+        'branch': 'herdr/task-123456abcdef',
+        'base_ref': 'refs/remotes/origin/main',
+        'publish': {'head_sha': head},
+        'pull_preview': {
+          'title': 'Suggested title',
+          'body': '## Summary\nSuggested evidence.',
+          'head_sha': head,
+          'repository': 'owner/repo',
+          'branch': 'herdr/task-123456abcdef',
+          'base': 'main',
+        },
+      };
+      final posts = <Map<String, dynamic>>[];
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/tasks/pull'))
+            posts.add(Map<String, dynamic>.from(jsonDecode(request.body)));
+          return http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/tasks')
+                  ? {
+                      'tasks': [task],
+                      'github': {'configured': true},
+                    }
+                  : task,
+            ),
+            200,
+          );
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      connection.connect('token');
+      connection.operator.value = {'role': 'admin'};
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: TasksPage(taskId: 'task')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Changes'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Open draft PR'));
+      await tester.tap(find.text('Open draft PR'));
+      await tester.pumpAndSettle();
+      expect(find.text('Preview draft pull request'), findsOneWidget);
+      expect(find.textContaining('Exact candidate: $head'), findsOneWidget);
+      expect(posts, isEmpty);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(posts, isEmpty);
+      await tester.tap(find.text('Open draft PR'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'PR title'),
+        'Edited PR title',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'PR description (Markdown)'),
+        'Edited public description.',
+      );
+      await tester.tap(find.text('Create draft PR'));
+      await tester.pumpAndSettle();
+      expect(posts.single['title'], 'Edited PR title');
+      expect(posts.single['body'], 'Edited public description.');
+      expect(posts.single['head_sha'], head);
+      expect(posts.single['reviewed'], isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    },
+  );
+
+  for (final width in [390.0, 1280.0]) {
+    testWidgets('draft PR preview and excerpt opt-in adapt to $width', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(width, 1400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final head = ''.padLeft(40, 'b');
+      final task = {
+        'id': 'task-1',
+        'title': 'Implement feature',
+        'state': 'published',
+        'repository': 'repo',
+        'github_repository': 'owner/repo',
+        'run_id': 'run',
+        'branch': 'herdr/task-abcdefabcdef',
+        'base_ref': 'refs/remotes/origin/main',
+        'base_sha': ''.padLeft(40, 'a'),
+        'head_sha': head,
+        'publish': {'state': 'complete', 'head_sha': head},
+        'pull_preview': {
+          'title': 'Suggested title',
+          'body': '## Summary\nSuggested evidence.',
+          'excerpt':
+              'Finalized discussion excerpt (not an approval verdict):\n\nGroup findings.',
+          'head_sha': head,
+          'repository': 'owner/repo',
+          'branch': 'herdr/task-abcdefabcdef',
+          'base': 'main',
+        },
+        'audit': [],
+      };
+      final posts = <Map<String, dynamic>>[];
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/tasks/pull')) {
+            posts.add(Map<String, dynamic>.from(jsonDecode(request.body)));
+          }
+          return http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/tasks/detail')
+                  ? task
+                  : {
+                      'tasks': [task],
+                      'github': {'configured': true, 'login': 'owner'},
+                    },
+            ),
+            200,
+          );
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      connection.connect('token');
+      connection.operator.value = {'name': 'admin', 'role': 'admin'};
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: TasksPage(taskId: 'task-1'))),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Changes'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('Open draft PR'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open draft PR'));
+      await tester.pumpAndSettle();
+      expect(find.text('Preview draft pull request'), findsOneWidget);
+      final description = find.widgetWithText(
+        TextFormField,
+        'PR description (Markdown)',
+      );
+      // The excerpt publishes internal deliberation, so it stays out of the
+      // default body and is offered as an explicit choice.
+      expect(
+        tester.widget<TextFormField>(description).controller!.text,
+        isNot(contains('Group findings')),
+      );
+      final optIn = find.text('Include the finalized discussion excerpt');
+      await tester.ensureVisible(optIn);
+      await tester.pumpAndSettle();
+      await tester.tap(optIn);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextFormField>(description).controller!.text,
+        contains('Group findings'),
+      );
+      await tester.tap(find.text('Create draft PR'));
+      await tester.pumpAndSettle();
+      expect(posts.single['body'], contains('Group findings'));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    });
+  }
+
+  testWidgets('fork publication states both destinations and the qualified head', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final head = 'b' * 40;
+    final branch = 'herdr/task-123456abcdef';
+    final task = <String, dynamic>{
+      'id': 'task',
+      'title': 'Ready task',
+      'state': 'published',
+      'repository': 'repo',
+      'github_repository': 'owner/repo',
+      'publishing_repository': 'contributor/repo',
+      'head_sha': head,
+      'branch': branch,
+      'base_ref': 'refs/remotes/origin/main',
+      'publish': {'head_sha': head, 'repository': 'contributor/repo'},
+      'pull_preview': {
+        'title': 'Suggested title',
+        'body': '## Summary\nSuggested evidence.',
+        'excerpt': '',
+        'head_sha': head,
+        'repository': 'owner/repo',
+        'publishing_repository': 'contributor/repo',
+        'fork': true,
+        'head': 'contributor:$branch',
+        'branch': branch,
+        'base': 'main',
+      },
+    };
+    final posts = <Map<String, dynamic>>[];
+    final connection = DashboardBloc(
+      client: MockClient((request) async {
+        if (request.url.path.endsWith('/tasks/pull'))
+          posts.add(Map<String, dynamic>.from(jsonDecode(request.body)));
+        return http.Response(
+          jsonEncode(
+            request.url.path.endsWith('/tasks')
+                ? {
+                    'tasks': [task],
+                    'github': {
+                      'configured': true,
+                      'login': 'contributor',
+                      'repositories': ['owner/repo'],
+                      'publication': {
+                        'owner/repo': {
+                          'mode': 'fork',
+                          'publishing_repository': 'contributor/repo',
+                          'verification': {
+                            'fork_access': 'verified',
+                            'account_write_to_publishing': 'verified',
+                            'token_write_capability': 'not_exercised',
+                            'upstream_pr_creation':
+                                'needs_different_authentication',
+                          },
+                        },
+                      },
+                    },
+                  }
+                : task,
+          ),
+          200,
+        );
+      }),
+    );
+    BlocScope.register<DashboardBloc>(() => connection);
+    connection.connect('token');
+    connection.operator.value = {'role': 'admin'};
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: TasksPage())),
+    );
+    await tester.pumpAndSettle();
+    // Setup reports capability, and never claims to have exercised a write.
+    expect(find.textContaining('token write not_exercised'), findsOneWidget);
+    expect(
+      find.textContaining('upstream PR needs_different_authentication'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open task'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Changes'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Open draft PR'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    // The branch destination and the pull request target are separate.
+    expect(
+      find.textContaining(
+        'Publish branch to: contributor/repo\nOpen draft PR into: owner/repo',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open draft PR'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining(
+        'Publish branch to: contributor/repo\n\nOpen draft PR into: owner/repo',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('Source branch: contributor:$branch'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Create draft PR'));
+    await tester.pumpAndSettle();
+    expect(posts.single['head_sha'], head);
+    expect(posts.single['reviewed'], isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await connection.disconnect();
+    await BlocScope.reset();
+  });
+
   test(
     'repository choices are relative, distinct, sorted and bounded to projects',
     () {
@@ -21,6 +328,14 @@ void main() {
           {'project': null},
         ], '/home/herdr/projects'),
         ['team/alpha', 'zeta'],
+      );
+      // An empty root would make the prefix '/' and match every absolute path.
+      expect(
+        taskRepositories([
+          {'project': '/home/herdr/projects/zeta'},
+          {'project': '/outside/repo'},
+        ], ''),
+        isEmpty,
       );
     },
   );
@@ -62,6 +377,76 @@ void main() {
       await BlocScope.reset();
     },
   );
+  for (final brightness in Brightness.values) {
+    for (final width in [390.0, 1280.0]) {
+      testWidgets('drafts are readable at $width and $brightness', (
+        tester,
+      ) async {
+        tester.view.physicalSize = Size(width, 2000);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final active = {
+          'id': 'task-1',
+          'title': 'Implement feature',
+          'repository': 'repo',
+          'state': 'implementing',
+          'audit': [],
+        };
+        final draft = {
+          'id': 'task-2',
+          'title': 'Proposed follow-up',
+          'repository': 'repo',
+          'state': 'draft',
+          'audit': [],
+        };
+        final connection = DashboardBloc(
+          client: MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'tasks': [active, draft],
+                'github': {'configured': false},
+              }),
+              200,
+            ),
+          ),
+        );
+        BlocScope.register<DashboardBloc>(() => connection);
+        connection.connect('token');
+        connection.operator.value = {'name': 'admin', 'role': 'admin'};
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: brightness),
+            home: const Scaffold(body: TasksPage()),
+          ),
+        );
+        await tester.pumpAndSettle();
+        // Drafts are proposals awaiting an operator, so they sit under a header
+        // rather than mixed into work that is actually in flight.
+        expect(find.text('Drafts (1)'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('Proposed follow-up')).dy,
+          greaterThan(tester.getTopLeft(find.text('Implement feature')).dy),
+        );
+        final caption = find.text(
+          'Work that has not started. Open a task for its next step.',
+        );
+        final text = tester.widget<Text>(caption);
+        final theme = Theme.of(tester.element(caption));
+        final foreground = text.style!.color!.computeLuminance();
+        final background = theme.scaffoldBackgroundColor.computeLuminance();
+        final ratio = foreground > background
+            ? (foreground + 0.05) / (background + 0.05)
+            : (background + 0.05) / (foreground + 0.05);
+        expect(ratio, greaterThanOrEqualTo(4.5));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        await connection.disconnect();
+        await BlocScope.reset();
+      });
+    }
+  }
+
   test('Tasks route is directly addressable', () {
     expect(
       AppCoordinator().parseRouteFromUri(Uri.parse('/tasks')),
@@ -131,8 +516,6 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Implement feature'), findsOneWidget);
-        await tester.ensureVisible(find.text('Review and publish'));
-        await tester.pumpAndSettle();
         await tester.ensureVisible(find.text('Review and publish'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Review and publish'));

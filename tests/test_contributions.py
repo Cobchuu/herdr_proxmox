@@ -1,5 +1,6 @@
 import json
 from contextlib import closing, contextmanager
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -119,6 +120,88 @@ class GitHubTests(unittest.TestCase):
                 self.api.configure(dict(token='x' * 40, repositories=['owner/repo']))
         self.assertFalse(self.path.exists())
 
+    def test_fork_publication_does_not_require_upstream_push_access(self):
+        token = 'github_pat_' + 'x' * 50
+
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=False))
+            if path == '/repos/contributor/repo':
+                return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                            permissions=dict(push=True))
+            raise AssertionError(path)
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            result = self.api.configure(dict(
+                token=token, repositories=['owner/repo'],
+                publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')}))
+        entry = result['publication']['owner/repo']
+        self.assertEqual(entry['publishing_repository'], 'contributor/repo')
+        self.assertEqual(entry['verification']['fork_access'], 'verified')
+        self.assertEqual(entry['verification']['account_write_to_publishing'], 'verified')
+        # Setup never creates a branch or pull request to prove write access.
+        self.assertEqual(entry['verification']['token_write_capability'], 'not_exercised')
+        self.assertEqual(entry['verification']['upstream_pr_creation'], 'needs_different_authentication')
+        self.assertEqual(self.api.publication_options(), {'owner/repo': ['owner/repo', 'contributor/repo']})
+        self.api.allow_publishing('owner/repo', 'contributor/repo')
+        with self.assertRaisesRegex(ValueError, 'configured fork'):
+            self.api.allow_publishing('owner/repo', 'stranger/repo')
+
+    def test_direct_publication_keeps_requiring_upstream_push_access(self):
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'owner'}
+            return dict(full_name='owner/repo', fork=False, permissions=dict(push=False))
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            with self.assertRaisesRegex(ValueError, 'push access'):
+                self.api.configure(dict(token='x' * 40, repositories=['owner/repo']))
+        self.assertFalse(self.path.exists())
+
+    def test_fork_destination_must_be_in_the_same_fork_network(self):
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=True))
+            if path == '/repos/stranger/repo':
+                return dict(full_name='stranger/repo', fork=False, permissions=dict(push=True))
+            raise AssertionError(path)
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            with self.assertRaisesRegex(ValueError, 'is not a fork'):
+                self.api.configure(dict(
+                    token='github_pat_' + 'x' * 50, repositories=['owner/repo'],
+                    publication={'owner/repo': dict(mode='fork', publishing_repository='stranger/repo')}))
+        self.assertFalse(self.path.exists())
+
+    def test_pull_discovery_uses_the_fork_owner(self):
+        calls = []
+
+        def answer(path, *arguments, **keywords):
+            calls.append(path)
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=False))
+            if path == '/repos/contributor/repo':
+                return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                            permissions=dict(push=True))
+            return []
+
+        with patch.object(self.api, 'request', side_effect=answer):
+            self.api.configure(dict(
+                token='github_pat_' + 'x' * 50, repositories=['owner/repo'],
+                publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')}))
+            self.api.find_pull('owner/repo', 'herdr/task-abcdefabcdef', 'contributor')
+        # Matching only the branch name could attach another account's pull
+        # request to this task, so the head owner is part of the query.
+        self.assertEqual(
+            calls[-1],
+            '/repos/owner/repo/pulls?head=contributor%3Aherdr%2Ftask-abcdefabcdef&state=all&per_page=100')
+
     def test_errors_and_oversized_responses_never_expose_credentials(self):
         secret = 'github_pat_' + 's' * 40
         opener = MagicMock()
@@ -174,6 +257,8 @@ class ContributionTests(unittest.TestCase):
         self.api = MagicMock()
         self.api.path = self.root / 'github.json'
         self.api.snapshot.return_value = dict(configured=True)
+        self.api.publication_settings.return_value = {}
+        self.api.publication_options.return_value = {}
         self.profile = dict(id='worker', organization_id='org', project=str(self.repo), use_worktree=True)
         self.store = MagicMock()
         self.store.agent_locks = {}
@@ -366,6 +451,7 @@ class ContributionTests(unittest.TestCase):
         self.assertIn('task_proposals', prompt)
         self.assertIn('Read-only discussion', prompt)
         self.assertEqual(reviewed['meetings'][0]['job_id'], 'meeting')
+        self.assertEqual(reviewed['meetings'][0]['candidate'], task['head_sha'])
         task = self.service.get(task['id'])
         task.update(auto_review=True, review_group_id='group')
         self.service.save(task, 'review_policy', 'admin')
@@ -375,6 +461,7 @@ class ContributionTests(unittest.TestCase):
         job = dict(id='meeting', organization_id='org', task_id=task['id'], kind='discussion', state='artifact_ready',
                    result='```json\n' + json.dumps({'task_proposals': [dict(title='Add status coverage', description='Add a regression check. Acceptance: filters compose. Run widget tests.', profile_id='worker')]}) + '\n```')
         self.store.snapshot.return_value['jobs'].append(job)
+        self.assertEqual(self.service.detail(task['id'])['meeting_results'][0]['candidate'], task['head_sha'])
         proposal = self.service.detail(task['id'])['meeting_results'][0]['proposals'][0]
         created = self.service.action('proposal', dict(task_id=task['id'], request_id='approve-proposal', meeting_id='meeting', proposal_key=proposal['key']), 'admin', 'admin')
         follow_id = created['follow_up_tasks'][proposal['key']]
@@ -535,8 +622,10 @@ class ContributionTests(unittest.TestCase):
         self.assertIn('needs_review', packet)
 
     def pull_data(self, task, **changes):
-        result = dict(number=7, state='open', draft=True, head=dict(ref=task['branch'], sha=task['head_sha'],
-                      repo=dict(full_name='owner/repo')), base=dict(ref='main'), mergeable=None)
+        destination = task.get('publishing_repository') or task['github_repository']
+        result = dict(number=7, state='open', draft=True,
+                      head=dict(ref=task['branch'], sha=task['head_sha'], repo=dict(full_name=destination)),
+                      base=dict(ref='main', repo=dict(full_name=task['github_repository'])), mergeable=None)
         result.update(changes)
         return result
 
@@ -649,14 +738,279 @@ class ContributionTests(unittest.TestCase):
         self.service.save(task, 'publish', 'admin')
         pull = self.pull_data(task)
         self.api.find_pull.side_effect = [[], [pull]]
-        self.api.request.side_effect = GitHubError(422)
+
+        def answer(path, *arguments, **keywords):
+            if '/branches/' in path:
+                return dict(name='main')
+            raise GitHubError(422)
+
+        self.api.request.side_effect = answer
         with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
-            result = self.service.action('pull', dict(request_id='pull', task_id=task['id']), 'admin', 'admin')
+            preview = contributions.pull_preview(task)
+            result = self.service.action('pull', dict(request_id='pull', task_id=task['id'], head_sha=task['head_sha'],
+                                                     title=preview['title'], body=preview['body'], reviewed=True), 'admin', 'admin')
         self.assertEqual(result['pull']['number'], 7)
+        self.assertIn('existing PR was reused', result['pull_notice'])
+        # The reused pull request keeps its own description, so no approved text
+        # may be recorded as applied to it.
+        self.assertFalse(result['pull_approval']['applied'])
+        self.assertNotIn('body_sha256', result['pull_approval'])
         payload = self.api.request.call_args.args[2]
         self.assertTrue(payload['draft'])
         self.assertIn('not verified', payload['body'])
         self.assertEqual(payload['base'], 'main')
+
+    def test_pull_preview_never_uses_previous_candidate_evidence(self):
+        task = self.candidate()
+        head = task['head_sha']
+        task['builds'] = {'a' * 40: dict(target='a' * 40, state='complete', required_checks_verified=True,
+                                        checks=[dict(id='old-check', status='passed')])}
+        task['acceptance'] = dict(sha='a' * 40, state='satisfied', reason='Old approval')
+        task['meeting_results'] = [dict(candidate='a' * 40, state='artifact_ready', result='Outdated findings'),
+                                   dict(candidate=head, state='artifact_ready', result='Current findings')]
+        preview = contributions.pull_preview(task)
+        self.assertIn('not verified for this candidate', preview['body'])
+        self.assertNotIn('old-check', preview['body'])
+        self.assertNotIn('Old approval', preview['body'])
+        self.assertNotIn('Outdated findings', preview['body'] + preview['excerpt'])
+        # The excerpt is opt-in, so the current findings stay out of the
+        # default public body and are offered separately.
+        self.assertNotIn('Current findings', preview['body'])
+        self.assertIn('Current findings', preview['excerpt'])
+        task['builds'][head] = dict(target=head, state='complete', required_checks_verified=True,
+                                   checks=[dict(id='current-check', status='passed')])
+        preview = contributions.pull_preview(task)
+        self.assertIn('Required checks: verified for this candidate', preview['body'])
+        self.assertIn('current-check', preview['body'])
+        self.assertEqual(preview['head_sha'], head)
+
+    def test_pull_requires_preview_approval_and_preserves_edited_text(self):
+        task = self.candidate()
+        task.update(state='published', publish=dict(head_sha=task['head_sha']))
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = self.pull_data(task)
+        fields = dict(task_id=task['id'], head_sha=task['head_sha'], reviewed=True,
+                      title='Reviewed title', body='## Summary\nEdited evidence and risks.')
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            for request_id, override in [('missing-approval', {'reviewed': False}),
+                                         ('stale-preview', {'head_sha': 'a' * 40}),
+                                         ('blank-body', {'body': ''}), ('long-title', {'title': 'x' * 257})]:
+                with self.assertRaises(ValueError):
+                    self.service.action('pull', dict(fields, request_id=request_id, **override), 'admin', 'admin')
+            self.api.request.assert_not_called()
+            self.service.action('pull', dict(fields, request_id='approved-preview'), 'admin', 'admin')
+        payload = self.api.request.call_args.args[2]
+        self.assertEqual(payload['title'], fields['title'])
+        self.assertEqual(payload['body'], fields['body'])
+        self.assertTrue(payload['draft'])
+        self.assertEqual(payload['head'], task['branch'])
+
+    def test_pull_approval_records_a_hash_instead_of_the_public_text(self):
+        task = self.candidate()
+        task.update(state='published', publish=dict(head_sha=task['head_sha']))
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = self.pull_data(task)
+        body = '## Summary\nPublic evidence that must not be persisted on the task record.'
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            self.service.action('pull', dict(request_id='hashed-approval', task_id=task['id'],
+                                            head_sha=task['head_sha'], reviewed=True,
+                                            title='Reviewed title', body=body), 'admin', 'admin')
+        saved = self.service.get(task['id'])
+        approval = saved['pull_approval']
+        self.assertEqual(approval['head_sha'], task['head_sha'])
+        self.assertEqual(approval['title'], 'Reviewed title')
+        self.assertEqual(approval['body_sha256'], hashlib.sha256(body.encode()).hexdigest())
+        self.assertNotIn('body', approval)
+        # The task list serves the whole task record, so the approved text must
+        # not ride along with it.
+        self.assertNotIn('Public evidence', json.dumps(saved))
+
+    def test_pr_permission_failure_does_not_undo_publication(self):
+        task = self.candidate()
+        task.update(state='published', publish=dict(head_sha=task['head_sha']))
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+
+        def answer(path, *arguments, **keywords):
+            if '/branches/' in path:
+                return dict(name='main')
+            raise GitHubError(403)
+
+        self.api.request.side_effect = answer
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            with self.assertRaisesRegex(ValueError, 'branch is already published'):
+                self.service.action('pull', dict(request_id='denied-pr', task_id=task['id'], head_sha=task['head_sha'],
+                                                title='Title', body='Description', reviewed=True), 'admin', 'admin')
+        saved = self.service.get(task['id'])
+        self.assertEqual(saved['state'], 'published')
+        self.assertEqual(saved['publish']['head_sha'], task['head_sha'])
+        self.assertNotIn('pull', saved)
+
+    def fork(self, task, fork='contributor/repo'):
+        upstream = task['github_repository']
+        self.api.publication_settings.return_value = {upstream: dict(mode='fork', publishing_repository=fork)}
+        self.api.publication_options.return_value = {upstream: [upstream, fork]}
+        task['publishing_repository'] = fork
+        self.service.save(task, 'publication', 'admin')
+        return task
+
+    def test_direct_publication_still_targets_the_upstream(self):
+        task = self.candidate()
+        self.assertEqual(task['publishing_repository'], task['github_repository'])
+        with patch.object(self.service, 'remote_head', side_effect=[None, task['head_sha']]), \
+                patch('contributions.push') as push:
+            published = self.service.action('publish', dict(request_id='direct-push', task_id=task['id'],
+                                                           head_sha=task['head_sha']), 'admin', 'admin')
+        self.assertEqual(push.call_args.args[4], task['github_repository'])
+        self.assertEqual(published['publish']['repository'], task['github_repository'])
+
+    def test_fork_publication_pushes_to_the_fork_and_never_the_upstream(self):
+        task = self.fork(self.candidate())
+        with patch.object(self.service, 'remote_head', side_effect=[None, task['head_sha']]), \
+                patch('contributions.push') as push:
+            published = self.service.action('publish', dict(request_id='fork-push', task_id=task['id'],
+                                                           head_sha=task['head_sha']), 'admin', 'admin')
+        self.assertEqual(push.call_args.args[4], 'contributor/repo')
+        self.assertNotEqual(push.call_args.args[4], task['github_repository'])
+        self.assertEqual(published['publish']['repository'], 'contributor/repo')
+        self.api.allow_publishing.assert_called_once_with(task['github_repository'], 'contributor/repo')
+
+    def test_unrelated_repository_is_rejected_before_any_push(self):
+        task = self.candidate()
+        task['publishing_repository'] = 'stranger/repo'
+        self.service.save(task, 'publication', 'admin')
+        self.api.allow_publishing.side_effect = ValueError('Repository is not the configured fork for this project.')
+        with patch.object(self.service, 'remote_head', return_value=None), patch('contributions.push') as push:
+            with self.assertRaisesRegex(ValueError, 'configured fork'):
+                self.service.action('publish', dict(request_id='stranger-push', task_id=task['id'],
+                                                   head_sha=task['head_sha']), 'admin', 'admin')
+        self.api.allow_publishing.assert_called_once_with(task['github_repository'], 'stranger/repo')
+        push.assert_not_called()
+
+    def test_fork_pull_request_targets_upstream_with_a_qualified_head(self):
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        pull = self.pull_data(task)
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = pull
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            self.service.action('pull', dict(request_id='fork-pr', task_id=task['id'], head_sha=task['head_sha'],
+                                            title='Title', body='Body', reviewed=True), 'admin', 'admin')
+        self.assertEqual(self.api.find_pull.call_args.args,
+                         (task['github_repository'], task['branch'], 'contributor', 'main'))
+        self.assertEqual(self.api.request.call_args.args[0], '/repos/owner/repo/pulls')
+        payload = self.api.request.call_args.args[2]
+        self.assertEqual(payload['head'], 'contributor:' + task['branch'])
+        self.assertEqual(payload['base'], 'main')
+        self.assertTrue(payload['draft'])
+
+    def test_pull_head_and_base_repositories_are_both_checked(self):
+        task = self.fork(self.candidate())
+        wrong_head = self.pull_data(task, head=dict(ref=task['branch'], sha=task['head_sha'],
+                                                    repo=dict(full_name=task['github_repository'])))
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            self.service.record_pull(task, wrong_head)
+        wrong_base = self.pull_data(task, base=dict(ref='main', repo=dict(full_name='contributor/repo')))
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            self.service.record_pull(task, wrong_base)
+        self.assertNotIn('pull', task)
+        self.service.record_pull(task, self.pull_data(task))
+        self.assertEqual(task['pull']['number'], 7)
+
+    def test_merged_fork_pull_request_stays_with_its_task(self):
+        task = self.fork(self.candidate())
+        pull = self.pull_data(task, state='closed', draft=False, merged=True, merge_commit_sha='c' * 40,
+                              merged_at='2026-01-01T00:00:00Z')
+        self.service.record_pull(task, pull)
+        self.assertEqual(task['state'], 'merged')
+        self.assertEqual(task['merge_sha'], 'c' * 40)
+        self.assertEqual(task['pull']['url'], 'https://github.com/owner/repo/pull/7')
+
+    def test_fork_recovery_reuses_the_existing_pull_request(self):
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        pull = self.pull_data(task)
+        self.api.find_pull.side_effect = [[], [pull]]
+
+        def answer(path, *arguments, **keywords):
+            if '/branches/' in path:
+                return dict(name='main')
+            raise GitHubError(422)
+
+        self.api.request.side_effect = answer
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            preview = contributions.pull_preview(task)
+            result = self.service.action('pull', dict(request_id='fork-reconcile', task_id=task['id'],
+                                                      head_sha=task['head_sha'], title=preview['title'],
+                                                      body=preview['body'], reviewed=True), 'admin', 'admin')
+        self.assertEqual(result['pull']['number'], 7)
+        self.assertIn('existing PR was reused', result['pull_notice'])
+        self.assertEqual(self.api.find_pull.call_args.args[2], 'contributor')
+
+    def test_publication_destination_is_frozen_once_published(self):
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'], repository='contributor/repo')
+        self.service.save(task, 'publish', 'admin')
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            with self.assertRaisesRegex(ValueError, 'already published'):
+                self.service.action('publication', dict(request_id='move-destination', task_id=task['id'],
+                                                       mode='direct'), 'admin', 'admin')
+        self.assertEqual(self.service.get(task['id'])['publishing_repository'], 'contributor/repo')
+
+    def test_publication_action_switches_to_the_configured_fork(self):
+        task = self.candidate()
+        upstream = task['github_repository']
+        self.api.publication_settings.return_value = {upstream: dict(mode='fork', publishing_repository='contributor/repo')}
+        self.api.publication_options.return_value = {upstream: [upstream, 'contributor/repo']}
+        with patch.object(self.service, 'remote_head', return_value=None):
+            switched = self.service.action('publication', dict(request_id='switch-to-fork', task_id=task['id'],
+                                                              mode='fork',
+                                                              publishing_repository='contributor/repo'), 'admin', 'admin')
+            self.assertEqual(switched['publishing_repository'], 'contributor/repo')
+            self.api.verify_fork.assert_called_once_with(upstream, 'contributor/repo')
+            with self.assertRaisesRegex(ValueError, 'configured fork'):
+                self.service.action('publication', dict(request_id='switch-to-stranger', task_id=task['id'],
+                                                       mode='fork',
+                                                       publishing_repository='stranger/repo'), 'admin', 'admin')
+        self.assertEqual(self.service.get(task['id'])['publishing_repository'], 'contributor/repo')
+
+    def test_same_organization_fork_includes_head_repo(self):
+        # GitHub requires head_repo when both repositories share an owner.
+        # Without it the push succeeds and only PR creation fails, so setup
+        # would accept a configuration that cannot complete.
+        task = self.fork(self.candidate(), fork='owner/fork')
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = self.pull_data(task)
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            self.service.action('pull', dict(request_id='same-org-pr', task_id=task['id'],
+                                            head_sha=task['head_sha'], title='Title', body='Body',
+                                            reviewed=True), 'admin', 'admin')
+        payload = self.api.request.call_args.args[2]
+        self.assertEqual(payload['head'], 'owner:' + task['branch'])
+        self.assertEqual(payload['head_repo'], 'fork')
+
+    def test_recovery_skips_a_pull_request_for_another_base(self):
+        # Selection is by identity, not position: the first result targeting a
+        # different base must not abort recovery when a match follows it.
+        task = self.fork(self.candidate())
+        task['publish'] = dict(head_sha=task['head_sha'])
+        self.service.save(task, 'publish', 'admin')
+        other = self.pull_data(task, number=9,
+                               base=dict(ref='release', repo=dict(full_name=task['github_repository'])))
+        self.api.find_pull.return_value = [other, self.pull_data(task)]
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            result = self.service.action('pull', dict(request_id='select-pr', task_id=task['id'],
+                                                     head_sha=task['head_sha'], title='T', body='B',
+                                                     reviewed=True), 'admin', 'admin')
+        self.assertEqual(result['pull']['number'], 7)
+        self.assertIn('existing PR was reused', result['pull_notice'])
+        self.api.request.assert_not_called()
 
     def test_pr_changed_head_and_resulting_merge_sha_are_distinct(self):
         task = self.candidate()
@@ -882,7 +1236,7 @@ class ContributionTests(unittest.TestCase):
         for branch, sha in [('main', task['head_sha']), (task['branch'], task['head_sha'][:12]),
                             ('herdr/task-abcdefabcdef', task['head_sha'] + '0')]:
             with self.assertRaisesRegex(ValueError, 'task branch and full reviewed commit'):
-                contributions.push(Path(task['worktree']), branch, sha, self.api)
+                contributions.push(Path(task['worktree']), branch, sha, self.api, task['github_repository'])
         self.api.allow.assert_not_called()
 
     def test_push_releases_the_repository_lock_before_the_network_call(self):
@@ -909,7 +1263,7 @@ class ContributionTests(unittest.TestCase):
 
         with patch.object(contributions.sys, 'platform', 'linux'), patch.object(contributions, 'repository_lock', tracked_lock), \
                 patch.object(contributions.subprocess, 'run', side_effect=run):
-            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api)
+            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api, task['github_repository'])
         self.assertEqual(held.count('held'), held.count('released'))
 
 
@@ -983,6 +1337,37 @@ class ContributionTests(unittest.TestCase):
             gateway.server_close()
             thread.join(timeout=2)
 
+    def test_every_dashboard_task_action_is_routed(self):
+        # The dashboard builds /api/tasks/<action> from the action name, so a
+        # missing allowlist entry is a 404 that never reaches the service.
+        # Calling service.action directly cannot catch that, and it silently
+        # blocked switching an existing task to fork publication.
+        gateway = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        gateway.token = 'a' * 48
+        gateway.github = self.api
+        gateway.contributions = self.service
+        gateway.operators = SimpleNamespace(identify=lambda token: dict(name='admin', role='admin'))
+        thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+        thread.start()
+        base = 'http://127.0.0.1:' + str(gateway.server_port)
+        headers = {'Authorization': 'Bearer ' + gateway.token}
+        try:
+            # `launch` and `candidate` need a live session and drop the
+            # connection instead of replying, so they cannot be probed here.
+            # Registration is one allowlist tuple, so the rest cover the risk.
+            for action in ('publication', 'publish', 'pull', 'refresh', 'complete',
+                           'discuss', 'proposal', 'handover', 'consult', 'acceptance', 'assignment',
+                           'build', 'policy', 'review_policy', 'automation'):
+                body = json.dumps(dict(request_id='route-' + action, task_id=self.task['id'])).encode()
+                try:
+                    urlopen(Request(base + '/api/tasks/' + action, headers=headers, data=body))
+                except HTTPError as error:
+                    self.assertNotIn('Unknown endpoint', error.read().decode(), action)
+        finally:
+            gateway.shutdown()
+            gateway.server_close()
+            thread.join(timeout=2)
+
     def test_push_isolated_config_exact_sha_no_force_and_local_bare_rejection(self):
         task = self.candidate()
         remote = self.root / 'remote.git'
@@ -995,10 +1380,10 @@ class ContributionTests(unittest.TestCase):
             result = real_run(arguments, **kwargs)
             return result
         with patch.object(contributions.sys, 'platform', 'linux'), patch.object(contributions.subprocess, 'run', side_effect=run):
-            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api)
+            contributions.push(Path(task['worktree']), task['branch'], task['head_sha'], self.api, task['github_repository'])
             # A rewind to the original base is non-fast-forward and rejected.
             with self.assertRaisesRegex(ValueError, 'rejected'):
-                contributions.push(Path(task['worktree']), task['branch'], self.base, self.api)
+                contributions.push(Path(task['worktree']), task['branch'], self.base, self.api, task['github_repository'])
         pushed = [args for args, _ in calls if 'push' in args]
         self.assertEqual(len(pushed), 2)
         self.assertIn('--no-force', pushed[0])
@@ -1593,6 +1978,265 @@ class ContributionTests(unittest.TestCase):
         proposals_shown = self.service.detail(task['id'])['meeting_results'][0]['proposals']
         self.assertEqual(proposals_shown[0]['assignee'], 'Nora')
         self.assertNotEqual(proposals_shown[0]['assignee'], 'worker')
+
+    def test_a_taskless_group_discussion_still_creates_its_follow_ups(self):
+        # A group-level discussion belongs to no task, so nothing hung it on a
+        # task's meetings and it was never evaluated: the proposal was read by
+        # nobody and no draft ever appeared.
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile, name='Nora')]
+        job = dict(id='discussion', kind='discussion', organization_id='org', group_id='review',
+                   state='artifact_ready', created_at=contributions.stamp(),
+                   result='```json\n' + json.dumps({'task_proposals': [
+                       dict(title='Add a regression test', description='Cover the boundary case with checks.',
+                            profile_id='worker', needs_review=False)]}) + '\n```')
+        self.service.materialize_discussion(job, dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue',
+                                            queue_allowed=False)
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(marker['drafts']), 1)
+        self.assertEqual(marker['skipped'], {})
+        created = self.service.get(marker['created'][marker['drafts'][0]])
+        self.assertEqual(created['state'], 'draft')
+        self.assertEqual(created['repository'], 'repo')
+        self.assertEqual(created['profile_id'], 'worker')
+        self.assertNotIn('discussion', created['source'])
+        self.assertEqual(created['source']['auto_queued']['group_id'], 'review')
+        self.assertEqual(created['source']['auto_queued']['proposal_key'], marker['drafts'][0])
+        # The base is resolved from the repository, exactly as a manual task.
+        self.assertTrue(created['base_ref'])
+        # Evaluating again is a no-op: the marker is the idempotence key.
+        self.store.update_job.reset_mock()
+        self.service.materialize_discussion(dict(job, proposals=marker),
+                                            dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue')
+        self.store.update_job.assert_not_called()
+
+    def taskless_proposal_job(self, job_id='discussion', count=1):
+        return dict(id=job_id, kind='discussion', organization_id='org', group_id='review',
+                    state='artifact_ready', created_at=contributions.stamp(),
+                    result='```json\n' + json.dumps({'task_proposals': [
+                        dict(title='Follow up ' + str(i), description='Acceptance criteria and required checks.',
+                             profile_id='worker', needs_review=False) for i in range(count)]}) + '\n```')
+
+    def test_taskless_proposals_cannot_cross_organization_boundaries(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile, organization_id='other-org')]
+        self.service.materialize_discussion(self.taskless_proposal_job(),
+                                            dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(marker['created'], {})
+        self.assertEqual(list(marker['skipped'].values()), ['assignee belongs to another organization'])
+        self.assertEqual(self.service.queued_assignments(), [])
+
+    def test_taskless_proposals_share_the_durable_daily_cap(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1,
+                      max_open_per_agent=10, max_per_meeting=3)
+        self.service.materialize_discussion(self.taskless_proposal_job(count=2), policy, 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(marker['queued']), 1)
+        self.assertEqual(list(marker['skipped'].values()), ['daily automation limit reached'])
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.service.materialize_discussion(self.taskless_proposal_job('next'), policy, 'group_auto_queue')
+        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['skipped'].values()),
+                         ['daily automation limit reached'])
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+
+    def test_drafts_do_not_spend_the_automatic_queue_budget(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        self.service.materialize_discussion(self.taskless_proposal_job('draft'), policy,
+                                            'group_auto_queue', queue_allowed=False)
+        self.assertEqual(self.service.auto_created_today('org'), 0)
+        self.service.materialize_discussion(self.taskless_proposal_job('queued'), policy, 'group_auto_queue')
+        self.assertEqual(len(self.store.update_job.call_args[1]['proposals']['queued']), 1)
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+
+    def test_taskless_daily_budget_also_blocks_task_linked_proposals(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        self.service.materialize_discussion(self.taskless_proposal_job(), policy, 'group_auto_queue')
+        host = self.candidate()
+        self._meeting(host, [dict(title='Linked follow-up', description='Acceptance and checks.', profile_id='worker')])
+        self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        marker = self.service.get(host['id'])['auto_queue']['meeting']
+        self.assertEqual(marker['queued'], [])
+        self.assertEqual(list(marker['skipped'].values()), ['daily automation limit reached'])
+
+    def test_taskless_recovery_does_not_spend_twice_or_duplicate_queue(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=1)
+        job = self.taskless_proposal_job()
+        # The durable proposal is saved, then the process dies before queueing.
+        with patch.object(self.service, 'enqueue_assignment', side_effect=RuntimeError('crash')):
+            with self.assertRaisesRegex(RuntimeError, 'crash'):
+                self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.assertEqual(self.service.queued_assignments(), [])
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        first = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(first['queued']), 1)
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        self.assertEqual(first['created'], self.store.update_job.call_args[1]['proposals']['created'])
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        made = self.service.get(next(iter(first['created'].values())))
+        made.update(state='implementing', run_id='active-run')
+        self.service.save(made, 'started', 'admin')
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        self.assertEqual(self.service.get(made['id'])['state'], 'implementing')
+
+    def test_task_linked_recovery_resumes_a_recorded_budget_reservation(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=1)
+        host = self.candidate()
+        self._meeting(host, [dict(title='Linked follow-up', description='Acceptance and checks.', profile_id='worker')])
+        with patch.object(self.service, 'enqueue_assignment', side_effect=RuntimeError('crash')):
+            with self.assertRaisesRegex(RuntimeError, 'crash'):
+                self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        marker = self.service.get(host['id'])['auto_queue']['meeting']
+        self.assertEqual(len(marker['queued']), 1)
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+
+    def test_existing_taskless_queue_records_count_toward_the_budget(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        self.service.materialize_discussion(self.taskless_proposal_job(), policy, 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        made = self.service.get(next(iter(marker['created'].values())))
+        record = made['source'].pop('auto_queued')
+        made['source']['discussion'] = dict(job_id=record['meeting_id'], group_id=record['group_id'],
+                                            proposal_key=record['proposal_key'], queued=record['queued'], at=record['at'])
+        self.service.save(made, 'legacy_fixture', 'admin')
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.service.materialize_discussion(self.taskless_proposal_job('next'), policy, 'group_auto_queue')
+        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['skipped'].values()),
+                         ['daily automation limit reached'])
+
+    def test_canonical_budget_record_wins_over_an_old_duplicate(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS)
+        self.service.materialize_discussion(self.taskless_proposal_job(), policy,
+                                            'group_auto_queue', queue_allowed=False)
+        marker = self.store.update_job.call_args[1]['proposals']
+        made = self.service.get(next(iter(marker['created'].values())))
+        made['source']['discussion'] = dict(job_id='discussion', queued=True, at=contributions.stamp())
+        self.service.save(made, 'legacy_duplicate_fixture', 'admin')
+        self.assertEqual(self.service.auto_created_today('org'), 0)
+
+    def test_concurrent_discussions_share_one_organization_budget(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        barrier = threading.Barrier(2)
+        errors = []
+        def create(job_id):
+            try:
+                barrier.wait(timeout=5)
+                self.service.materialize_discussion(self.taskless_proposal_job(job_id), policy, 'group_auto_queue')
+            except Exception as error:
+                errors.append(error)
+        threads = [threading.Thread(target=create, args=(str(i),)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+
+    def test_recovering_one_follow_up_preserves_its_siblings(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=5, max_open_per_agent=10, max_per_meeting=2)
+        host = self.candidate()
+        self._meeting(host, [
+            dict(title='First follow-up', description='Acceptance and checks.', profile_id='worker'),
+            dict(title='Second follow-up', description='Acceptance and checks.', profile_id='worker')])
+        enqueue = self.service.enqueue_assignment
+        calls = []
+        def crash_on_second(task, actor):
+            calls.append(task['id'])
+            if len(calls) == 2:
+                raise RuntimeError('crash')
+            return enqueue(task, actor)
+        with patch.object(self.service, 'enqueue_assignment', side_effect=crash_on_second):
+            with self.assertRaisesRegex(RuntimeError, 'crash'):
+                self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        origin = self.service.get(host['id'])
+        self.assertEqual(set(origin['follow_up_tasks'].values()), set(calls))
+        self.assertEqual(len(origin['auto_queue']['meeting']['queued']), 2)
+        self.assertEqual(self.service.auto_created_today('org'), 2)
+        self.assertEqual(len(self.service.queued_assignments()), 2)
+
+    def test_a_discussion_about_an_open_task_still_creates_its_follow_up(self):
+        # The task-linked query required a finished host task, and the taskless
+        # query excludes anything carrying a task id, so a discussion about a
+        # draft or implementing task fell outside both paths and created
+        # nothing at all.
+        self.store.snapshot.return_value['organizations'] = [dict(id='org')]
+        task = self.service.save(dict(self.task, state='implementing'), 'test', 'admin')
+        self.assertEqual(self.service.get(task['id'])['state'], 'implementing')
+        self.service.action('automation', dict(request_id='a-1', organization_id='org',
+                                               auto_queue_proposals=True), 'admin', 'admin')
+        proposals = [dict(title='Follow up early', description='Proposed while the host is open.',
+                          profile_id='worker')]
+        self._meeting(task, proposals)
+        self.service.advance_proposals()
+        origin = self.service.get(task['id'])
+        marker = origin['auto_queue']['meeting']
+        self.assertEqual(len(marker['queued']), 1)
+        created = self.service.get(origin['follow_up_tasks'][marker['queued'][0]])
+        self.assertEqual(created['source']['task_id'], task['id'])
+        # Exactly once: a second pass must not create another.
+        before = len(self.service.snapshot()['tasks'])
+        self.service.advance_proposals()
+        self.assertEqual(len(self.service.snapshot()['tasks']), before)
+
+    def test_a_task_linked_discussion_is_not_evaluated_by_the_taskless_path(self):
+        # A discussion that belongs to a task carries a group id too, so both
+        # paths selected it. Their deterministic ids use different namespaces,
+        # so the same proposal became two drafts.
+        import sqlite3 as _sqlite3
+        org_db = _sqlite3.connect(self.root / 'organizations.sqlite3')
+        self.addCleanup(org_db.close)
+        with org_db:
+            org_db.execute('CREATE TABLE jobs (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL)')
+            for job in (dict(id='linked', kind='discussion', organization_id='org', group_id='review',
+                             task_id='task-1', state='artifact_ready', created_at=contributions.stamp()),
+                        dict(id='free', kind='discussion', organization_id='org', group_id='review',
+                             state='artifact_ready', created_at=contributions.stamp())):
+                org_db.execute('INSERT INTO jobs VALUES (?,?,?)', (job['id'], 'org', json.dumps(job)))
+
+        class KeepOpen:
+            """The caller closes what connect() returns; this one is reused."""
+            def __getattr__(self, name):
+                return getattr(org_db, name)
+            def close(self):
+                pass
+
+        self.store.connect = KeepOpen
+        self.store.snapshot.return_value['groups'] = [
+            dict(id='review', organization_id='org', name='Review', create_tasks=True,
+                 updated_at='2000-01-01T00:00:00+00:00')]
+        seen = []
+        with patch.object(self.service, 'materialize_discussion',
+                          side_effect=lambda job, policy, actor, queue_allowed=True: seen.append(job['id'])):
+            self.service.advance_proposals()
+        self.assertEqual(seen, ['free'])
+
+    def test_a_taskless_proposal_for_an_unmanaged_assignee_is_skipped(self):
+        self.store.snapshot.return_value['profiles'] = [
+            dict(self.profile, name='Nora', project=str(self.root.parent / 'elsewhere'))]
+        job = dict(id='discussion', kind='discussion', organization_id='org', group_id='review',
+                   state='artifact_ready', created_at=contributions.stamp(),
+                   result='```json\n' + json.dumps({'task_proposals': [
+                       dict(title='Outside', description='Assignee works outside managed projects.',
+                            profile_id='worker')]}) + '\n```')
+        self.service.materialize_discussion(job, dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(marker['drafts'], [])
+        self.assertEqual(list(marker['skipped'].values()), ['assignee is not assigned to a managed repository'])
 
     def test_auto_queue_materializes_qualifying_proposals_with_caps_and_depth(self):
         self.store.snapshot.return_value['organizations'] = [dict(id='org')]

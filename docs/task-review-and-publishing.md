@@ -1,0 +1,143 @@
+# Task review and GitHub publishing
+
+A validated candidate has passed its configured checks. Group discussion
+finalization means the discussion output is ready, not that the candidate was
+approved. Read the findings before completing the task. A follow-up may fix an
+unmet acceptance criterion or propose an independent improvement; creating a
+draft does not record which of those applies.
+
+The task page shows the latest group review and its findings. New reviews record
+the candidate SHA. An older candidate, or a legacy review without a recorded
+candidate, needs comparison against the latest changes. Independent acceptance
+review results remain visible separately. The full discussion and its proposal
+actions are under Activity & agents.
+
+## Configure GitHub
+
+As a dashboard administrator, open Tasks → GitHub publishing, or choose
+Set up GitHub publishing on a task. Supply:
+
+- A fine-grained personal access token belonging to an account with push access
+  to the selected repositories. Select the repository owner as resource owner,
+  choose the repositories, set an expiry, and obtain organization approval if
+  the organization requires it.
+- Repository permissions: Contents write, Pull requests write, Checks read and
+  Commit statuses read. Publishing workflow changes may also require Workflows
+  write. Keep branch protection enabled.
+- An allowlist of 1–20 repositories, one `owner/repository` per line. For this
+  repository that is `Ultarius/herdr_proxmox`. The task's GitHub origin must match
+  an allowlisted repository.
+
+Each allowlisted repository also chooses a publication mode:
+
+- **Direct** pushes the task branch and opens the pull request in the same
+  repository. The account needs push access there, as before.
+- **Through a fork** pushes the task branch to your fork and opens the pull
+  request upstream. The fork must be created on GitHub first; Herdr selects an
+  existing fork rather than creating one. Setup verifies that the fork belongs
+  to the upstream's fork network and that the account can write to it, and it
+  no longer requires push access to the upstream — that requirement would
+  contradict the purpose of contributing through a fork.
+
+The upstream repository always remains the source of the base branch and the
+pull request target. Only the branch destination moves to the fork.
+
+Validate and save reports capability rather than asserting it. Account access
+and token permission are separate, and setup is read-only:
+
+```
+Fork access: verified
+Account write access to the fork: verified
+Token write capability: not yet exercised
+Upstream PR creation: supported | needs different authentication
+```
+
+Setup never creates a branch or pull request to prove write access. A
+fine-grained token is limited to its resource owner's repositories, so it
+generally cannot open a pull request on another account's repository; in that
+case Herdr reports that upstream PR creation needs different authentication, and
+a classic token with `public_repo` (plus `workflow` when publishing workflow
+changes) is the narrower supported option. A classic token cannot grant
+repository privileges the account itself lacks.
+
+The gateway needs working Internet routing and DNS. Publishing uploads the exact
+reviewed commit; it does not merge or deploy it. Pull request creation and
+subsequent GitHub review are separate actions in the task workflow.
+
+A task records the destination used for it. Before publication an administrator
+can switch between the upstream repository and its configured fork; the change
+is audited. Once the branch is published the destination is frozen, so a retry
+can never be redirected to a different repository. Tasks created before fork
+mode existed keep publishing directly.
+
+After publication, open Changes → Open draft PR. The dashboard fetches a fresh
+preview and states both destinations — the repository the branch is published to
+and the repository the draft PR is opened into — together with the source branch
+in `owner:branch` form, the target branch and the exact candidate SHA. It lets
+you edit the public title and Markdown description. Cancel sends no PR request.
+Create draft PR submits the edited text with explicit approval for that SHA; a
+changed candidate requires a new preview. New PR creation without this approval
+is rejected by the gateway, including requests from an older dashboard version.
+Existing PR reconciliation remains available.
+
+The suggested body includes task context, current-candidate validation and
+check results, acceptance-review state, discussion references, follow-up task
+IDs, and a section to fill in risks and limitations. Worker-reported checks are
+labeled separately from durable verification. The finalized discussion excerpt
+is offered as a separate opt-in and is left out of the default body, because it
+publishes the group's deliberation verbatim. Review and complete these sections
+before submission; the generator does not infer acceptance or approval from
+successful tests.
+
+Approving the text records its SHA-256 and the exact candidate, not the text
+itself. The description already exists on GitHub, and the task record is served
+in full by the task list, so storing it there would add up to 30 KB per task for
+no reader.
+
+Publication and PR creation remain separate. Recovery distinguishes the cases
+explicitly:
+
+- **Push failed:** nothing is published; no branch exists at the destination.
+- **Push succeeded, PR denied:** the branch is published at the recorded
+  destination and the failure says so. Fix PR authentication and retry; no
+  second push is attempted.
+- **PR response lost:** retrying searches upstream and reconciles the existing
+  pull request rather than creating a duplicate.
+- **Existing PR found:** it is reused, and its title and description are not
+  silently replaced.
+- **Branch moved at the destination:** Herdr stops for inspection and never
+  force-pushes.
+
+Pull request discovery and validation both check identities: the head must be
+the recorded publishing repository and branch, and the base must be the upstream
+repository and the task's recorded base branch. Matching a branch name alone
+would not be enough — it could attach another account's pull request to this
+task. Checks, reviews and merge status are always read from the upstream pull
+request, and the upstream base branch must exist before a pull request is
+created. Both account repository access and token permissions limit authority;
+setup's read-only account-access check cannot guarantee token write permission.
+Fine-grained tokens need Contents write, plus Workflows write when workflows
+change; classic tokens use the corresponding repo and workflow scopes.
+
+Tokens are stored server-side with restrictive file permissions and omitted from
+snapshots. Gateway and agents currently share a Linux user, so this is not
+credential isolation from same-user agents. The setup dialog explains this.
+
+GitHub reference:
+[managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+
+## Agent ownership and follow-ups
+
+Task completion and execution completion are separate. A follow-up draft does
+not reserve its assigned agent. A finished implementation may hand its agent
+to the next queued task while the original remains Review ready.
+
+The scheduler verifies the previous execution's receipt against the exact
+candidate, a clean assigned checkout without an unfinished Git operation,
+the live session identity and settled state, and absence of discussion
+reservations. It archives the context and closes the verified session before
+starting the next task. Failed checks retain ownership and require inspection.
+
+A group proposal alone cannot replace these checks. It can discuss work that
+is still running, recommend optional improvements, or refer to an earlier
+candidate. Likewise, an idle pane by itself is not proof of completed work.
