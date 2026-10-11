@@ -1,5 +1,6 @@
 import json
 from contextlib import closing, contextmanager
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -366,6 +367,7 @@ class ContributionTests(unittest.TestCase):
         self.assertIn('task_proposals', prompt)
         self.assertIn('Read-only discussion', prompt)
         self.assertEqual(reviewed['meetings'][0]['job_id'], 'meeting')
+        self.assertEqual(reviewed['meetings'][0]['candidate'], task['head_sha'])
         task = self.service.get(task['id'])
         task.update(auto_review=True, review_group_id='group')
         self.service.save(task, 'review_policy', 'admin')
@@ -375,6 +377,7 @@ class ContributionTests(unittest.TestCase):
         job = dict(id='meeting', organization_id='org', task_id=task['id'], kind='discussion', state='artifact_ready',
                    result='```json\n' + json.dumps({'task_proposals': [dict(title='Add status coverage', description='Add a regression check. Acceptance: filters compose. Run widget tests.', profile_id='worker')]}) + '\n```')
         self.store.snapshot.return_value['jobs'].append(job)
+        self.assertEqual(self.service.detail(task['id'])['meeting_results'][0]['candidate'], task['head_sha'])
         proposal = self.service.detail(task['id'])['meeting_results'][0]['proposals'][0]
         created = self.service.action('proposal', dict(task_id=task['id'], request_id='approve-proposal', meeting_id='meeting', proposal_key=proposal['key']), 'admin', 'admin')
         follow_id = created['follow_up_tasks'][proposal['key']]
@@ -651,12 +654,97 @@ class ContributionTests(unittest.TestCase):
         self.api.find_pull.side_effect = [[], [pull]]
         self.api.request.side_effect = GitHubError(422)
         with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
-            result = self.service.action('pull', dict(request_id='pull', task_id=task['id']), 'admin', 'admin')
+            preview = contributions.pull_preview(task)
+            result = self.service.action('pull', dict(request_id='pull', task_id=task['id'], head_sha=task['head_sha'],
+                                                     title=preview['title'], body=preview['body'], reviewed=True), 'admin', 'admin')
         self.assertEqual(result['pull']['number'], 7)
+        self.assertIn('existing PR was reused', result['pull_notice'])
         payload = self.api.request.call_args.args[2]
         self.assertTrue(payload['draft'])
         self.assertIn('not verified', payload['body'])
         self.assertEqual(payload['base'], 'main')
+
+    def test_pull_preview_never_uses_previous_candidate_evidence(self):
+        task = self.candidate()
+        head = task['head_sha']
+        task['builds'] = {'a' * 40: dict(target='a' * 40, state='complete', required_checks_verified=True,
+                                        checks=[dict(id='old-check', status='passed')])}
+        task['acceptance'] = dict(sha='a' * 40, state='satisfied', reason='Old approval')
+        task['meeting_results'] = [dict(candidate='a' * 40, state='artifact_ready', result='Outdated findings'),
+                                   dict(candidate=head, state='artifact_ready', result='Current findings')]
+        preview = contributions.pull_preview(task)
+        self.assertIn('not verified for this candidate', preview['body'])
+        self.assertNotIn('old-check', preview['body'])
+        self.assertNotIn('Old approval', preview['body'])
+        self.assertNotIn('Outdated findings', preview['body'] + preview['excerpt'])
+        # The excerpt is opt-in, so the current findings stay out of the
+        # default public body and are offered separately.
+        self.assertNotIn('Current findings', preview['body'])
+        self.assertIn('Current findings', preview['excerpt'])
+        task['builds'][head] = dict(target=head, state='complete', required_checks_verified=True,
+                                   checks=[dict(id='current-check', status='passed')])
+        preview = contributions.pull_preview(task)
+        self.assertIn('Required checks: verified for this candidate', preview['body'])
+        self.assertIn('current-check', preview['body'])
+        self.assertEqual(preview['head_sha'], head)
+
+    def test_pull_requires_preview_approval_and_preserves_edited_text(self):
+        task = self.candidate()
+        task.update(state='published', publish=dict(head_sha=task['head_sha']))
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = self.pull_data(task)
+        fields = dict(task_id=task['id'], head_sha=task['head_sha'], reviewed=True,
+                      title='Reviewed title', body='## Summary\nEdited evidence and risks.')
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            for request_id, override in [('missing-approval', {'reviewed': False}),
+                                         ('stale-preview', {'head_sha': 'a' * 40}),
+                                         ('blank-body', {'body': ''}), ('long-title', {'title': 'x' * 257})]:
+                with self.assertRaises(ValueError):
+                    self.service.action('pull', dict(fields, request_id=request_id, **override), 'admin', 'admin')
+            self.api.request.assert_not_called()
+            self.service.action('pull', dict(fields, request_id='approved-preview'), 'admin', 'admin')
+        payload = self.api.request.call_args.args[2]
+        self.assertEqual(payload['title'], fields['title'])
+        self.assertEqual(payload['body'], fields['body'])
+        self.assertTrue(payload['draft'])
+        self.assertEqual(payload['head'], task['branch'])
+
+    def test_pull_approval_records_a_hash_instead_of_the_public_text(self):
+        task = self.candidate()
+        task.update(state='published', publish=dict(head_sha=task['head_sha']))
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.return_value = self.pull_data(task)
+        body = '## Summary\nPublic evidence that must not be persisted on the task record.'
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            self.service.action('pull', dict(request_id='hashed-approval', task_id=task['id'],
+                                            head_sha=task['head_sha'], reviewed=True,
+                                            title='Reviewed title', body=body), 'admin', 'admin')
+        saved = self.service.get(task['id'])
+        approval = saved['pull_approval']
+        self.assertEqual(approval['head_sha'], task['head_sha'])
+        self.assertEqual(approval['title'], 'Reviewed title')
+        self.assertEqual(approval['body_sha256'], hashlib.sha256(body.encode()).hexdigest())
+        self.assertNotIn('body', approval)
+        # The task list serves the whole task record, so the approved text must
+        # not ride along with it.
+        self.assertNotIn('Public evidence', json.dumps(saved))
+
+    def test_pr_permission_failure_does_not_undo_publication(self):
+        task = self.candidate()
+        task.update(state='published', publish=dict(head_sha=task['head_sha']))
+        self.service.save(task, 'publish', 'admin')
+        self.api.find_pull.return_value = []
+        self.api.request.side_effect = GitHubError(403)
+        with patch.object(self.service, 'remote_head', return_value=task['head_sha']):
+            with self.assertRaisesRegex(ValueError, 'branch is already published'):
+                self.service.action('pull', dict(request_id='denied-pr', task_id=task['id'], head_sha=task['head_sha'],
+                                                title='Title', body='Description', reviewed=True), 'admin', 'admin')
+        saved = self.service.get(task['id'])
+        self.assertEqual(saved['state'], 'published')
+        self.assertEqual(saved['publish']['head_sha'], task['head_sha'])
+        self.assertNotIn('pull', saved)
 
     def test_pr_changed_head_and_resulting_merge_sha_are_distinct(self):
         task = self.candidate()

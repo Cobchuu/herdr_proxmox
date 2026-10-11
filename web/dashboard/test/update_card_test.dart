@@ -7,6 +7,74 @@ import 'package:herdr_dashboard/dashboard_bloc.dart';
 import 'package:herdr_dashboard/update_card.dart';
 
 void main() {
+  testWidgets(
+    'failed lookup distinguishes previous install and shows recovery advice',
+    (tester) async {
+      final bloc = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/updates')) {
+            return http.Response(
+              jsonEncode({
+                'installed': 'v0.0.46',
+                'latest': null,
+                'state': 'complete',
+                'supported': true,
+                'available': false,
+                'check_error': 'DNS unavailable',
+                'check_diagnostic': 'Check the gateway in Proxmox → Network.',
+                'check_failures': 37,
+                'check_failed_since': '2026-10-11T14:02:00+00:00',
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => bloc);
+      BlocScope.get<DashboardBloc>();
+      bloc.connect('token');
+      await tester.pump(const Duration(milliseconds: 110));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: SingleChildScrollView(child: UpdateCard())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Latest: Unavailable'), findsOneWidget);
+      expect(
+        find.text('Check the gateway in Proxmox → Network.'),
+        findsOneWidget,
+      );
+      // The diagnosis is the actionable message; the raw exception would only
+      // compete with it. It stays the sole signal when there is no diagnosis.
+      expect(find.textContaining('Release lookup unavailable'), findsNothing);
+      expect(
+        find.textContaining(
+          'Release lookup failed 37 times since 2026-10-11T14:02:00+00:00',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'The previous installation completed. The current release check failed.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Update complete. Reload this page to use the new dashboard.',
+        ),
+        findsNothing,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await bloc.disconnect();
+      await BlocScope.reset();
+    },
+  );
+
   testWidgets('alpha dropdown requires explicit selection and confirmation', (
     tester,
   ) async {
@@ -22,6 +90,7 @@ void main() {
               ],
             }),
             200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
           );
         }
         if (request.url.path.endsWith('/updates/install')) {
@@ -32,14 +101,17 @@ void main() {
           return http.Response(
             '{"installed":"v1.0.0","latest":"v1.0.0","state":"idle","supported":true,"available":false}',
             200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
           );
         }
         return http.Response('{"workspaces":[],"agents":[]}', 200);
       }),
     );
     BlocScope.register<DashboardBloc>(() => bloc);
+    BlocScope.get<DashboardBloc>();
     bloc.connect('token');
-    await bloc.stream.firstWhere((_) => bloc.state.refreshed != null);
+    await tester.pump(const Duration(milliseconds: 110));
+    await tester.pumpAndSettle();
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(body: SingleChildScrollView(child: UpdateCard())),

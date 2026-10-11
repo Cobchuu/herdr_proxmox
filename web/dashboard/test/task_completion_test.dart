@@ -8,6 +8,131 @@ import 'package:herdr_dashboard/tasks_page.dart';
 
 void main() {
   testWidgets(
+    'task separates group findings from GitHub publication and opens setup',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final head = 'b' * 40;
+      final task = <String, dynamic>{
+        'id': 'task',
+        'title': 'Validated task',
+        'state': 'review_ready',
+        'repository': 'repo',
+        'head_sha': head,
+        'builds': {
+          head: {
+            'target': head,
+            'state': 'complete',
+            'required_checks_verified': true,
+          },
+        },
+        'meeting_results': [
+          {
+            'job_id': 'meeting',
+            'group_name': 'Review team',
+            'state': 'artifact_ready',
+            'candidate': head,
+            'result': 'Add a regression test.',
+            'proposals': [
+              {
+                'title': 'Coverage',
+                'description': 'Add missing coverage.',
+                'key': 'p',
+              },
+            ],
+          },
+        ],
+        'follow_up_tasks': {'p': 'draft'},
+      };
+      Map<String, dynamic>? configuration;
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/github/configure')) {
+            configuration = Map<String, dynamic>.from(jsonDecode(request.body));
+            return http.Response('{"configured":true}', 200);
+          }
+          return http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/tasks')
+                  ? {
+                      'tasks': [task],
+                      'github': {'configured': false},
+                    }
+                  : task,
+            ),
+            200,
+          );
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      connection.connect('token');
+      connection.operator.value = {'role': 'admin'};
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: TasksPage(taskId: 'task')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.widgetWithText(FilledButton, 'Review and publish on GitHub'),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        find.textContaining('This is not an approval verdict.'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('A draft alone does not record that decision.'),
+        findsOneWidget,
+      );
+      expect(find.text('Add a regression test.'), findsOneWidget);
+      await tester.tap(find.text('Set up GitHub publishing'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Contents write, Pull requests write'),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Personal access token'),
+        'github_pat_test_token',
+      );
+      await tester.enterText(
+        find.widgetWithText(
+          TextField,
+          'Allowed owner/repository (one per line)',
+        ),
+        'owner/repo',
+      );
+      await tester.tap(find.text('Validate and save'));
+      await tester.pumpAndSettle();
+      expect(configuration?['repositories'], ['owner/repo']);
+      expect(configuration?['token'], 'github_pat_test_token');
+      final meeting = (task['meeting_results'] as List).single as Map;
+      meeting['candidate'] = 'a' * 40;
+      await tester.tap(find.byTooltip('Refresh task'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('This review concerns an earlier candidate.'), findsOneWidget);
+      meeting.remove('candidate');
+      await tester.tap(find.byTooltip('Refresh task'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('This older review has no recorded candidate.'), findsOneWidget);
+      await tester.tap(find.text('Read full group review'));
+      await tester.pumpAndSettle();
+      expect(find.text('Review team review'), findsOneWidget);
+      expect(find.text('Draft created'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    },
+  );
+
+  testWidgets(
     'reviewed completion records done without claiming a validation pass',
     (tester) async {
       final task = <String, dynamic>{

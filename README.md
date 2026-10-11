@@ -1,5 +1,9 @@
 # Herdr on Proxmox VE
 
+See the [documentation index](docs/README.md) for setup, operator guides, task
+workflows and development. For failed update checks, start with
+[network troubleshooting](docs/network-troubleshooting.md).
+
 A standalone two-stage installer: `ct/herdr.sh` creates an unprivileged Debian 13
 LXC, then `install/herdr-install.sh` installs official Herdr in that container.
 Default resources are 4 cores, 8 GiB RAM, a 32 GiB disk and 2 GiB swap; agent

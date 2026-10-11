@@ -1,13 +1,70 @@
 """Release discovery and a fixed-purpose systemd update request."""
 import json
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 import re
+import socket
+import subprocess
 import threading
 import time
 from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 REPOSITORY = 'Ultarius/herdr_proxmox'
 ASSETS = {'herdr-proxmox.tar.gz', 'herdr-proxmox.tar.gz.sha256'}
+# Four read-only probes must fit alongside the ten-second GitHub timeout
+# within the dashboard's fifteen-second request budget.
+ROUTE_TIMEOUT = 0.5
+
+
+def lookup_diagnostic(error):
+    """Diagnose connectivity without changing the container's network settings."""
+    cause = error.reason if isinstance(error, URLError) else error
+    if isinstance(error, HTTPError) or not isinstance(cause, (socket.gaierror, ConnectionError, TimeoutError)):
+        return None
+    routes, defaults, limitations = [], [], []
+    for family, destination in (('-4', '8.8.8.8'), ('-6', '2001:4860:4860::8888')):
+        try:
+            result = subprocess.run(['ip', family, 'route', 'get', destination],
+                                    capture_output=True, text=True, timeout=ROUTE_TIMEOUT)
+        except FileNotFoundError:
+            limitations.append('ip is unavailable')
+            break
+        except (OSError, subprocess.TimeoutExpired):
+            routes.append(None)
+            limitations.append(f'IPv{family[1:]} route lookup failed or timed out')
+        else:
+            routes.append(result.returncode == 0)
+        try:
+            result = subprocess.run(['ip', family, 'route', 'show', 'default'],
+                                    capture_output=True, text=True, timeout=ROUTE_TIMEOUT)
+        except FileNotFoundError:
+            limitations.append('ip is unavailable')
+            break
+        except (OSError, subprocess.TimeoutExpired):
+            defaults.append(None)
+        else:
+            defaults.append(result.stdout.strip()[:500] if result.returncode == 0 else None)
+    configured = ' '.join(f'IPv{number} default route: {route or "not configured"}.'
+                          for number, route in zip((4, 6), defaults) if route is not None)
+    if None in defaults:
+        limitations.append('default routes could not be read')
+    limited = (' Routing could not be fully checked: ' + '; '.join(dict.fromkeys(limitations)) + '.') if limitations else ''
+    persistent = (' A route added with ip route add default is temporary. Save the gateway '
+                  'in Proxmox → Network so it survives a reboot.')
+    if routes == [False, False] and defaults == ['', '']:
+        return ('No route to the Internet was found. ' + configured
+                + ' Check the container’s IPv4 gateway or IPv6 routing.' + persistent)
+    if routes == [False, False]:
+        finding = 'Route lookups failed; the configured routes do not provide a verified route to the probe addresses.'
+    elif isinstance(cause, socket.gaierror):
+        finding = 'GitHub DNS lookup failed.'
+    else:
+        finding = 'GitHub could not be reached.'
+    return (finding + (' ' + configured if configured else '') + limited
+            + ' Gateway reachability was not tested. Check routing, DNS and firewall settings, then retry.'
+            + persistent)
 
 
 def latest_release():
@@ -46,6 +103,10 @@ class Updates:
         self.refreshing = False
         self.retry_after = 0
         self.check_error = None
+        self.check_diagnostic = None
+        self.check_failures = 0
+        self.check_failed_since = None
+        self.failure_signature = None
 
     def _status(self):
         try:
@@ -113,7 +174,7 @@ class Updates:
         with self.lock:
             now = time.monotonic()
             refresh = (force or self.cached is None or now - self.checked > 3600)
-            refresh = refresh and not self.refreshing and now >= self.retry_after
+            refresh = refresh and not self.refreshing and (force or now >= self.retry_after)
             if refresh:
                 self.refreshing = True
             cached = self.cached
@@ -122,20 +183,44 @@ class Updates:
             try:
                 release = latest_release()
             except Exception as exception:
+                diagnostic = lookup_diagnostic(exception)
                 with self.lock:
+                    cause = exception.reason if isinstance(exception, URLError) else exception
+                    signature = (type(exception).__name__, type(cause).__name__, str(exception), diagnostic)
+                    changed = signature != self.failure_signature
+                    self.failure_signature = signature
+                    self.check_failures += 1
+                    if self.check_failed_since is None:
+                        self.check_failed_since = datetime.now(timezone.utc).isoformat(timespec='seconds')
+                    failures, since = self.check_failures, self.check_failed_since
                     self.check_error = str(exception)
+                    self.check_diagnostic = diagnostic
                     self.retry_after = time.monotonic() + 60
                     cached, error = self.cached, self.check_error
+                logger = logging.getLogger(__name__)
+                logger.log(logging.WARNING if changed else logging.DEBUG,
+                           'Release lookup failed %d times since %s: %s; %s', failures, since,
+                           exception, diagnostic or 'No connectivity diagnosis available')
             else:
                 with self.lock:
+                    failures, since = self.check_failures, self.check_failed_since
                     self.cached = cached = release
                     self.checked = time.monotonic()
                     self.retry_after = 0
                     self.check_error = error = None
+                    self.check_diagnostic = None
+                    self.check_failures = 0
+                    self.check_failed_since = None
+                    self.failure_signature = None
+                if failures:
+                    logging.getLogger(__name__).info('Release lookup recovered after %d failures since %s', failures, since)
             finally:
                 with self.lock:
                     self.refreshing = False
         with self.lock:
+            # Counters, diagnosis and error must describe the same episode even
+            # when another request finishes discovery after this read began.
+            cached, error = self.cached, self.check_error
             latest = cached['tag_name'] if cached else None
             version = self.root / 'VERSION'
             installed = version.read_text().strip() if version.exists() else 'unknown'
@@ -169,6 +254,9 @@ class Updates:
                         deployment_mode='local' if local_mode else 'release',
                         release_url=cached['html_url'] if cached else None,
                         check_error=error,
+                        check_diagnostic=self.check_diagnostic,
+                        check_failures=self.check_failures,
+                        check_failed_since=self.check_failed_since,
                         notes=cached.get('body', '')[:12000] if cached else '')
 
     def alphas(self):

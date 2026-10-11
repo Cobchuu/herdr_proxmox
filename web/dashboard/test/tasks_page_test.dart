@@ -8,6 +8,193 @@ import 'package:herdr_dashboard/tasks_page.dart';
 import 'package:herdr_dashboard/routes.dart';
 
 void main() {
+  testWidgets(
+    'draft PR previews public text and sends only after confirmation',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final head = 'b' * 40;
+      final task = <String, dynamic>{
+        'id': 'task',
+        'title': 'Ready task',
+        'state': 'published',
+        'repository': 'repo',
+        'github_repository': 'owner/repo',
+        'head_sha': head,
+        'branch': 'herdr/task-123456abcdef',
+        'base_ref': 'refs/remotes/origin/main',
+        'publish': {'head_sha': head},
+        'pull_preview': {
+          'title': 'Suggested title',
+          'body': '## Summary\nSuggested evidence.',
+          'head_sha': head,
+          'repository': 'owner/repo',
+          'branch': 'herdr/task-123456abcdef',
+          'base': 'main',
+        },
+      };
+      final posts = <Map<String, dynamic>>[];
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/tasks/pull'))
+            posts.add(Map<String, dynamic>.from(jsonDecode(request.body)));
+          return http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/tasks')
+                  ? {
+                      'tasks': [task],
+                      'github': {'configured': true},
+                    }
+                  : task,
+            ),
+            200,
+          );
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      connection.connect('token');
+      connection.operator.value = {'role': 'admin'};
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: TasksPage(taskId: 'task')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Changes'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Open draft PR'));
+      await tester.tap(find.text('Open draft PR'));
+      await tester.pumpAndSettle();
+      expect(find.text('Preview draft pull request'), findsOneWidget);
+      expect(find.textContaining('Exact commit: $head'), findsOneWidget);
+      expect(posts, isEmpty);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(posts, isEmpty);
+      await tester.tap(find.text('Open draft PR'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'PR title'),
+        'Edited PR title',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'PR description (Markdown)'),
+        'Edited public description.',
+      );
+      await tester.tap(find.text('Create draft PR'));
+      await tester.pumpAndSettle();
+      expect(posts.single['title'], 'Edited PR title');
+      expect(posts.single['body'], 'Edited public description.');
+      expect(posts.single['head_sha'], head);
+      expect(posts.single['reviewed'], isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    },
+  );
+
+  for (final width in [390.0, 1280.0]) {
+    testWidgets('draft PR preview and excerpt opt-in adapt to $width', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(width, 1400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final head = ''.padLeft(40, 'b');
+      final task = {
+        'id': 'task-1',
+        'title': 'Implement feature',
+        'state': 'published',
+        'repository': 'repo',
+        'github_repository': 'owner/repo',
+        'run_id': 'run',
+        'branch': 'herdr/task-abcdefabcdef',
+        'base_ref': 'refs/remotes/origin/main',
+        'base_sha': ''.padLeft(40, 'a'),
+        'head_sha': head,
+        'publish': {'state': 'complete', 'head_sha': head},
+        'pull_preview': {
+          'title': 'Suggested title',
+          'body': '## Summary\nSuggested evidence.',
+          'excerpt':
+              'Finalized discussion excerpt (not an approval verdict):\n\nGroup findings.',
+          'head_sha': head,
+          'repository': 'owner/repo',
+          'branch': 'herdr/task-abcdefabcdef',
+          'base': 'main',
+        },
+        'audit': [],
+      };
+      final posts = <Map<String, dynamic>>[];
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/tasks/pull')) {
+            posts.add(Map<String, dynamic>.from(jsonDecode(request.body)));
+          }
+          return http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/tasks/detail')
+                  ? task
+                  : {
+                      'tasks': [task],
+                      'github': {'configured': true, 'login': 'owner'},
+                    },
+            ),
+            200,
+          );
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      connection.connect('token');
+      connection.operator.value = {'name': 'admin', 'role': 'admin'};
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: TasksPage(taskId: 'task-1'))),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Changes'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('Open draft PR'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open draft PR'));
+      await tester.pumpAndSettle();
+      expect(find.text('Preview draft pull request'), findsOneWidget);
+      final description = find.widgetWithText(
+        TextFormField,
+        'PR description (Markdown)',
+      );
+      // The excerpt publishes internal deliberation, so it stays out of the
+      // default body and is offered as an explicit choice.
+      expect(
+        tester.widget<TextFormField>(description).controller!.text,
+        isNot(contains('Group findings')),
+      );
+      final optIn = find.text('Include the finalized discussion excerpt');
+      await tester.ensureVisible(optIn);
+      await tester.pumpAndSettle();
+      await tester.tap(optIn);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextFormField>(description).controller!.text,
+        contains('Group findings'),
+      );
+      await tester.tap(find.text('Create draft PR'));
+      await tester.pumpAndSettle();
+      expect(posts.single['body'], contains('Group findings'));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    });
+  }
+
   test(
     'repository choices are relative, distinct, sorted and bounded to projects',
     () {

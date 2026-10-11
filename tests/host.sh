@@ -94,6 +94,12 @@ if var_swap=oops bash "$tmp/ct/herdr.sh" >"$tmp/output" 2>&1; then exit 1; fi
 if bash "$tmp/ct/herdr.sh" --template local:vztmpl/debian-13-standard_test_amd64.tar.zst --storage local-lvm --ip 'dhcp,bridge=bad' >"$tmp/output" 2>&1; then exit 1; fi
 [[ $(wc -l <"$HERDR_TEST_LOG") == "$before" ]]
 # Exercise exactly the raw bash -c invocation without network or a Proxmox host.
+before=$(wc -l <"$HERDR_TEST_LOG")
+if bash "$tmp/ct/herdr.sh" --ip 192.168.1.73/24 >"$tmp/output" 2>&1; then exit 1; fi
+grep -q 'Static IPv4 requires CIDR and --gateway' "$tmp/output"
+[[ $(wc -l <"$HERDR_TEST_LOG") == "$before" ]]
+bash "$tmp/ct/herdr.sh" --ip 192.168.1.73/24 --gateway 192.168.1.1 >"$tmp/output"
+grep -q 'name=eth0,bridge=vmbr0,ip=192.168.1.73/24,ip6=manual,type=veth,firewall=1,gw=192.168.1.1' "$HERDR_TEST_LOG"
 mkdir -p "$tmp/package/herdr-source"
 cp -R "$tmp/ct" "$tmp/install" "$tmp/package/herdr-source/"
 export HERDR_TEST_SOURCE_ARCHIVE="$tmp/source.tar.gz"

@@ -153,7 +153,57 @@ def push(repository, branch, sha, github):
             raise ValueError('Publish outcome is uncertain; repeat this request to reconcile the remote.') from None
         if result.returncode:
             raise ValueError('Branch push was rejected or authentication failed. '
-                             'Refresh GitHub status; never force-push.' + push_detail(folder))
+                             'Account access and token write permissions are separate: check the publishing account, '
+                             'repository selection and Contents write (or classic repo scope). Workflow changes also '
+                             'need Workflows write (or classic workflow scope). No force-push was attempted.' + push_detail(folder))
+
+
+def pull_preview(task):
+    """Prepare editable public text using only evidence for the candidate SHA.
+
+    The discussion excerpt is returned separately rather than embedded: it is
+    internal deliberation, so publishing it is an explicit operator decision.
+    Missing task fields degrade to empty strings; the pull action still
+    enforces every publish guard before a pull request is created.
+    """
+    head = task.get('head_sha')
+    evidence = task.get('builds', {}).get(head, {})
+    if evidence.get('target') != head:
+        evidence = {}
+    verified = evidence.get('state') == 'complete' and evidence.get('required_checks_verified') is True
+    acceptance = task.get('acceptance') or {}
+    acceptance_text = (str(acceptance.get('state', 'not recorded')) + ': ' + str(acceptance.get('reason', ''))
+                       if acceptance.get('sha') == head else 'No acceptance review recorded for this candidate.')
+    checks = '\n'.join('| ' + str(c.get('id', 'unknown')).replace('|', '/').replace('\n', ' ')[:120]
+                       + ' | ' + str(c.get('status', 'not_run')).replace('|', '/').replace('\n', ' ')[:40] + ' |'
+                       for c in evidence.get('checks', []) if isinstance(c, dict))
+    review_lines, excerpts = [], []
+    for meeting in task.get('meeting_results', task.get('meetings', []))[-10:]:
+        review_lines.append('- ' + str(meeting.get('group_name', 'Group')) + ': candidate `'
+                            + str(meeting.get('candidate', 'not recorded')) + '`; discussion `'
+                            + str(meeting.get('job_id', 'unknown')) + '`')
+        if meeting.get('candidate') == head and meeting.get('state') == 'artifact_ready' and meeting.get('result'):
+            excerpts.append(str(meeting['result'])[:1500])
+    reviews = '\n'.join(review_lines) or '- No group review recorded.'
+    receipt = task.get('completion_receipt') or {}
+    reported_tests = ((receipt.get('tests') or {}).get('summary') or '') if receipt.get('commit') == head else ''
+    follows = '\n'.join('- Task `' + str(task_id) + '` — relationship to completion needs review.'
+                        for task_id in (task.get('follow_up_tasks') or {}).values()) or '- No follow-up tasks recorded.'
+    text = ('## Problem and changes\n\n' + str(task.get('description') or '') + '\n\n## Acceptance criteria\n\n'
+            + acceptance_text + '\n\nReview each criterion from the task description before merging.\n\n'
+            + '## Validation\n\nSource: `' + str(head) + '`\nRequired checks: '
+            + ('verified for this candidate.' if verified else 'not verified for this candidate.')
+            + '\nPublication itself does not validate the change.\n\n'
+            + ('| Check | Status |\n| --- | --- |\n' + checks if checks else 'No individual check results recorded.')
+            + ('\n\nWorker-reported checks (separate from required-check verification):\n\n' + str(reported_tests)[:2000] if reported_tests else '')
+            + '\n\n## Reviews and follow-ups\n\n' + reviews + '\n\nDiscussion records are not approval verdicts; '
+            + 'older candidates do not approve this commit.\n\n' + follows
+            + '\n\n## Risks and limitations\n\nDescribe remaining risks, skipped checks and deployment considerations before submitting.'
+            + '\n\nTask: ' + str(task.get('id') or ''))
+    excerpt = ('Finalized discussion excerpt (not an approval verdict):\n\n' + '\n\n'.join(excerpts)) if excerpts else ''
+    return dict(title=str(task.get('title') or ''), body=text[:30000], excerpt=excerpt[:6000], head_sha=head,
+                repository=str(task.get('github_repository') or ''), branch=str(task.get('branch') or ''),
+                base=str(task.get('base_ref') or '').removeprefix('refs/remotes/origin/'))
 
 
 def task_base(repository, requested):
@@ -1592,10 +1642,12 @@ class Contributions:
                 proposals = [dict(p, assignee=names.get(p['profile_id'], 'Agent identity unavailable'))
                              for p in self.discussion_proposals(job)]
                 meetings.append(dict(reference, state=job['state'], result=job.get('result', ''),
+                    candidate=reference.get('candidate'),
                     error=job.get('error', ''), proposals=proposals))
             else:
                 meetings.append(dict(reference, state='unavailable', proposals=[]))
         task['meeting_results'] = meetings
+        task['pull_preview'] = pull_preview(task) if task.get('head_sha') else None
         task['participants'] = participants
         consultations = []
         for job in jobs:
@@ -2495,7 +2547,8 @@ class Contributions:
                 job = self.store.action('discuss', dict(request_id='task-review-' + task_id + '-' + signature,
                     organization_id=task['organization_id'], group_id=group['id'], prompt=topic))
                 self.store.update_job(job['id'], task_id=task_id, review_signature=signature)
-                task.setdefault('meetings', []).append(dict(job_id=job['id'], group_id=group['id'], group_name=group['name'], at=stamp(), signature=signature))
+                task.setdefault('meetings', []).append(dict(job_id=job['id'], group_id=group['id'], group_name=group['name'], at=stamp(), signature=signature,
+                                                           candidate=task.get('head_sha')))
                 task['meetings'] = task['meetings'][-30:]
                 task['review_signature'] = self.review_signature(task)
                 task.pop('review_error', None)
@@ -2594,32 +2647,54 @@ class Contributions:
             task['state'] = 'pr_open' if task.get('pull') else 'published'
         elif action == 'pull':
             published = task.get('publish', {}).get('head_sha')
+            # Two related guards that must not be merged. This one defaults a
+            # missing head_sha so an older client can still reconcile an
+            # existing PR; the check below requires the SHA explicitly once the
+            # public title or description is edited.
+            if body.get('head_sha', task.get('head_sha')) != task.get('head_sha'):
+                raise ValueError('Candidate changed. Preview the current commit before creating its PR.')
+            preview = pull_preview(task)
+            title, description = body.get('title', preview['title']), body.get('body', preview['body'])
+            if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 256 or '\n' in title or '\r' in title
+                    or not isinstance(description, str) or not 1 <= len(description.strip()) <= 30000):
+                raise ValueError('Enter a PR title (1–256 characters) and description (1–30000 characters).')
+            if ('title' in body or 'body' in body) and body.get('head_sha') != task.get('head_sha'):
+                raise ValueError('Edited PR text must be approved for the exact candidate commit.')
             if not published or published != task.get('head_sha') or self.remote_head(task) != published:
                 raise ValueError('Publish the current reviewed candidate before opening a pull request.')
             self.github.allow(task['github_repository'])
             found = self.github.find_pull(task['github_repository'], task['branch'])
             if not isinstance(found, list):
                 raise ValueError('GitHub returned an invalid pull request list.')
+            reused = bool(found)
             if found:
                 pull = found[0]
             else:
-                evidence = task.get('builds', {}).get(published)
-                checks = ('\n\n| Check | Status |\n| --- | --- |\n' + '\n'.join(
-                    '| ' + str(c.get('id', 'unknown')).replace('|', '/')[:120] + ' | ' +
-                    str(c.get('status', 'not_run')).replace('|', '/')[:40] + ' |' for c in evidence.get('checks', []))) if evidence else ''
-                payload = dict(title=task['title'], head=task['branch'], base=task['base_ref'].removeprefix('refs/remotes/origin/'),
-                    draft=True, body=task['description'] + '\n\nTask: ' + task['id'] + '\nSource: `' + published +
-                    '`\n\nValidation: not verified by this publication operation. Review checks and evidence before merging.' + checks)
+                if (body.get('head_sha') != published or body.get('reviewed') is not True
+                        or 'title' not in body or 'body' not in body):
+                    raise ValueError('Preview and confirm the PR title and description for the published commit before creating a PR.')
+                payload = dict(title=title.strip(), head=task['branch'], base=preview['base'], draft=True, body=description)
                 try:
                     pull = self.github.request('/repos/' + task['github_repository'] + '/pulls', 'POST', payload)
                 except GitHubError as error:
                     if error.status != 422:
-                        raise
+                        raise ValueError('The branch is already published, but PR creation failed. ' + str(error)) from None
                     found = self.github.find_pull(task['github_repository'], task['branch'])
                     if not isinstance(found, list) or not found:
-                        raise
+                        raise ValueError('The branch is already published, but GitHub rejected PR creation and no existing PR could be reconciled.') from None
                     pull = found[0]
+                    reused = True
+                except (ValueError, OSError) as error:
+                    raise ValueError('The branch is already published. PR creation has an uncertain result; retry to reconcile any existing PR. ' + str(error)) from None
             self.record_pull(task, pull)
+            task['pull_notice'] = ('An existing PR was reused. Its title and description were not changed.'
+                                   if reused else 'Draft PR created with the approved title and description.')
+            if body.get('reviewed') is True:
+                # The approved text already lives on GitHub. Record only its
+                # identity: storing the body here would add up to 30 KB per
+                # task to every task-list response for no reader.
+                task['pull_approval'] = dict(head_sha=published, title=title.strip(), at=stamp(),
+                                             body_sha256=hashlib.sha256(description.encode()).hexdigest())
         elif action == 'build':
             target = task.get('merge_sha') if task['state'] == 'merged' else task.get('head_sha')
             if not self.validation or not SHA.fullmatch(str(target)):

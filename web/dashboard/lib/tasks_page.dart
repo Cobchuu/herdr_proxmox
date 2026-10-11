@@ -279,7 +279,7 @@ class _TasksPageState extends State<TasksPage> {
     );
     final epoch = connection.generation;
     try {
-      final confirmed = await showDialog<bool>(
+      final setupRoute = DialogRoute<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('GitHub publishing'),
@@ -290,7 +290,7 @@ class _TasksPageState extends State<TasksPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text(
-                    'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
+                    'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
                   ),
                   TextField(
                     controller: token,
@@ -326,6 +326,9 @@ class _TasksPageState extends State<TasksPage> {
           ],
         ),
       );
+      final confirmed = await Navigator.of(context).push(setupRoute);
+      // Keep controllers alive until the dialog has left the overlay.
+      await setupRoute.completed;
       if (confirmed != true || !mounted || epoch != connection.generation)
         return;
       setState(() {
@@ -603,6 +606,143 @@ class _TasksPageState extends State<TasksPage> {
         'task_id': task['id'],
         'head_sha': task['head_sha'],
       });
+    }
+  }
+
+  Future<void> previewPull(Map<String, dynamic> task) async {
+    final epoch = connection.generation;
+    // Created up front so the dialog builder captures non-nullable controllers.
+    final title = TextEditingController();
+    final description = TextEditingController();
+    try {
+      final fresh = Map<String, dynamic>.from(
+        await connection.request('tasks/detail?id=${task['id']}'),
+      );
+      if (!mounted || epoch != connection.generation) return;
+      final preview = fresh['pull_preview'] as Map?;
+      if (preview == null ||
+          preview['head_sha'] != (fresh['publish'] as Map?)?['head_sha']) {
+        throw StateError(
+          'Publish the current candidate before previewing its PR. Update the gateway if PR previews are unavailable.',
+        );
+      }
+      title.text = '${preview['title']}';
+      description.text = '${preview['body']}';
+      final excerpt = '${preview['excerpt'] ?? ''}';
+      var includeExcerpt = false;
+      final form = GlobalKey<FormState>();
+      final route = DialogRoute<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Preview draft pull request'),
+            content: SizedBox(
+              width: 760,
+              child: SingleChildScrollView(
+                child: Form(
+                  key: form,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SelectableText(
+                        'Repository: ${preview['repository']}\nBranch: ${preview['branch']} → ${preview['base']}\nExact commit: ${preview['head_sha']}',
+                      ),
+                      const Text(
+                        'This title and Markdown description will be public on the selected repository. The branch is already published. Creating a draft PR does not merge or deploy it.',
+                      ),
+                      TextFormField(
+                        controller: title,
+                        maxLength: 256,
+                        decoration: const InputDecoration(labelText: 'PR title'),
+                        validator: (value) =>
+                            value == null || value.trim().isEmpty
+                            ? 'Enter a title.'
+                            : null,
+                      ),
+                      TextFormField(
+                        controller: description,
+                        minLines: 10,
+                        maxLines: 20,
+                        maxLength: 30000,
+                        buildCounter:
+                            (
+                              context, {
+                              required currentLength,
+                              required isFocused,
+                              maxLength,
+                            }) => null,
+                        decoration: const InputDecoration(
+                          labelText: 'PR description (Markdown)',
+                        ),
+                        validator: (value) =>
+                            value == null || value.trim().isEmpty
+                            ? 'Enter a description.'
+                            : null,
+                      ),
+                      if (excerpt.isNotEmpty)
+                        CheckboxListTile(
+                          value: includeExcerpt,
+                          onChanged: (value) => setDialogState(() {
+                            includeExcerpt = value == true;
+                            final block = '\n\n$excerpt';
+                            if (includeExcerpt) {
+                              if (!description.text.contains(excerpt)) {
+                                description.text =
+                                    '${description.text.trimRight()}$block';
+                              }
+                            } else {
+                              description.text = description.text
+                                  .replaceFirst(block, '')
+                                  .trimRight();
+                            }
+                          }),
+                          title: const Text(
+                            'Include the finalized discussion excerpt',
+                          ),
+                          subtitle: const Text(
+                            'Off by default: the excerpt publishes the group discussion text verbatim.',
+                          ),
+                          controlAffinity: ListTileControlAffinity.leading,
+                          dense: true,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  if (form.currentState!.validate()) Navigator.pop(context, true);
+                },
+                child: const Text('Create draft PR'),
+              ),
+            ],
+          ),
+        ),
+      );
+      final confirmed = await Navigator.of(context).push(route);
+      await route.completed;
+      if (confirmed == true && mounted && epoch == connection.generation) {
+        await act('pull', {
+          'task_id': fresh['id'],
+          'head_sha': preview['head_sha'],
+          'reviewed': true,
+          'title': title.text.trim(),
+          'body': description.text,
+        });
+      }
+    } catch (exception) {
+      if (mounted && epoch == connection.generation)
+        setState(() => error = '$exception');
+    } finally {
+      title.dispose();
+      description.dispose();
     }
   }
 
@@ -1697,6 +1837,80 @@ class _TasksPageState extends State<TasksPage> {
       });
   }
 
+  Widget _groupReviewStatus(Map<String, dynamic> task) {
+    // Meetings carry no outcome flag, so the latest review is the one to show.
+    // Whether its proposals already became tasks is reported below instead of
+    // being used to hide the review and its acceptance state.
+    final meetings = (task['meeting_results'] as List? ?? [])
+        .whereType<Map>()
+        .toList();
+    if (meetings.isEmpty) return const SizedBox.shrink();
+    final meeting = meetings.last;
+    final ready = meeting['state'] == 'artifact_ready';
+    final candidate = meeting['candidate'];
+    final current = candidate != null && candidate == task['head_sha'];
+    final proposals = (meeting['proposals'] as List? ?? [])
+        .whereType<Map>()
+        .toList();
+    final created = (task['follow_up_tasks'] as Map?) ?? const {};
+    final converted = proposals
+        .where((proposal) => created.containsKey(proposal['key']))
+        .length;
+    final result = '${meeting['result'] ?? ''}'.trim();
+    final acceptance = task['acceptance'] as Map?;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Group review · ${meeting['group_name'] ?? 'Group'}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            Text(
+              ready
+                  ? 'Discussion finalized · ${proposals.length} follow-up proposals'
+                        '${converted > 0 ? ' ($converted already created as tasks)' : ''}. '
+                        'This is not an approval verdict.'
+                  : 'Discussion state: ${meeting['state'] ?? 'unavailable'}',
+            ),
+            if (candidate == null)
+              const Text(
+                'This older review has no recorded candidate. Compare its findings with the latest changes.',
+              )
+            else if (!current)
+              const Text(
+                'This review concerns an earlier candidate. Review the latest changes before completing the task.',
+              ),
+            if (acceptance != null)
+              Text(
+                'Acceptance review: ${acceptance['state'] ?? 'not recorded'} · ${acceptance['reason'] ?? ''}',
+              ),
+            if (result.isNotEmpty)
+              SelectableText(
+                result.length > 1200 ? '${result.substring(0, 1200)}…' : result,
+              ),
+            if (ready)
+              const Text(
+                'Before marking done, check whether each follow-up fixes an unmet acceptance criterion or is an independent improvement. A draft alone does not record that decision.',
+              ),
+            const Text(
+              'Follow-up drafts do not reserve agents. The original execution is handed off only after its completion evidence and session are verified.',
+            ),
+            TextButton(
+              onPressed: () => setState(() {
+                section = 'Activity & agents';
+                expandedMeetings.add('${meeting['job_id']}');
+              }),
+              child: const Text('Read full group review'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _nextAction(Map<String, dynamic> task) {
     final target = task['merge_sha'] ?? task['head_sha'];
     final evidence = (task['builds'] as Map?)?[target] as Map?;
@@ -1931,7 +2145,7 @@ class _TasksPageState extends State<TasksPage> {
               ? () => review(task)
               : null,
           icon: const Icon(Icons.rate_review),
-          label: const Text('Review latest commit'),
+          label: const Text('Review and publish on GitHub'),
         );
       }
       if (verified) return const SizedBox.shrink();
@@ -2048,10 +2262,21 @@ class _TasksPageState extends State<TasksPage> {
               ),
           if (task['review_error'] != null)
             Text('Group review waiting: ${task['review_error']}'),
+          if (task['pull_notice'] != null) Text('${task['pull_notice']}'),
 
           if (github['configured'] != true)
-            const Text(
-              'GitHub publishing is not configured. Local implementation and validation remain available.',
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'GitHub publishing is not configured. Local group review and validation remain available. Publishing requires GitHub setup.',
+                ),
+                TextButton.icon(
+                  onPressed: admin && !busy ? configure : null,
+                  icon: const Icon(Icons.key),
+                  label: const Text('Set up GitHub publishing'),
+                ),
+              ],
             ),
           const SizedBox(height: 12),
           Wrap(
@@ -2073,6 +2298,7 @@ class _TasksPageState extends State<TasksPage> {
           ),
           const SizedBox(height: 20),
           if (section == 'Overview') ...[
+            _groupReviewStatus(task),
             if (task['availability']?['state'] == 'decision') _decision(task),
             if (task['source'] is Map) ...[
               Text(
@@ -2443,7 +2669,7 @@ class _TasksPageState extends State<TasksPage> {
       if (task['publish'] != null && task['pull'] == null)
         FilledButton(
           onPressed: admin && !busy && github['configured'] == true
-              ? () => act('pull', {'task_id': task['id']})
+              ? () => previewPull(task)
               : null,
           child: const Text('Open draft PR'),
         ),
