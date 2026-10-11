@@ -359,3 +359,31 @@ class RepairTests(unittest.TestCase):
             gateway.shutdown()
             gateway.server_close()
             thread.join(timeout=2)
+
+    def test_http_detail_after_repair_receipt_list_returns_preview(self):
+        self.start()
+        self.store.identity.return_value = dict(agent_status='done')
+        head = self.resolve()
+        self.advance()
+        gateway = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        gateway.token = 'a' * 48
+        gateway.contributions = self.service
+        gateway.operators = SimpleNamespace(identify=lambda token: None)
+        thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = Request('http://127.0.0.1:' + str(gateway.server_port)
+                              + '/api/tasks/detail?id=' + self.task['id'],
+                              headers={'Authorization': 'Bearer ' + gateway.token})
+            with urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                detail = json.load(response)
+            self.assertEqual(detail['head_sha'], head)
+            self.assertEqual(detail['pr_repair']['state'], 'validating')
+            self.assertIn('Worker-reported checks', detail['pull_preview']['body'])
+            self.assertIn('test', detail['pull_preview']['body'])
+            self.assertIn('not verified for this candidate', detail['pull_preview']['body'])
+        finally:
+            gateway.shutdown()
+            gateway.server_close()
+            thread.join(timeout=2)

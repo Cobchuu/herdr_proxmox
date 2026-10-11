@@ -231,7 +231,17 @@ def pull_preview(task):
             excerpts.append(str(meeting['result'])[:1500])
     reviews = '\n'.join(review_lines) or '- No group review recorded.'
     receipt = task.get('completion_receipt') or {}
-    reported_tests = ((receipt.get('tests') or {}).get('summary') or '') if receipt.get('commit') == head else ''
+    reported_tests = ''
+    if receipt.get('commit') == head:
+        tests = receipt.get('tests')
+        if isinstance(tests, list):
+            # The completion-receipt contract is a tests array. These are
+            # worker reports, separate from independent required-check evidence.
+            reported_tests = '\n'.join('- ' + (test if isinstance(test, str) else
+                json.dumps(test, ensure_ascii=False, sort_keys=True)) for test in tests)[:2000]
+        elif isinstance(tests, dict):
+            # Older stored reports used a summary object.
+            reported_tests = str(tests.get('summary') or '')[:2000]
     follows = '\n'.join('- Task `' + str(task_id) + '` — relationship to completion needs review.'
                         for task_id in (task.get('follow_up_tasks') or {}).values()) or '- No follow-up tasks recorded.'
     text = ('## Problem and changes\n\n' + str(task.get('description') or '') + '\n\n## Acceptance criteria\n\n'
@@ -2664,11 +2674,11 @@ class Contributions:
                     raise ValueError('The task has no committed changes to review.')
                 project_git.git(path, 'merge-base', '--is-ancestor', task['base_sha'], head)
                 diff = project_git.git(path, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha'], head, '--')
-                graph = []
-                for line in project_git.git(path, 'log', '--topo-order', '--max-count=12', '--format=%H %P', task['base_sha'] + '..' + head, '--').splitlines():
-                    fields = line.split()
-                    graph.append(dict(sha=fields[0], parents=fields[1:]))
-                task['commit_graph'] = graph
+                # Persist the same metadata-rich view returned by detail reads.
+                # List-row fallback must not turn known Git authors and titles
+                # into "Unknown author" and "Commit" after a failed detail read.
+                task['commit_graph'] = self.commit_history(path, task['base_sha'], head)
+                task.pop('history_error', None)
                 try:
                     upstream = project_git.git(repository, 'rev-parse', '--verify', task['base_ref'] + '^{commit}').strip()
                     task['current_upstream_sha'] = upstream

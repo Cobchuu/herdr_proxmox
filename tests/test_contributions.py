@@ -352,6 +352,16 @@ class ContributionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'durable build service'):
             self.service.action('policy', dict(request_id='policy-guard', task_id=task['id'], auto_validate=True), 'admin', 'admin')
 
+    def test_captured_history_has_git_metadata_even_in_list_fallback(self):
+        task = self.candidate()
+        node = task['commit_graph'][0]
+        self.assertEqual(node['subject'], 'implementation')
+        self.assertEqual(node['author'], self.git('show', '-s', '--format=%an', task['head_sha']).strip())
+        self.assertTrue(node['date'])
+        self.assertEqual(node['parents'], [self.base])
+        listed = next(t for t in self.service.snapshot()['tasks'] if t['id'] == task['id'])
+        self.assertEqual(listed['commit_graph'], task['commit_graph'])
+
     def test_detail_loads_legacy_history_without_recapture_or_write(self):
         task = self.candidate()
         task.pop('commit_graph', None)
@@ -783,6 +793,25 @@ class ContributionTests(unittest.TestCase):
         self.assertIn('Required checks: verified for this candidate', preview['body'])
         self.assertIn('current-check', preview['body'])
         self.assertEqual(preview['head_sha'], head)
+
+    def test_pull_preview_supports_receipt_arrays_and_legacy_summaries(self):
+        task = self.candidate()
+        for tests, expected in [
+            ([dict(command='python3 -m unittest', status='passed'), '623 tests OK'], '623 tests OK'),
+            (dict(summary='Legacy reported result'), 'Legacy reported result'),
+            ([], None), (None, None),
+        ]:
+            with self.subTest(tests=tests):
+                task['completion_receipt'] = dict(commit=task['head_sha'], tests=tests)
+                body = contributions.pull_preview(task)['body']
+                self.assertIn('not verified for this candidate', body)
+                if expected:
+                    self.assertIn(expected, body)
+                    self.assertIn('Worker-reported checks', body)
+                else:
+                    self.assertNotIn('Worker-reported checks', body)
+        task['completion_receipt'] = dict(commit='a' * 40, tests=['Outdated worker result'])
+        self.assertNotIn('Outdated worker result', contributions.pull_preview(task)['body'])
 
     def test_pull_requires_preview_approval_and_preserves_edited_text(self):
         task = self.candidate()
