@@ -172,8 +172,12 @@ def action(store, db, name, body, org):
     ids = set(group['members']) if name == 'discuss' else {run['profile_id'] for run in runs}
     if name == 'discuss':
         ids.add(group_run['profile_id'])
-    for row in db.execute('SELECT data FROM jobs'):
-        job = json.loads(row['data'])
+    decision_job = None
+    # Exhaust and close the SQLite cursor before any live CLI verification.
+    # Admission remains serialized by the store lock, but holds no read cursor.
+    with closing(db.execute('SELECT data FROM jobs')) as cursor:
+        jobs = [json.loads(row['data']) for row in cursor.fetchall()]
+    for job in jobs:
         if name == 'discuss' and job['id'] == group_run['id']:
             continue
         if not ids.intersection(job.get('participants', [job.get('profile_id')])):
@@ -186,6 +190,9 @@ def action(store, db, name, body, org):
             # still refused.
             if job.get('state') in ('queued', 'running'):
                 raise ValueError('An agent already has queued or running task work. Wait for it to finish.')
+            if job.get('state') == 'waiting_for_input':
+                verify_decision_input(store, job, runs[0])
+                decision_job = job['id']
             continue
         if name != 'discuss' and session_active(job):
             raise ValueError('An agent already has a queued or running task. Wait for it to finish.')
@@ -196,7 +203,8 @@ def action(store, db, name, body, org):
         key = text(body, 'key', 16)
         if key not in ('enter', 'esc', 'up', 'down', 'tab', 'shift+tab', 'ctrl+c'):
             raise ValueError('Unsupported terminal key.')
-        item.update(profile_id=runs[0]['profile_id'], key=key, actor=str(body.get('_actor') or 'administrator')[:120])
+        item.update(profile_id=runs[0]['profile_id'], key=key, actor=str(body.get('_actor') or 'administrator')[:120],
+                    decision_job_id=decision_job)
     elif name == 'chat':
         item.update(profile_id=runs[0]['profile_id'], prompt=text(body, 'prompt', 8000),
                     wait_seconds=wait_seconds(body), integration_event=body.get('integration_event'))
@@ -328,13 +336,37 @@ def discussion_directory(store, job):
     return directory
 
 
-def discussion_transcript(store, job):
-    """Normalized export; the original agent-written document stays untouched."""
-    data = json.loads(read_contribution(discussion_directory(store, job) / 'discussion.json', 750000))
+def verify_decision_input(store, owner, run):
+    """Decision keys apply only to the original, currently blocked conversation."""
+    if owner.get('state') != 'waiting_for_input':
+        raise ValueError('The discussion is no longer waiting for a decision.')
+    saved = next((r for r in [owner.get('group_run', {}), *owner.get('runs', [])]
+                  if r.get('id') == run['id']), None)
+    if not saved:
+        raise ValueError('This conversation does not own the discussion decision.')
+    current = current_run(store, saved, ready=False)
+    if current.get('alias') != run.get('alias') or current.get('agent_session') != run.get('agent_session'):
+        raise ValueError('Original conversation was replaced; inspect the session again.')
+    agent = store.command('agent', 'get', current['alias'], timeout=2).get('agent')
+    store.identity(current, ready=False, agent=agent)
+    if agent.get('agent_status', agent.get('state')) != 'blocked':
+        raise ValueError('Agent is no longer blocked; inspect the session before sending a decision.')
+    return current
+
+
+def parse_discussion_transcript(text, job):
+    """Validate the same snapshot of the transcript that completion hashes."""
+    data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError('Discussion transcript must be a JSON object.')
     validate_contributions(data.get('contributions'), job['runs'])
     return data
+
+
+def discussion_transcript(store, job):
+    """Normalized export; the original agent-written document stays untouched."""
+    return parse_discussion_transcript(
+        read_contribution(discussion_directory(store, job) / 'discussion.json', 750000), job)
 
 
 def discussion_documents(store, job):
@@ -388,8 +420,12 @@ def discussion_state(job):
 def read_receipt(store, job):
     """The facilitator's completion receipt, or None when it wrote none."""
     path = discussion_directory(store, job) / RECEIPT_NAME
-    if not path.is_file() or path.is_symlink():
+    if path.is_symlink():
+        return dict(invalid='Receipt must not be a symlink.')
+    if not path.exists():
         return None
+    if not path.is_file():
+        return dict(invalid='Receipt must be a regular file.')
     try:
         data = json.loads(read_contribution(path, 40000))
     except ValueError:
@@ -413,7 +449,9 @@ def verify_receipt(receipt, job, digest, transcript_digest=None):
     if receipt.get('artifact_sha256') != digest:
         return 'Receipt does not match the final artifact.'
     # The transcript carries knowledge consumed downstream, so bind it too.
-    if transcript_digest is not None and receipt.get('transcript_sha256') not in (None, transcript_digest):
+    transcript_required = discussion_state(job)['contract'] >= DISCUSSION_CONTRACT
+    if transcript_digest is not None and (transcript_required or 'transcript_sha256' in receipt) and (
+            receipt.get('transcript_sha256') != transcript_digest):
         return 'Receipt does not match the final transcript.'
     return None
 
@@ -462,12 +500,12 @@ def finalize_discussion(store, job_id, actor):
     # Output. The receipt is hashed over the exact bytes the agent wrote, so
     # verification uses those bytes rather than a normalized copy.
     artifact_bytes, artifact_text = read_document(discussion_directory(store, job) / 'action-plan.md')
-    transcript_bytes, _ = read_document(discussion_directory(store, job) / 'discussion.json', 750000,
+    transcript_bytes, transcript_text = read_document(discussion_directory(store, job) / 'discussion.json', 750000,
                                         'discussion transcript')
     result = artifact_text.strip()
     if not result:
         raise ValueError('Agent did not produce a valid discussion artifact: empty file.')
-    transcript = discussion_transcript(store, job)
+    transcript = parse_discussion_transcript(transcript_text, job)
     digest = hashlib.sha256(artifact_bytes).hexdigest()
     transcript_digest = hashlib.sha256(transcript_bytes).hexdigest()
     receipt = read_receipt(store, job)
@@ -586,6 +624,10 @@ def inspect_discussion(store, db, body, org_id):
 def execute(store, job):
     if job['kind'] == 'input':
         run = current_run(store, job['runs'][0], ready=False)
+        if job.get('decision_job_id'):
+            with store.lock, closing(store.connect()) as db:
+                owner = store.get(db, 'jobs', job['decision_job_id'], job['organization_id'])
+            run = verify_decision_input(store, owner, run)
         store.command('agent', 'send-keys', run['alias'], job['key'])
         current_run(store, run, ready=False)
         store.update_job(job['id'], state='input_sent')

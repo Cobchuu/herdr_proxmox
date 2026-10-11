@@ -62,54 +62,75 @@ void main() {
       await BlocScope.reset();
     },
   );
-  testWidgets('drafts are grouped below active work', (tester) async {
-    tester.view.physicalSize = const Size(1280, 2000);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    final active = {
-      'id': 'task-1',
-      'title': 'Implement feature',
-      'repository': 'repo',
-      'state': 'implementing',
-      'audit': [],
-    };
-    final draft = {
-      'id': 'task-2',
-      'title': 'Proposed follow-up',
-      'repository': 'repo',
-      'state': 'draft',
-      'audit': [],
-    };
-    final connection = DashboardBloc(
-      client: MockClient(
-        (request) async => http.Response(
-          jsonEncode({
-            'tasks': [active, draft],
-            'github': {'configured': false},
-          }),
-          200,
-        ),
-      ),
-    );
-    BlocScope.register<DashboardBloc>(() => connection);
-    connection.connect('token');
-    connection.operator.value = {'name': 'admin', 'role': 'admin'};
-    await tester.pumpWidget(
-      const MaterialApp(home: Scaffold(body: TasksPage())),
-    );
-    await tester.pumpAndSettle();
-    // Drafts are proposals awaiting an operator, so they sit under a header
-    // rather than mixed into work that is actually in flight.
-    expect(find.text('Drafts (1)'), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.text('Proposed follow-up')).dy,
-      greaterThan(tester.getTopLeft(find.text('Implement feature')).dy),
-    );
-    await tester.pumpWidget(const SizedBox());
-    await connection.disconnect();
-    await BlocScope.reset();
-  });
+  for (final brightness in Brightness.values) {
+    for (final width in [390.0, 1280.0]) {
+      testWidgets('drafts are readable at $width and $brightness', (
+        tester,
+      ) async {
+        tester.view.physicalSize = Size(width, 2000);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final active = {
+          'id': 'task-1',
+          'title': 'Implement feature',
+          'repository': 'repo',
+          'state': 'implementing',
+          'audit': [],
+        };
+        final draft = {
+          'id': 'task-2',
+          'title': 'Proposed follow-up',
+          'repository': 'repo',
+          'state': 'draft',
+          'audit': [],
+        };
+        final connection = DashboardBloc(
+          client: MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'tasks': [active, draft],
+                'github': {'configured': false},
+              }),
+              200,
+            ),
+          ),
+        );
+        BlocScope.register<DashboardBloc>(() => connection);
+        connection.connect('token');
+        connection.operator.value = {'name': 'admin', 'role': 'admin'};
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: brightness),
+            home: const Scaffold(body: TasksPage()),
+          ),
+        );
+        await tester.pumpAndSettle();
+        // Drafts are proposals awaiting an operator, so they sit under a header
+        // rather than mixed into work that is actually in flight.
+        expect(find.text('Drafts (1)'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('Proposed follow-up')).dy,
+          greaterThan(tester.getTopLeft(find.text('Implement feature')).dy),
+        );
+        final caption = find.text(
+          'Work that has not started. Open a task for its next step.',
+        );
+        final text = tester.widget<Text>(caption);
+        final theme = Theme.of(tester.element(caption));
+        final foreground = text.style!.color!.computeLuminance();
+        final background = theme.scaffoldBackgroundColor.computeLuminance();
+        final ratio = foreground > background
+            ? (foreground + 0.05) / (background + 0.05)
+            : (background + 0.05) / (foreground + 0.05);
+        expect(ratio, greaterThanOrEqualTo(4.5));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        await connection.disconnect();
+        await BlocScope.reset();
+      });
+    }
+  }
 
   test('Tasks route is directly addressable', () {
     expect(

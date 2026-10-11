@@ -661,100 +661,109 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   @override
-  Widget build(BuildContext context) => selectedId == null
-      ? ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            Text('Tasks', style: Theme.of(context).textTheme.headlineLarge),
-            const SizedBox(height: 8),
-            const Text(
-              'Develop in a task branch, review the exact commit, publish and open a draft pull request. Merge on GitHub. Updating the base and deploying are separate operations.',
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: admin && !busy ? create : null,
-                  icon: const Icon(Icons.add),
-                  label: const Text('Create task'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: admin && !busy ? configure : null,
-                  icon: const Icon(Icons.key),
-                  label: const Text('GitHub publishing'),
-                ),
-                IconButton(
-                  onPressed: busy || refreshing ? null : refresh,
-                  tooltip: 'Refresh tasks',
-                  icon: const Icon(Icons.refresh),
-                ),
-              ],
-            ),
-            Text(
-              github['configured'] == true
-                  ? admin
-                        ? 'GitHub account: ${github['login']} · ${github['repositories']}'
-                        : 'GitHub publishing is configured. Publishing requires an administrator.'
-                  : github['error'] != null
-                  ? 'GitHub publishing is unavailable: ${github['error']}'
-                  : 'GitHub publishing is not configured. Local task work is available.',
-            ),
-            if (busy) const LinearProgressIndicator(),
-            if ((error ?? readError) != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(
-                  error ?? readError!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            if (tasks.isEmpty)
-              Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(
-                  !connected
-                      ? 'Not connected to the gateway.'
-                      : readError != null
-                      ? 'Task list unavailable.'
-                      : refreshing
-                      ? 'Loading tasks…'
-                      : 'No development tasks yet.',
-                ),
-              ),
-            for (final task in tasks.where((t) => t['state'] != 'draft'))
-              _summary(task),
-            // Drafts are proposals waiting on an operator, not work in flight.
-            // Grouping them keeps the active list readable when a group has
-            // proposed several follow-ups.
-            if (tasks.any((t) => t['state'] == 'draft')) ...[
+  Widget build(BuildContext context) {
+    final drafts = tasks.where((t) => t['state'] == 'draft').toList();
+    final started = tasks.where((t) => t['state'] != 'draft').toList();
+    return selectedId == null
+        ? ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Text('Tasks', style: Theme.of(context).textTheme.headlineLarge),
               const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    Text(
-                      'Drafts (${tasks.where((t) => t['state'] == 'draft').length})',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'Proposed work that has not started. Open one to start it.',
-                        style: TextStyle(fontSize: 12, color: Color(0xffaaaaaa)),
-                      ),
-                    ),
-                  ],
-                ),
+              const Text(
+                'Develop in a task branch, review the exact commit, publish and open a draft pull request. Merge on GitHub. Updating the base and deploying are separate operations.',
               ),
-              for (final task in tasks.where((t) => t['state'] == 'draft'))
-                _summary(task),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: admin && !busy ? create : null,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Create task'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: admin && !busy ? configure : null,
+                    icon: const Icon(Icons.key),
+                    label: const Text('GitHub publishing'),
+                  ),
+                  IconButton(
+                    onPressed: busy || refreshing ? null : refresh,
+                    tooltip: 'Refresh tasks',
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
+              ),
+              Text(
+                github['configured'] == true
+                    ? admin
+                          ? 'GitHub account: ${github['login']} · ${github['repositories']}'
+                          : 'GitHub publishing is configured. Publishing requires an administrator.'
+                    : github['error'] != null
+                    ? 'GitHub publishing is unavailable: ${github['error']}'
+                    : 'GitHub publishing is not configured. Local task work is available.',
+              ),
+              if (busy) const LinearProgressIndicator(),
+              if ((error ?? readError) != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    error ?? readError!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
+              if (tasks.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(
+                    !connected
+                        ? 'Not connected to the gateway.'
+                        : readError != null
+                        ? 'Task list unavailable.'
+                        : refreshing
+                        ? 'Loading tasks…'
+                        : 'No development tasks yet.',
+                  ),
+                ),
+              for (final task in started) _summary(task),
+              // Drafts are proposals waiting on an operator, not work in flight.
+              // Grouping them keeps the active list readable when a group has
+              // proposed several follow-ups.
+              if (drafts.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Drafts (${drafts.length})',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Work that has not started. Open a task for its next step.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                for (final task in drafts) _summary(task),
+              ],
+              DiscoveryPanel(coordinator: widget.coordinator),
             ],
-            DiscoveryPanel(coordinator: widget.coordinator),
-          ],
-        )
-      : _detail();
+          )
+        : _detail();
+  }
 
   Future<void> openTask(String id) async {
     if (widget.coordinator != null) {
@@ -1251,9 +1260,7 @@ class _TasksPageState extends State<TasksPage> {
                     value: reapOrphaned,
                     onChanged: (value) =>
                         update(() => reapOrphaned = value == true),
-                    title: const Text(
-                      'Reclaim panes orphaned by a restart',
-                    ),
+                    title: const Text('Reclaim panes orphaned by a restart'),
                     subtitle: const Text(
                       'After a Herdr restart, panes can return as plain shells that no agent holds. This closes them once the pane is proven to run nothing and to sit in the recorded checkout. Ambiguous panes are left for you.',
                     ),

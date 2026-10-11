@@ -45,7 +45,7 @@ class _GroupPageState extends State<GroupPage> {
     refresh();
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
       final active = jobs.any(
-        (j) => ['queued', 'running'].contains(j['state']),
+        (j) => ['queued', 'running', 'waiting_for_input'].contains(j['state']),
       );
       final interval = active && tab == 'posts' ? 1 : 10;
       if (++pollTick % interval == 0) refresh();
@@ -113,7 +113,7 @@ class _GroupPageState extends State<GroupPage> {
       final active = jobs.firstOrNull;
       if (tab == 'posts' &&
           active != null &&
-          ['queued', 'running', 'needs_attention'].contains(active['state'])) {
+          ['queued', 'running', 'needs_attention', 'waiting_for_input'].contains(active['state'])) {
         try {
           final result = await connection.request('organizations/inspect', {
             'organization_id': current!['organization_id'],
@@ -412,6 +412,38 @@ class _GroupPageState extends State<GroupPage> {
                     ),
                   ),
                 ),
+                // A blocked agent holds the discussion open until someone
+                // answers it. Offering the keys here, where the block is
+                // visible, avoids sending the operator to another page to
+                // resolve it. The gateway re-verifies the original
+                // conversation is still blocked before sending anything.
+                if (stream['status'] == 'blocked')
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final entry in const {
+                          'up': 'Up',
+                          'down': 'Down',
+                          'tab': 'Tab',
+                          'enter': 'Enter',
+                          'esc': 'Escape',
+                          'ctrl+c': 'Interrupt',
+                        }.entries)
+                          OutlinedButton(
+                            onPressed: busy
+                                ? null
+                                : () => submit('input', {
+                                    'profile_id': stream['profile_id'],
+                                    'key': entry.key,
+                                  }),
+                            child: Text(entry.value),
+                          ),
+                      ],
+                    ),
+                  ),
               ],
             ),
         ],
@@ -465,7 +497,7 @@ class _GroupPageState extends State<GroupPage> {
         .toList();
     final occupied = allJobs.any(
       (j) =>
-          ['queued', 'running'].contains(j['state']) &&
+            ['queued', 'running', 'waiting_for_input'].contains(j['state']) &&
           (j['participants'] as List? ?? [j['profile_id']]).any(
             members.contains,
           ),
@@ -718,6 +750,8 @@ class _GroupPageState extends State<GroupPage> {
                                 'running' => 'In progress',
                                 'queued' => 'Preparing sessions',
                                 'waiting_for_members' => 'Waiting for members',
+                                'waiting_for_input' =>
+                                  'Waiting for your decision',
                                 'cancelled' => 'Cancelled before submission',
                                 _ => '${job['state']}',
                               }),
@@ -812,11 +846,12 @@ class _GroupPageState extends State<GroupPage> {
                           ),
                         ],
                         if (job == jobs.firstOrNull &&
-                            [
-                              'queued',
-                              'running',
-                              'needs_attention',
-                            ].contains(job['state']))
+                          [
+                            'queued',
+                            'running',
+                            'needs_attention',
+                            'waiting_for_input',
+                          ].contains(job['state']))
                           liveDiscussion(job),
                         for (final round
                             in ((job['contributions'] as List? ?? [])

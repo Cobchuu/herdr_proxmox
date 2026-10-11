@@ -1613,7 +1613,9 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(created['state'], 'draft')
         self.assertEqual(created['repository'], 'repo')
         self.assertEqual(created['profile_id'], 'worker')
-        self.assertEqual(created['source']['discussion']['group_id'], 'review')
+        self.assertNotIn('discussion', created['source'])
+        self.assertEqual(created['source']['auto_queued']['group_id'], 'review')
+        self.assertEqual(created['source']['auto_queued']['proposal_key'], marker['drafts'][0])
         # The base is resolved from the repository, exactly as a manual task.
         self.assertTrue(created['base_ref'])
         # Evaluating again is a no-op: the marker is the idempotence key.
@@ -1621,6 +1623,166 @@ class ContributionTests(unittest.TestCase):
         self.service.materialize_discussion(dict(job, proposals=marker),
                                             dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue')
         self.store.update_job.assert_not_called()
+
+    def taskless_proposal_job(self, job_id='discussion', count=1):
+        return dict(id=job_id, kind='discussion', organization_id='org', group_id='review',
+                    state='artifact_ready', created_at=contributions.stamp(),
+                    result='```json\n' + json.dumps({'task_proposals': [
+                        dict(title='Follow up ' + str(i), description='Acceptance criteria and required checks.',
+                             profile_id='worker', needs_review=False) for i in range(count)]}) + '\n```')
+
+    def test_taskless_proposals_cannot_cross_organization_boundaries(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile, organization_id='other-org')]
+        self.service.materialize_discussion(self.taskless_proposal_job(),
+                                            dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(marker['created'], {})
+        self.assertEqual(list(marker['skipped'].values()), ['assignee belongs to another organization'])
+        self.assertEqual(self.service.queued_assignments(), [])
+
+    def test_taskless_proposals_share_the_durable_daily_cap(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1,
+                      max_open_per_agent=10, max_per_meeting=3)
+        self.service.materialize_discussion(self.taskless_proposal_job(count=2), policy, 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(marker['queued']), 1)
+        self.assertEqual(list(marker['skipped'].values()), ['daily automation limit reached'])
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.service.materialize_discussion(self.taskless_proposal_job('next'), policy, 'group_auto_queue')
+        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['skipped'].values()),
+                         ['daily automation limit reached'])
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+
+    def test_drafts_do_not_spend_the_automatic_queue_budget(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        self.service.materialize_discussion(self.taskless_proposal_job('draft'), policy,
+                                            'group_auto_queue', queue_allowed=False)
+        self.assertEqual(self.service.auto_created_today('org'), 0)
+        self.service.materialize_discussion(self.taskless_proposal_job('queued'), policy, 'group_auto_queue')
+        self.assertEqual(len(self.store.update_job.call_args[1]['proposals']['queued']), 1)
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+
+    def test_taskless_daily_budget_also_blocks_task_linked_proposals(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        self.service.materialize_discussion(self.taskless_proposal_job(), policy, 'group_auto_queue')
+        host = self.candidate()
+        self._meeting(host, [dict(title='Linked follow-up', description='Acceptance and checks.', profile_id='worker')])
+        self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        marker = self.service.get(host['id'])['auto_queue']['meeting']
+        self.assertEqual(marker['queued'], [])
+        self.assertEqual(list(marker['skipped'].values()), ['daily automation limit reached'])
+
+    def test_taskless_recovery_does_not_spend_twice_or_duplicate_queue(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=1)
+        job = self.taskless_proposal_job()
+        # The durable proposal is saved, then the process dies before queueing.
+        with patch.object(self.service, 'enqueue_assignment', side_effect=RuntimeError('crash')):
+            with self.assertRaisesRegex(RuntimeError, 'crash'):
+                self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.assertEqual(self.service.queued_assignments(), [])
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        first = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(first['queued']), 1)
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        self.assertEqual(first['created'], self.store.update_job.call_args[1]['proposals']['created'])
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        made = self.service.get(next(iter(first['created'].values())))
+        made.update(state='implementing', run_id='active-run')
+        self.service.save(made, 'started', 'admin')
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        self.assertEqual(self.service.get(made['id'])['state'], 'implementing')
+
+    def test_task_linked_recovery_resumes_a_recorded_budget_reservation(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=1)
+        host = self.candidate()
+        self._meeting(host, [dict(title='Linked follow-up', description='Acceptance and checks.', profile_id='worker')])
+        with patch.object(self.service, 'enqueue_assignment', side_effect=RuntimeError('crash')):
+            with self.assertRaisesRegex(RuntimeError, 'crash'):
+                self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        marker = self.service.get(host['id'])['auto_queue']['meeting']
+        self.assertEqual(len(marker['queued']), 1)
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+
+    def test_existing_taskless_queue_records_count_toward_the_budget(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        self.service.materialize_discussion(self.taskless_proposal_job(), policy, 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        made = self.service.get(next(iter(marker['created'].values())))
+        record = made['source'].pop('auto_queued')
+        made['source']['discussion'] = dict(job_id=record['meeting_id'], group_id=record['group_id'],
+                                            proposal_key=record['proposal_key'], queued=record['queued'], at=record['at'])
+        self.service.save(made, 'legacy_fixture', 'admin')
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.service.materialize_discussion(self.taskless_proposal_job('next'), policy, 'group_auto_queue')
+        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['skipped'].values()),
+                         ['daily automation limit reached'])
+
+    def test_canonical_budget_record_wins_over_an_old_duplicate(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS)
+        self.service.materialize_discussion(self.taskless_proposal_job(), policy,
+                                            'group_auto_queue', queue_allowed=False)
+        marker = self.store.update_job.call_args[1]['proposals']
+        made = self.service.get(next(iter(marker['created'].values())))
+        made['source']['discussion'] = dict(job_id='discussion', queued=True, at=contributions.stamp())
+        self.service.save(made, 'legacy_duplicate_fixture', 'admin')
+        self.assertEqual(self.service.auto_created_today('org'), 0)
+
+    def test_concurrent_discussions_share_one_organization_budget(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1, max_open_per_agent=10)
+        barrier = threading.Barrier(2)
+        errors = []
+        def create(job_id):
+            try:
+                barrier.wait(timeout=5)
+                self.service.materialize_discussion(self.taskless_proposal_job(job_id), policy, 'group_auto_queue')
+            except Exception as error:
+                errors.append(error)
+        threads = [threading.Thread(target=create, args=(str(i),)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.service.auto_created_today('org'), 1)
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+
+    def test_recovering_one_follow_up_preserves_its_siblings(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=5, max_open_per_agent=10, max_per_meeting=2)
+        host = self.candidate()
+        self._meeting(host, [
+            dict(title='First follow-up', description='Acceptance and checks.', profile_id='worker'),
+            dict(title='Second follow-up', description='Acceptance and checks.', profile_id='worker')])
+        enqueue = self.service.enqueue_assignment
+        calls = []
+        def crash_on_second(task, actor):
+            calls.append(task['id'])
+            if len(calls) == 2:
+                raise RuntimeError('crash')
+            return enqueue(task, actor)
+        with patch.object(self.service, 'enqueue_assignment', side_effect=crash_on_second):
+            with self.assertRaisesRegex(RuntimeError, 'crash'):
+                self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
+        origin = self.service.get(host['id'])
+        self.assertEqual(set(origin['follow_up_tasks'].values()), set(calls))
+        self.assertEqual(len(origin['auto_queue']['meeting']['queued']), 2)
+        self.assertEqual(self.service.auto_created_today('org'), 2)
+        self.assertEqual(len(self.service.queued_assignments()), 2)
 
     def test_a_discussion_about_an_open_task_still_creates_its_follow_up(self):
         # The task-linked query required a finished host task, and the taskless

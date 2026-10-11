@@ -1,20 +1,13 @@
 """Which jobs still reserve their participant sessions.
 
-A job owns its sessions while it is non-terminal. `waiting_for_input` is the
-state that is easy to miss: a discussion blocked on an operator decision can
-resume later, so its participants must stay reserved and invisible to other
-work. Guards that checked only `queued` and `running` silently released them,
-and the generic release action could then detach a binding a discussion still
-owned, leaving that discussion permanently unfinalizable.
+These are active admission reservations, not all unresolved ownership states.
+Delivered delegations and ambiguous delivery may still own a bound session;
+Contributions.session_owner also checks those recorded references before rotation.
+A discussion waiting for input can resume and must retain its participants.
 """
 
-# States in which a job still reserves its participants' sessions. Terminal
-# states are absent by omission: answered, artifact_ready, cancelled, completed,
-# delivered, finished, input_sent, released, reported_complete.
-#
-# `waiting_for_members` is deliberately absent: a meeting in that state is
-# waiting to acquire its members, not holding them, so it must not block the
-# work that currently owns them.
+# waiting_for_members has not acquired participants and must not prevent the
+# work that already owns them from finishing.
 ACTIVE_JOB_STATES = ('queued', 'running', 'waiting_for_input')
 
 

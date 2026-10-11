@@ -92,6 +92,119 @@ void main() {
       await BlocScope.reset();
     },
   );
+  testWidgets('a blocked participant can be answered from the group page', (
+    tester,
+  ) async {
+    // The discussion state was wired into the label but not into the polling
+    // lists, so a waiting discussion fetched no streams and offered no way to
+    // answer the very block it was waiting on.
+    tester.view.physicalSize = const Size(1400, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final data = {
+      'organizations': [
+        {'id': 'org', 'name': 'Org'},
+      ],
+      'profiles': [],
+      'groups': [
+        {
+          'id': 'group',
+          'organization_id': 'org',
+          'name': 'Product',
+          'description': 'Review',
+          'members': ['one', 'two'],
+        },
+      ],
+      'jobs': [
+        {
+          'id': 'meeting',
+          'kind': 'discussion',
+          'group_id': 'group',
+          'organization_id': 'org',
+          'state': 'waiting_for_input',
+          'created_at': '2026-10-09',
+          'preparation_version': 1,
+          'discussion_submitted_at': '2026-10-09',
+          'prompt': 'Review',
+          'group': {'description': 'Review'},
+          'contributions': [],
+        },
+      ],
+    };
+    final posted = <Map<String, dynamic>>[];
+    var inspected = 0;
+    final paths = <String>[];
+    final connection = DashboardBloc(
+      client: MockClient((request) async {
+        paths.add(request.url.path);
+        if (request.url.path.endsWith('/input')) {
+          posted.add(jsonDecode(request.body) as Map<String, dynamic>);
+          return http.Response('{"id":"input"}', 200);
+        }
+        if (request.url.path.endsWith('/inspect')) {
+          inspected++;
+          return http.Response(
+            jsonEncode({
+              'streams': [
+                {
+                  'profile_id': 'fac',
+                  'name': 'Product Council',
+                  'status': 'blocked',
+                  'output': 'Permission required',
+                },
+              ],
+              'artifact_draft': '',
+              'contributions': [],
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode(
+            request.url.path.contains('/organizations')
+                ? data
+                : {'authenticated': true, 'workspaces': [], 'agents': []},
+          ),
+          200,
+        );
+      }),
+    );
+    BlocScope.register<DashboardBloc>(() => connection);
+    final connected = connection.stream.firstWhere(
+      (_) => connection.state.connected,
+    );
+    connection.connect('token');
+    await connected;
+    connection.operator.value = {'role': 'admin'};
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: GroupPage(id: 'group', coordinator: AppCoordinator()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The page refreshes on its own interval; advance it so the inspection
+      // poll runs rather than depending on the first connect timing.
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Waiting for your decision'), findsOneWidget);
+      // The state must be polled, or the block is invisible and cannot be
+      // answered from the page that shows it.
+      expect(inspected, greaterThan(0),
+          reason: 'a waiting discussion must still be inspected; saw $paths');
+      expect(find.textContaining('Product Council: blocked'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    } finally {
+      // The page owns a periodic timer; dispose it before the test ends.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    }
+  });
+
   testWidgets('sidebar groups open round posts and their matching artifacts', (
     tester,
   ) async {

@@ -96,6 +96,9 @@ def before():
         if not version:
             raise AssertionError(f'{name} returned an empty version')
         print(f'{name}: {version}', flush=True)
+    subprocess.run([sys.executable, str(Path(__file__).with_name('opencode_config.py')),
+                    '--binary', str(HOME / '.local/bin/opencode'),
+                    '--gateway', '/opt/herdr-web/web/gateway'], check=True, timeout=420)
     prefix = subprocess.check_output(['npm', 'config', 'get', 'prefix'], text=True, timeout=10).strip()
     if prefix != str(HOME / '.local'):
         raise AssertionError('Codex npm prefix is not user-local')

@@ -26,7 +26,7 @@ from project_files import project_directory
 import project_git
 from repository_lock import repository_lock
 from herdr_errors import HerdrError, format_handover, parse_handover
-from session_ownership import active as session_active, reserves as session_reserves
+from session_ownership import reserves as session_reserves
 MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
@@ -1094,11 +1094,16 @@ class Contributions:
         return active + queued
 
     def auto_created_today(self, organization_id):
+        # auto_queued is canonical. Only pre-unification taskless records use
+        # source.discussion; an old duplicate must never override the canonical decision.
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         with closing(self.connect()) as db:
             return db.execute("SELECT COUNT(*) FROM tasks WHERE json_extract(data, '$.organization_id')=? "
-                              "AND json_extract(data, '$.source.auto_queued') IS NOT NULL "
-                              "AND json_extract(data, '$.created_at') > ?", (organization_id, cutoff)).fetchone()[0]
+                              "AND CASE WHEN json_type(data, '$.source.auto_queued')='object' "
+                              "THEN json_extract(data, '$.source.auto_queued.queued') "
+                              "ELSE json_extract(data, '$.source.discussion.queued') END=1 "
+                              "AND COALESCE(json_extract(data, '$.source.auto_queued.at'), "
+                              "json_extract(data, '$.source.discussion.at'), json_extract(data, '$.created_at')) > ?", (organization_id, cutoff)).fetchone()[0]
 
     @staticmethod
     def active_session_jobs(jobs, organization_id):
@@ -1237,7 +1242,56 @@ class Contributions:
             except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
                 continue
 
+    def proposal_skip_reason(self, profile, organization_id, policy, wants_queue, count):
+        """Shared eligibility and admission limits for all discussion proposals."""
+        if (not profile or profile.get('archived') or profile.get('ephemeral')
+                or profile.get('group_id') or not profile.get('use_worktree', True)):
+            return 'assignee is not an eligible worktree agent'
+        if profile.get('organization_id') != organization_id:
+            return 'assignee belongs to another organization'
+        if count >= policy['max_per_meeting']:
+            return 'meeting limit reached'
+        if wants_queue:
+            if self.open_work_count(profile['id']) >= policy['max_open_per_agent']:
+                return 'assignee queue limit reached'
+            if self.auto_created_today(organization_id) >= policy['daily_cap']:
+                return 'daily automation limit reached'
+        return None
+
+    def record_automatic_proposal(self, task, job, policy, wants_queue, actor, proposal_key):
+        # Both task-linked and taskless proposals must contribute to the same
+        # durable daily budget. Preserve the first record when replaying.
+        task.setdefault('source', {}).setdefault('auto_queued', dict(
+            at=stamp(), meeting_id=job['id'], group_id=job.get('group_id'), proposal_key=proposal_key,
+            queued=wants_queue, policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
+        self.save(task, 'auto_queued', actor)
+
+    def resume_automatic_proposal(self, task_id, job, actor):
+        """Recover a proposal recorded before a crash, without spending twice."""
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT data FROM tasks WHERE id=?', (task_id,)).fetchone()
+        if not row:
+            return None
+        task = json.loads(row[0])
+        if task.get('organization_id') != job['organization_id']:
+            return None
+        source = task.get('source') or {}
+        record = source.get('auto_queued') or source.get('discussion') or {}
+        if record.get('meeting_id', record.get('job_id')) != job['id']:
+            return None
+        if record.get('queued') and task['state'] == 'draft' and not task.get('assignment'):
+            task = self.enqueue_assignment(task, actor)
+            self.save(task, 'assignment_queued', actor)
+        return task, bool(record.get('queued'))
+
+    # Task-linked callers may already hold their host's task guard. Under the
+    # budget guard, call perform() directly: action() would acquire another
+    # task-operation lock and could introduce the reverse lock order.
     def materialize_discussion(self, job, policy, actor, queue_allowed=True):
+        with self.operation('proposal-budget:' + job['organization_id']):
+            return self._materialize_discussion(job, policy, actor, queue_allowed)
+
+    def _materialize_discussion(self, job, policy, actor, queue_allowed=True):
         """Create follow-up tasks from a discussion that belongs to no task.
 
         The repository and base come from the assignee's own profile, which is
@@ -1251,29 +1305,26 @@ class Contributions:
         queued, drafts, skipped, created = [], [], {}, {}
         profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
         for proposal in proposals:
+            new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + job_id + ':' + proposal['key']).hex
+            resumed = self.resume_automatic_proposal(new_id, job, actor)
+            if resumed:
+                made, was_queued = resumed
+                (queued if was_queued else drafts).append(proposal['key'])
+                created[proposal['key']] = made['id']
+                continue
             profile = profiles.get(proposal['profile_id'])
-            if (not profile or profile.get('archived') or profile.get('ephemeral')
-                    or not profile.get('use_worktree', True)):
-                skipped[proposal['key']] = 'assignee is not an eligible worktree agent'
+            review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
+            wants_queue = queue_allowed and not review
+            reason = self.proposal_skip_reason(profile, job['organization_id'], policy, wants_queue,
+                                               len(queued) + len(drafts))
+            if reason:
+                skipped[proposal['key']] = reason
                 continue
             try:
                 repository = Path(profile['project']).resolve().relative_to(self.projects).as_posix()
             except (ValueError, OSError, TypeError):
                 skipped[proposal['key']] = 'assignee is not assigned to a managed repository'
                 continue
-            review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
-            wants_queue = queue_allowed and not review
-            if len(queued) + len(drafts) >= policy['max_per_meeting']:
-                skipped[proposal['key']] = 'meeting limit reached'
-                continue
-            if wants_queue:
-                if self.open_work_count(proposal['profile_id']) >= policy['max_open_per_agent']:
-                    skipped[proposal['key']] = 'assignee queue limit reached'
-                    continue
-                if self.auto_created_today(profile['organization_id']) >= policy['daily_cap']:
-                    skipped[proposal['key']] = 'daily automation limit reached'
-                    continue
-            new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + job_id + ':' + proposal['key']).hex
             try:
                 # base_ref is resolved from the repository, as for a manual task.
                 made = self.perform('create', dict(title=proposal['title'], description=proposal['description'],
@@ -1282,10 +1333,7 @@ class Contributions:
             except (ValueError, OSError) as error:
                 skipped[proposal['key']] = str(error)[:300]
                 continue
-            made.setdefault('source', {})['discussion'] = dict(
-                job_id=job_id, group_id=job.get('group_id'), proposal_key=proposal['key'],
-                queued=wants_queue, at=stamp())
-            self.save(made, 'proposal_created', actor)
+            self.record_automatic_proposal(made, job, policy, wants_queue, actor, proposal['key'])
             if wants_queue:
                 made = self.enqueue_assignment(made, actor)
                 self.save(made, 'assignment_queued', actor)
@@ -1298,6 +1346,11 @@ class Contributions:
             policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
 
     def materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True):
+        organization_id = self.get(task_id)['organization_id']
+        with self.operation('proposal-budget:' + organization_id):
+            return self._materialize_meeting(task_id, job_id, policy, actor, queue_allowed)
+
+    def _materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True):
         """Create follow-up tasks from one finalized discussion.
 
         A finalized discussion that reports proposals always creates the
@@ -1330,47 +1383,41 @@ class Contributions:
             profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
             repository = self.path_for(task)
             for proposal in proposals:
+                new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + job_id + ':' + proposal['key']).hex
+                resumed = self.resume_automatic_proposal(new_id, job, actor)
+                if resumed:
+                    made, was_queued = resumed
+                    task = self.get(task_id)
+                    task.setdefault('follow_up_tasks', {})[proposal['key']] = made['id']
+                    self.save(task, 'proposal_recovered', actor)
+                    (queued if was_queued else drafts).append(proposal['key'])
+                    continue
                 profile = profiles.get(proposal['profile_id'])
-                if (not profile or profile.get('archived') or profile.get('ephemeral')
-                        or not profile.get('use_worktree', True)):
-                    skipped[proposal['key']] = 'assignee is not an eligible worktree agent'
+                review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
+                wants_queue = queue_allowed and not review
+                reason = self.proposal_skip_reason(profile, task['organization_id'], policy, wants_queue,
+                                                   len(queued) + len(drafts))
+                if reason:
+                    skipped[proposal['key']] = reason
                     continue
                 if not profile.get('project') or Path(profile['project']).resolve() != repository:
                     skipped[proposal['key']] = 'assignee is assigned to another repository'
                     continue
-                review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
-                wants_queue = queue_allowed and not review
-                if len(queued) + len(drafts) >= policy['max_per_meeting']:
-                    skipped[proposal['key']] = 'meeting limit reached'
-                    continue
-                if wants_queue:
-                    if self.open_work_count(proposal['profile_id']) >= policy['max_open_per_agent']:
-                        skipped[proposal['key']] = 'assignee queue limit reached'
-                        continue
-                    if self.auto_created_today(task['organization_id']) >= policy['daily_cap']:
-                        skipped[proposal['key']] = 'daily automation limit reached'
-                        continue
                 try:
                     self.perform('proposal', dict(meeting_id=job_id, proposal_key=proposal['key'],
-                                                 queue=wants_queue), task_id, actor)
+                                                 queue=wants_queue), task_id, actor, automation_policy=policy)
                 except (ValueError, OSError) as error:
                     skipped[proposal['key']] = str(error)[:300]
                     continue
                 origin = self.get(task_id)
                 created_id = (origin.get('follow_up_tasks') or {}).get(proposal['key'])
                 if created_id:
-                    created = self.get(created_id)
-                    created.setdefault('source', {})['auto_queued'] = dict(
-                        at=stamp(), meeting_id=job_id, group_id=job.get('group_id'),
-                        queued=wants_queue, policy={k: policy[k] for k in AUTOMATION_DEFAULTS})
-                    self.save(created, 'auto_queued', actor)
                     (queued if wants_queue else drafts).append(proposal['key'])
         task = self.get(task_id)
         task.setdefault('auto_queue', {})[job_id] = dict(
             at=stamp(), queued=queued, drafts=drafts, skipped=skipped,
             policy={k: policy[k] for k in AUTOMATION_DEFAULTS})
         self.save(task, 'auto_queue_checked', actor)
-
 
     def get(self, task_id):
         with closing(self.connect()) as db:
@@ -1728,8 +1775,7 @@ class Contributions:
             # A discussion waiting on an operator decision still owns its
             # participants: the agent can resume later and would collide with
             # anything that reused its session.
-            reserved = bool(profile_id and job.get('state') in ('queued', 'running', 'waiting_for_input') and
-                            profile_id in job.get('participants', [job.get('profile_id')]))
+            reserved = bool(profile_id and session_reserves(job, profile_id))
             if job.get('id') == run_id or not (reserved or self.session_reference(job, run_id)):
                 continue
             kind = job.get('kind')
@@ -2221,7 +2267,7 @@ class Contributions:
             task.pop('assignment_error', None)
             return self.save(task, 'launch', actor)
 
-    def perform(self, action, body, task_id, actor):
+    def perform(self, action, body, task_id, actor, automation_policy=None):
         if action == 'automation':
             return self.set_automation_policy(body, actor)
         if action == 'create':
@@ -2468,10 +2514,12 @@ class Contributions:
             new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + reference['job_id'] + ':' + proposal['key']).hex
             created = self.perform('create', dict(title=proposal['title'], description=proposal['description'],
                 repository=task['repository'], base_ref=task['base_ref'], profile_id=proposal['profile_id']), new_id, actor)
-            created['source'] = dict(task_id=task_id, meeting_id=reference['job_id'], group_id=reference['group_id'],
+            created.setdefault('source', {}).update(task_id=task_id, meeting_id=reference['job_id'], group_id=reference['group_id'],
                                      proposal_key=proposal['key'], depth=(task.get('source', {}).get('depth') or 0) + 1)
             self.save(created, 'proposal_accepted', actor)
             task.setdefault('follow_up_tasks', {})[proposal['key']] = new_id
+            if automation_policy is not None:
+                self.record_automatic_proposal(created, job, automation_policy, body.get('queue') is True, actor, proposal['key'])
             if body.get('queue') is True:
                 created = self.enqueue_assignment(created, actor)
                 self.save(created, 'assignment_queued', actor)

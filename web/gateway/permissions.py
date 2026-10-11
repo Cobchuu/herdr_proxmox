@@ -52,10 +52,11 @@ def prepare_permissions(profile, output_root, home=None, output_directories=()):
     path = Path(home or Path.home()) / '.config/opencode/agents' / (name + '.md')
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # JSON objects and strings are valid YAML values in OpenCode's frontmatter.
+    # A Markdown body is a system-prompt override in OpenCode, even if its
+    # wording looks neutral. Keep it empty so provider instructions survive.
     contents = ('---\ndescription: Dashboard-managed permission policy\nmode: primary\n'
                 'permission: ' + json.dumps(permission) + '\n' +
-                ('model: ' + json.dumps(profile['provider'] + '/' + profile['model']) + '\nvariant: ' + json.dumps(profile['reasoning']) + '\n' if variant else '') + '---\n'
-                'Follow the conversation instructions and assigned persona.\n')
+                ('model: ' + json.dumps(profile['provider'] + '/' + profile['model']) + '\nvariant: ' + json.dumps(profile['reasoning']) + '\n' if variant else '') + '---\n')
     if path.is_symlink():
         raise ValueError('Dashboard permission file must not be a symlink.')
     path.write_text(contents, encoding='utf-8')

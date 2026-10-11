@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 import uuid
 from types import SimpleNamespace
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('organization_gateway', Path(__file__).parents[1] / 'web/gateway/server.py')
 gateway = importlib.util.module_from_spec(spec)
@@ -21,6 +23,12 @@ class OrganizationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.projects = self.root / 'projects'
         self.projects.mkdir()
+        from permissions import prepare_permissions
+        self.permission_patch = patch('organizations.prepare_permissions',
+            side_effect=lambda profile, output_root, **kwargs: prepare_permissions(
+                profile, output_root, home=self.root / 'home', **kwargs))
+        self.permission_patch.start()
+        self.addCleanup(self.permission_patch.stop)
         self.calls = []
         self.agents = {}
         self.store = gateway.OrganizationStore(self.root / 'data/org.sqlite3', self.projects, self.command)
@@ -466,6 +474,43 @@ class OrganizationTests(unittest.TestCase):
         self.assertTrue(reserves(dict(state='running', profile_id='a'), 'a'))
         self.assertFalse(reserves(dict(state='running', profile_id='a'), 'b'))
 
+    def test_a_launch_generates_a_scoped_agent_file_without_extra_overrides(self):
+        # Every OpenCode launch selects a dashboard primary agent, so the
+        # generated file is part of the launch contract, not just a permission
+        # helper. Selecting an agent can change prompts and tool configuration,
+        # so only the declared policy, model and variant may appear.
+        org = self.organization()
+        profile = self.hire(org, runtime='opencode', provider='opencode-go',
+                            model='deepseek-v4.1-flash', reasoning='high')
+        job_id = self.action('launch', organization_id=org, profile_id=profile)
+        self.drain()
+        run = next(j for j in self.store.snapshot()['jobs'] if j['id'] == job_id)
+        self.assertEqual(run['state'], 'persona_sent', run.get('error'))
+        path = self.root / 'home/.config/opencode/agents' / ('herdr-dashboard-' + profile + '.md')
+        self.assertTrue(path.is_file(), 'the launch must generate its agent file')
+        self.assertFalse(path.is_symlink())
+        if os.name != 'nt':
+            # Windows chmod only toggles the read-only bit, so the mode is
+            # synthesized there and only meaningful on a POSIX host.
+            self.assertEqual(path.stat().st_mode & 0o077, 0, 'the agent file must stay private')
+        content = path.read_text(encoding='utf-8')
+        self.assertIn('mode: primary', content)
+        self.assertIn('permission: ', content)
+        self.assertIn('"opencode-go/deepseek-v4.1-flash"', content)
+        self.assertIn('"high"', content)
+        # Frontmatter only. OpenCode treats a Markdown body as a system-prompt
+        # override, so an empty body is what leaves the provider's own
+        # instructions in effect rather than merely reworded ones.
+        self.assertTrue(content.endswith('---\n'), content)
+        self.assertEqual(content.split('---\n')[-1], '', 'the agent must not override the system prompt')
+        for unexpected in ('temperature', 'max_tokens', 'max_steps', 'tools:', 'autonom'):
+            self.assertNotIn(unexpected, content)
+        # The arguments select that exact file and carry the same model.
+        arguments = list(run['launch_arguments'])
+        self.assertIn('--agent', arguments)
+        self.assertEqual(arguments[arguments.index('--agent') + 1], 'herdr-dashboard-' + profile)
+        self.assertIn('opencode-go/deepseek-v4.1-flash', arguments)
+
     def test_every_launch_grants_the_chat_reply_directory(self):
         # Any agent can be asked to save a chat reply, and the launch happens
         # before that chat exists, so the grant cannot be decided from the job
@@ -779,6 +824,52 @@ class OrganizationTests(unittest.TestCase):
         for config in [dict(provider='openai'), dict(model='test-model'), dict(provider='-bad', model='model')]:
             with self.assertRaises(ValueError):
                 self.hire(org, runtime='opencode', **config)
+
+    def test_launch_path_generates_neutral_scoped_opencode_configuration(self):
+        org = self.organization()
+        cases = [
+            ('opencode', {}),
+            ('opencode', dict(provider='openai', model='test-model')),
+            ('opencode', dict(provider='openai', model='test-model', reasoning='high')),
+            ('opencode', dict(permission_mode='dashboard_outputs', accessible_paths=['~/shared/**'])),
+            ('opencode', dict(permission_mode='full_autonomy')),
+            ('codex', {}), ('claude', {}),
+        ]
+        for runtime, config in cases:
+            with self.subTest(runtime=runtime, config=config):
+                profile_id = self.hire(org, runtime=runtime, **config)
+                job_id = self.action('launch', organization_id=org, profile_id=profile_id)
+                self.drain()
+                run = next(j for j in self.store.job_records() if j['id'] == job_id)
+                self.assertEqual(run['state'], 'persona_sent', run['error'])
+                path = self.root / 'home/.config/opencode/agents' / ('herdr-dashboard-' + profile_id + '.md')
+                if runtime != 'opencode':
+                    self.assertFalse(path.exists())
+                    self.assertNotIn('--agent', run['launch_arguments'])
+                    continue
+                text = path.read_text(encoding='utf-8')
+                frontmatter, instructions = text.split('---\n')[1:]
+                self.assertEqual(instructions, '')
+                fields = dict(line.split(': ', 1) for line in frontmatter.splitlines())
+                self.assertEqual(fields['mode'], 'primary')
+                policy = json.loads(fields['permission'])
+                mode = config.get('permission_mode', 'default')
+                if mode == 'full_autonomy':
+                    self.assertEqual(policy, 'allow')
+                else:
+                    expected = {str(self.store.path.parent / 'chat-replies' / '**')}
+                    if mode == 'dashboard_outputs':
+                        expected.update([str(self.store.path.parent / 'discussion-artifacts' / '**'), '~/shared/**'])
+                    self.assertEqual(policy, {'external_directory': {p: 'allow' for p in expected}})
+                if config.get('reasoning'):
+                    self.assertEqual(json.loads(fields['model']), 'openai/test-model')
+                    self.assertEqual(json.loads(fields['variant']), 'high')
+                else:
+                    self.assertNotIn('variant', fields)
+                    self.assertNotIn('model', fields)
+                self.assertEqual(run['launch_arguments'][-2:], ['--agent', 'herdr-dashboard-' + profile_id])
+                sent = next(a for a, _ in self.calls if a[:3] == ('agent', 'start', run['alias']))
+                self.assertEqual(list(sent[sent.index('--') + 1:]), run['launch_arguments'])
 
     def test_persistence_idempotency_and_payload_conflict(self):
         body = {'request_id': 'unique_request_1', 'name': 'Engineering', 'purpose': 'Build', 'instructions': ''}

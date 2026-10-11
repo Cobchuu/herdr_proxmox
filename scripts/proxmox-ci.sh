@@ -88,6 +88,7 @@ run_test() (
   pct exec "$ctid" -- install -d -m 0755 /opt/herdr-ci
   pct push "$ctid" "$repo/tests/ci/smoke.sh" /opt/herdr-ci/smoke.sh --perms 0755
   pct push "$ctid" "$repo/tests/ci/runtime.py" /opt/herdr-ci/runtime.py --perms 0644
+  pct push "$ctid" "$repo/tests/ci/opencode_config.py" /opt/herdr-ci/opencode_config.py --perms 0644
   pct exec "$ctid" -- bash /opt/herdr-ci/smoke.sh >"$results/smoke.log" 2>&1 || {
     local smoke_rc=$?
     cat "$results/smoke.log" >&2
