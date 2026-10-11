@@ -126,6 +126,46 @@ credential isolation from same-user agents. The setup dialog explains this.
 GitHub reference:
 [managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 
+## Repair an existing PR’s merge conflicts
+
+Confirmed GitHub merge conflicts take priority over the candidate’s previous
+successful checks in the task header. Open **Activity & agents**: the conflict
+card appears above Agent participation. **Resolve conflicts with the assigned
+agent** queues an explicit repair of this task and its existing PR branch.
+It does not create another task branch or pull request.
+
+The repair records the published candidate and exact upstream commit. The queue
+waits for the assigned persistent worktree agent and the organization’s session
+budget; other work and discussion reservations are not interrupted. Before
+dispatch, the gateway rechecks GitHub, verifies the clean original checkout,
+fetches remote-tracking refs and pins recovery evidence. The original session
+is archived before a fresh session starts in that preserved checkout.
+
+The agent merges the pinned upstream commit, resolves conflicts and commits
+locally. It must provide a fresh-session completion receipt. The gateway verifies
+both original and upstream commits are ancestors of the repaired candidate,
+and requires a clean checkout without an unfinished Git operation. Old checks
+cannot validate the new candidate: durable validation runs for its exact SHA.
+
+The card shows queued, working, permission-decision, validation and review-ready
+states, and each transition is recorded in Task activity. Permission decisions
+remain operator actions; allowing a prompt resumes monitoring automatically.
+Temporary session-read failures show a retry message without claiming the agent
+needs inspection. After three consecutive failures, the card shows **monitoring
+unavailable**, including the failure count and diagnostic. Read-only retries
+continue and normal monitoring resumes after a verified identity read. A changed
+binding or conversation still requires inspection immediately; it is never
+automatically treated as a transient connection failure.
+A queued repair can be cancelled. Ambiguous session identity or delivery needs
+inspection; an inspected recheck adopts an already submitted session rather
+than sending another prompt. A changed PR head or base before dispatch requires
+a fresh inspected request.
+
+**Review and publish repaired candidate** uses the existing publication approval
+flow and updates the same branch in the recorded publishing repository. The
+existing PR receives that commit; the gateway never force-pushes or merges it.
+Refresh PR status afterwards: upstream can move again while repair is running.
+
 ## Agent ownership and follow-ups
 
 Task completion and execution completion are separate. A follow-up draft does

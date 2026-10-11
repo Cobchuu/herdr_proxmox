@@ -257,11 +257,16 @@ class _TasksPageState extends State<TasksPage> {
       error = null;
     });
     try {
-      await connection.request('tasks/$action', {
+      final result = await connection.request('tasks/$action', {
         ...body,
         'request_id': request,
       });
       if (!mounted || epoch != connection.generation) return;
+      if (result is Map && result['action_message'] is String) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(result['action_message'] as String)),
+        );
+      }
       requests.remove(selection);
       // A read begun before the mutation is not post-action evidence.
       if (pending != null) await pending;
@@ -1000,8 +1005,7 @@ class _TasksPageState extends State<TasksPage> {
                     : 'GitHub publishing is not configured. Local task work is available.',
               ),
               if (admin && github['publication'] is Map)
-                for (final entry
-                    in (github['publication'] as Map).entries)
+                for (final entry in (github['publication'] as Map).entries)
                   if (entry.value is Map && entry.value['mode'] == 'fork')
                     Text(
                       '${entry.key} \u2192 fork ${entry.value['publishing_repository']} \u00b7 '
@@ -2078,6 +2082,21 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   Widget _nextAction(Map<String, dynamic> task) {
+    final repair = task['pr_repair'] as Map?;
+    if (!['merged', 'closed', 'completed'].contains(task['state']) &&
+        (taskHasPrConflicts(task) ||
+            repair != null &&
+                ![
+                  'cancelled',
+                  'obsolete',
+                  'published',
+                ].contains(repair['state']))) {
+      return OutlinedButton.icon(
+        onPressed: () => setState(() => section = 'Activity & agents'),
+        icon: const Icon(Icons.build_outlined),
+        label: const Text('View conflict repair'),
+      );
+    }
     final target = task['merge_sha'] ?? task['head_sha'];
     final evidence = (task['builds'] as Map?)?[target] as Map?;
     if (task['launch_retryable'] == true) {
@@ -2588,6 +2607,7 @@ class _TasksPageState extends State<TasksPage> {
             const SizedBox(height: 12),
             _actions(task),
           ],
+          if (section == 'Activity & agents') _conflictRepair(task),
           if (section == 'Activity & agents')
             TaskActivity(
               task: task,
@@ -2784,6 +2804,130 @@ class _TasksPageState extends State<TasksPage> {
     );
   }
 
+  Widget _conflictRepair(Map<String, dynamic> task) {
+    final repair = task['pr_repair'] as Map?;
+    if (!taskHasPrConflicts(task) && repair == null)
+      return const SizedBox.shrink();
+    final state = '${repair?['state'] ?? ''}';
+    final agent = taskAgentName(task, fallback: 'the assigned agent');
+    final terminal = ['merged', 'closed', 'completed'].contains(task['state']);
+    final canStart =
+        !terminal &&
+        taskHasPrConflicts(task) &&
+        (repair == null ||
+            [
+              'cancelled',
+              'obsolete',
+              'published',
+              // Finished attempts must not trap the task: a failed validation
+              // or a repaired candidate that conflicts again can be retried.
+              'validation_failed',
+              'ready',
+            ].contains(state));
+    return Card(
+      key: const ValueKey('pr-conflict-repair'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              taskHasPrConflicts(task) &&
+                      (repair == null ||
+                          ['cancelled', 'obsolete'].contains(state))
+                  ? 'PR #${task['pull']?['number']} has merge conflicts'
+                  : 'Conflict repair · ${state.replaceAll('_', ' ')}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${repair?['message'] ?? 'This PR cannot merge cleanly into its upstream base. Ask the assigned agent to repair its branch.'}',
+            ),
+            Text('Assigned agent: $agent'),
+            SelectableText('PR branch: ${task['branch']}\nPublish to: ${task['publishing_repository'] ?? task['github_repository']}\nPR target: ${task['github_repository']}'),
+            const Text(
+              'Repair keeps the existing PR branch. The agent commits locally; publication and merging remain separate actions.',
+            ),
+            if (repair?['candidate'] != null)
+              SelectableText('Repaired candidate: ${repair?['candidate']}'),
+            if (repair?['upstream_sha'] != null)
+              SelectableText(
+                'Upstream commit for this repair: ${repair?['upstream_sha']}',
+              ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (canStart)
+                  FilledButton.icon(
+                    onPressed: admin && !busy
+                        ? () => act('repair', {
+                            'task_id': task['id'],
+                            'head_sha': task['pull']['head_sha'],
+                          })
+                        : null,
+                    icon: const Icon(Icons.build),
+                    label: Text('Resolve conflicts with $agent'),
+                  ),
+                if (state == 'queued')
+                  TextButton(
+                    onPressed: admin && !busy
+                        ? () => act('repair', {
+                            'task_id': task['id'],
+                            'mode': 'cancel',
+                          })
+                        : null,
+                    child: const Text('Cancel queued repair'),
+                  ),
+                if (state == 'queued' ||
+                    state == 'monitoring_unavailable' ||
+                    state == 'waiting_for_input' ||
+                    state == 'needs_attention')
+                  OutlinedButton(
+                    onPressed: widget.coordinator == null
+                        ? null
+                        : () => widget.coordinator!.navigate(
+                            OrganizationRoute('runs'),
+                          ),
+                    child: const Text('Inspect agent session'),
+                  ),
+                if (state == 'needs_attention')
+                  OutlinedButton(
+                    onPressed: admin && !busy
+                        ? () => act('repair', {
+                            'task_id': task['id'],
+                            'mode': 'retry',
+                            'inspected': true,
+                          })
+                        : null,
+                    child: const Text('Recheck inspected repair'),
+                  ),
+                if (state == 'validating' || state == 'validation_failed')
+                  OutlinedButton(
+                    onPressed: () =>
+                        setState(() => section = 'Checks & builds'),
+                    child: const Text('Inspect repair validation'),
+                  ),
+                if (state == 'ready')
+                  FilledButton(
+                    onPressed: admin && !busy ? () => review(task) : null,
+                    child: const Text('Review and publish repaired candidate'),
+                  ),
+                OutlinedButton(
+                  onPressed: admin && !busy
+                      ? () => act('refresh', {'task_id': task['id']})
+                      : null,
+                  child: const Text('Refresh PR status'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _actions(Map<String, dynamic> task) => Wrap(
     spacing: 8,
     runSpacing: 8,
@@ -2839,7 +2983,8 @@ class _TasksPageState extends State<TasksPage> {
         ),
       if (task['publish'] == null &&
           task['github_repository'] != null &&
-          (github['publication'] as Map?)?[task['github_repository']]?['mode'] ==
+          (github['publication']
+                  as Map?)?[task['github_repository']]?['mode'] ==
               'fork')
         OutlinedButton(
           onPressed: admin && !busy && github['configured'] == true

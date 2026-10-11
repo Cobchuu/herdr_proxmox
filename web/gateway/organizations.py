@@ -792,6 +792,8 @@ class OrganizationStore:
                 self.update_job(run['id'], state='queued', reuse_checkout=True,
                     profile_id=profile['id'], profile=profile, alias='hire_' + uuid.uuid4().hex[:20], agent_session=None,
                     session_closed_at=None, session_history=history, error='', restarted_by=actor,
+                    session_starts=([value for value in (run.get('session_starts') or [run.get('created_at')]) if value]
+                                    + [now()])[-500:],
                     task_prompt=str(body.get('task_prompt', '')) if mode == 'handover' else '',
                     continuation_context=(str(body.get('continuation_context', '')) if mode == 'handover'
                                           else context(saved) if mode == 'continue' else ''),

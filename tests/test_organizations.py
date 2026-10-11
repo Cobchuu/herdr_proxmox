@@ -335,11 +335,13 @@ class OrganizationTests(unittest.TestCase):
         self.assertNotEqual(continued['alias'], run['alias'])
         self.assertEqual(continued['source_project'], run['source_project'])
         self.assertEqual(continued['continuation_archive_id'], saved['id'])
+        self.assertEqual(len(continued['session_starts']), 2)
         prompts = [str(args) for args, _ in self.calls if args[:2] == ('agent', 'prompt')]
         self.assertTrue(any('Archived session context' in p and 'Wait for a new task' in p for p in prompts))
         count = len(self.calls)
         self.store.manage_session(body, 'admin')
         self.assertEqual(len(self.calls), count)
+        self.assertEqual(len(next(j for j in self.store.job_records() if j['id'] == run_id)['session_starts']), 2)
 
     def test_failed_archive_capture_does_not_close_pane(self):
         org = self.organization()

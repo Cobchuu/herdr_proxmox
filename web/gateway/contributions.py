@@ -27,6 +27,7 @@ import project_git
 from repository_lock import repository_lock
 from herdr_errors import HerdrError, format_handover, parse_handover
 from session_ownership import reserves as session_reserves
+import pr_repairs
 MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
@@ -382,6 +383,7 @@ class Contributions:
                     self.knowledge.sync_jobs()
                     task_ids = {key for topic, key, _ in batch if topic == 'task'} if not safety and all(topic == 'task' for topic, _, _ in batch) else None
                     self.advance_automatic(task_ids)
+                    pr_repairs.advance(self, task_ids)
                     self.store.advance_discussions()
                     self.dispatch_assignments()
                     self.advance_proposals()
@@ -465,7 +467,8 @@ class Contributions:
             return [dict(id=identifier, state=json.loads(db.execute('SELECT data FROM tasks WHERE id=?', (identifier,)).fetchone()[0])['state']) for identifier in ids]
 
     def advance_automatic(self, task_ids=None):
-        tasks = [t for t in self.automatic_tasks(task_ids) if t.get('state') in ('implementing', 'review_ready')]
+        tasks = [t for t in self.automatic_tasks(task_ids) if t.get('state') in ('implementing', 'review_ready')
+                 and not pr_repairs.active(t)]
         if not tasks:
             return
         if not self.validation or self.validation.snapshot().get('executor') != 'service':
@@ -1226,7 +1229,7 @@ class Contributions:
                     and j.get('state') in ('queued', 'running', 'waiting_for_members')]
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         started = sum(1 for j in jobs if j.get('organization_id') == organization_id and j.get('kind') == 'launch'
-                      and str(j.get('created_at') or '') > cutoff)
+                      for value in (j.get('session_starts') or [j.get('created_at')]) if str(value or '') > cutoff)
         return dict(policy=policy, active=len(active), meetings=len(meetings), started=started)
 
     def advance_proposals(self):
@@ -1553,6 +1556,11 @@ class Contributions:
         task['updated_at'] = stamp()
         entry = dict(action=action, actor=actor, at=task['updated_at'],
                      state=task['state'], head_sha=task.get('head_sha'))
+        if action.startswith('pr_repair_') and task.get('pr_repair'):
+            repair = task['pr_repair']
+            entry.update(repair_id=repair['id'], repair_state=repair['state'],
+                         detail=str(repair.get('message') or '')[:2000],
+                         upstream_sha=repair.get('upstream_sha'), candidate=repair.get('candidate'))
         task.setdefault('audit', []).append(entry)
         task['audit'] = task['audit'][-100:]  # UI history; SQLite retains the latest 500 entries.
         with closing(self.connect()) as db, db:
@@ -2420,7 +2428,9 @@ class Contributions:
             repository = self.path_for(task)
             if remote_info(repository) != task['github_repository']:
                 raise ValueError('Repository remote changed; inspect the task before continuing.')
-        if action == 'launch':
+        if action == 'repair':
+            return pr_repairs.request(self, task, body, actor)
+        elif action == 'launch':
             return self.launch_task(task, actor, body.get('inspected_general_session'), body.get('as_instance') is True)
         elif action == 'complete':
             if task['state'] == 'completed':
@@ -2691,6 +2701,14 @@ class Contributions:
                 self.github.verify_fork(upstream, destination)
             task['publishing_repository'] = destination
         elif action == 'publish':
+            if pr_repairs.active(task):
+                raise ValueError('Wait for conflict repair and its validation before publishing the new candidate.')
+            repair = task.get('pr_repair') or {}
+            if repair.get('state') == 'ready':
+                evidence = (task.get('builds') or {}).get(task.get('head_sha'), {})
+                if (repair.get('candidate') != task.get('head_sha') or evidence.get('target') != repair.get('candidate')
+                        or evidence.get('state') != 'complete' or evidence.get('required_checks_verified') is not True):
+                    raise ValueError('The repaired candidate needs verified required checks before publication.')
             upstream = task['github_repository']
             self.github.allow(upstream)
             # The upstream stays the base source and pull request target; only
@@ -2723,6 +2741,9 @@ class Contributions:
                         candidate_changed=False)
             # A task that already has a pull request stays in its pull state.
             task['state'] = 'pr_open' if task.get('pull') else 'published'
+            if (task.get('pr_repair') or {}).get('candidate') == head:
+                task['pr_repair'].update(state='published', message='Repaired candidate published to the existing PR branch; refresh GitHub conflict status.')
+                task['pull'].update(mergeable=None, mergeable_state='unknown')
         elif action == 'pull':
             published = task.get('publish', {}).get('head_sha')
             # Two related guards that must not be merged. This one defaults a
@@ -2804,6 +2825,8 @@ class Contributions:
                 raise ValueError('Capture a candidate or refresh a merged PR before building.')
             if body.get('target') != target:
                 raise ValueError('Build selection changed; review the exact resulting commit.')
+            if (task.get('pr_repair') or {}).get('candidate') == target and task['pr_repair'].get('state') == 'validation_failed':
+                task['pr_repair'].update(state='validating', message='Retrying validation of the repaired candidate.')
             try:
                 project_git.git(repository, 'cat-file', '-e', target + '^{commit}')
             except ValueError:

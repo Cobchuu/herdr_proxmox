@@ -628,7 +628,8 @@ void main() {
     await tester.pumpAndSettle();
     // Conflicts are only reported for a pull request that can still merge.
     expect(find.textContaining('PR #7 · Open for review'), findsOneWidget);
-    expect(find.textContaining('conflicts'), findsOneWidget);
+    expect(find.text('GitHub reports merge conflicts.'), findsOneWidget);
+    expect(find.textContaining('PR has merge conflicts'), findsOneWidget);
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(

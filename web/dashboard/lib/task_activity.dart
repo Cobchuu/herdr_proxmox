@@ -39,7 +39,22 @@ String completionOutcome(Map task) {
   }
 }
 
+bool taskHasPrConflicts(Map task) =>
+    task['pull'] is Map &&
+    task['pull']['state'] == 'open' &&
+    task['pull']['mergeable'] == false &&
+    !['merged', 'closed', 'completed'].contains(task['state']);
+
 String taskNextStep(Map task, {String executor = 'service'}) {
+  final repair = task['pr_repair'] as Map?;
+  if (!['merged', 'closed', 'completed'].contains(task['state'])) {
+    if (repair != null &&
+        !['cancelled', 'obsolete', 'published'].contains(repair['state'])) {
+      return '${repair['message'] ?? 'Conflict repair is pending.'}';
+    }
+    if (taskHasPrConflicts(task))
+      return 'PR has merge conflicts. Request conflict repair before merging.';
+  }
   if (task['automation_error'] != null)
     return 'Automation needs attention: ${task['automation_error']}';
   final acceptance = task['acceptance'] as Map?;
@@ -106,6 +121,25 @@ String taskNextStep(Map task, {String executor = 'service'}) {
 }
 
 const activityLabels = {
+  'pr_repair_queued': 'Conflict repair queued',
+  'pr_repair_waiting': 'Conflict repair waiting',
+  'pr_repair_prepared': 'Conflict repair checkout preserved',
+  'pr_repair_started': 'Agent started conflict repair',
+  'pr_repair_progress': 'Agent is resolving conflicts',
+  'pr_repair_waiting_for_input': 'Conflict repair needs your decision',
+  'pr_repair_needs_attention': 'Conflict repair needs inspection',
+  'pr_repair_receipt': 'Repair completion receipt verified',
+  'pr_repair_candidate': 'Repaired candidate captured for validation',
+  'pr_repair_validated': 'Repaired candidate validated',
+  'pr_repair_validation_failed':
+      'Repaired candidate validation needs attention',
+  'pr_repair_cancelled': 'Queued conflict repair cancelled',
+  'pr_repair_obsolete': 'Conflict repair no longer needed',
+  'pr_repair_recheck': 'Inspected conflict repair rechecked',
+  'pr_repair_recovered': 'Existing conflict repair execution recovered',
+  'pr_repair_monitoring_retry': 'Conflict repair status read retrying',
+  'pr_repair_monitoring_unavailable': 'Conflict repair monitoring unavailable',
+  'publication': 'Publication destination recorded',
   'complete': 'Task marked done',
   'discuss': 'Group review requested',
   'review_policy': 'Automatic group review policy changed',
@@ -157,6 +191,7 @@ String activityLabel(Object? action) {
 
 /// Which section holds an entry's evidence. The activity list is the index.
 String activitySection(Object? action) {
+  if ('${action ?? ''}'.startsWith('pr_repair_')) return 'Activity & agents';
   switch ('${action ?? ''}') {
     case 'launch':
     case 'release':
