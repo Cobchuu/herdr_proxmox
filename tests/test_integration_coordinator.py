@@ -395,6 +395,17 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(config['coordinator_state'], 'needs_attention')
         self.assertEqual(config['coordinator_error'], 'Invalid root pane')
 
+    def test_finished_coordinator_can_be_relaunched_without_duplicate_launches(self):
+        self.store.jobs['coordinator']['state'] = 'finished'
+        with patch.object(self.service, 'coordinator_profile', return_value='coordinator'), \
+                patch('integration_coordinator.project_git.inspect', return_value={'repository': True, 'repository_path': 'repo'}):
+            self.service.configure(dict(repository='repo', organization_id='org', profile_id='new', enabled=True))
+            self.assertEqual(len(self.store.calls), 1)
+            self.store.jobs['new-launch'] = dict(id='new-launch', kind='launch',
+                profile_id='coordinator', organization_id='org', state='queued')
+            self.service.configure(dict(repository='repo', organization_id='org', profile_id='new', enabled=True))
+            self.assertEqual(len(self.store.calls), 1)
+
 
     def test_outage_preserves_terminal_outcomes_without_new_audit_entries(self):
         self.service.observe([self.notice])

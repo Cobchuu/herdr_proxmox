@@ -3,6 +3,14 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:juice/juice.dart';
 
+class DashboardRequestException implements Exception {
+  const DashboardRequestException(this.statusCode, this.message);
+  final int statusCode;
+  final String message;
+  @override
+  String toString() => 'Exception: $message';
+}
+
 class DashboardState extends BlocState {
   const DashboardState({
     this.connected = false,
@@ -258,7 +266,10 @@ class DashboardBloc extends JuiceBloc<DashboardState> {
       throw StateError('Dashboard session expired.');
     }
     if (response.statusCode != 200)
-      throw Exception(data['error'] ?? 'Request failed');
+      throw DashboardRequestException(
+        response.statusCode,
+        '${data['error'] ?? 'Request failed'}',
+      );
     if ([
           'organizations',
           'organizations/directory',

@@ -4,6 +4,7 @@ import 'dashboard_bloc.dart';
 import 'integration.dart';
 import 'routes.dart';
 import 'app_theme.dart';
+import 'agent_status_indicator.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({
@@ -35,6 +36,7 @@ class _AppShellState extends State<AppShell> {
   void initState() {
     super.initState();
     subscription = connection.stream.listen((_) {
+      if (mounted) setState(() {});
       load();
       if (noticeGeneration != connection.generation)
         pollNotices(announce: false);
@@ -392,13 +394,36 @@ class _AppShellState extends State<AppShell> {
           for (final profile in profiles)
             ListTile(
               dense: true,
+              selected: widget.section == 'agent:${profile['id']}',
               contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-              leading: const Icon(Icons.smart_toy_outlined, size: 16),
-              title: Text(
-                '${profile['name']}',
-                style: const TextStyle(fontSize: 12),
+              leading: AgentStatusIndicator(
+                activity: agentActivity(
+                  profile['id'] as String,
+                  connection.state.agents,
+                ),
               ),
-              onTap: () => navigate(OrganizationRoute()),
+              title: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      '${profile['name']}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+              subtitle:
+                  agentActivity(
+                        profile['id'] as String,
+                        connection.state.agents,
+                      ) ==
+                      'attention'
+                  ? const Text(
+                      '(attention required)',
+                      style: TextStyle(fontSize: 10, color: Color(0xffffa14d)),
+                    )
+                  : null,
+              onTap: () => navigate(AgentConsoleRoute(profile['id'] as String)),
             ),
           heading('GROUPS'),
           if (groups.isEmpty)
@@ -703,6 +728,8 @@ class _AppShellState extends State<AppShell> {
                                 child: Text(
                                   widget.section.startsWith('group:')
                                       ? 'Discussion group'
+                                      : widget.section.startsWith('agent:')
+                                      ? 'Agent console'
                                       : widget.section == 'organization'
                                       ? 'Organization'
                                       : widget.section == 'dashboard'

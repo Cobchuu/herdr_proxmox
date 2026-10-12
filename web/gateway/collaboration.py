@@ -18,13 +18,54 @@ from herdr_errors import HerdrError, parse_completion
 DISCUSSION_WAIT_SECONDS = 7200
 
 
+def console_token(run, output):
+    """Bind a terminal response to the conversation and visible prompt reviewed."""
+    return hashlib.sha256(json.dumps([run['id'], run.get('agent_session'), output],
+                                     sort_keys=True).encode()).hexdigest()
+
+
 def active_run(store, db, organization_id, profile_id):
     store.get(db, 'profiles', profile_id, organization_id)
-    jobs = [json.loads(row['data']) for row in db.execute('SELECT data FROM jobs WHERE organization_id=?', (organization_id,))]
-    run = next((j for j in reversed(jobs) if j['kind'] == 'launch' and j['profile_id'] == profile_id and j['state'] == 'persona_sent'), None)
-    if run is None:
+    row = db.execute("SELECT data FROM jobs WHERE organization_id=? "
+                     "AND json_extract(data,'$.kind')='launch' "
+                     "AND json_extract(data,'$.profile_id')=? "
+                     "AND json_extract(data,'$.state')='persona_sent' ORDER BY rowid DESC LIMIT 1",
+                     (organization_id, profile_id)).fetchone()
+    if row is None:
         raise ValueError('Launch this agent and deliver its persona first.')
-    return run
+    return json.loads(row['data'])
+
+
+def inspect_output(store, run, current=None):
+    """Read frozen bindings without holding the store lock during CLI calls."""
+    agent = store.identity(run, ready=False, agent=store.command('agent', 'get', run['alias'], timeout=2).get('agent'))
+    status = agent.get('agent_status', agent.get('state', 'unknown'))
+    source = 'recent-unwrapped' if status in ('idle', 'done') else 'visible'
+    output = store.command('agent', 'read', run['alias'], '--source', source, '--lines', '160', timeout=2)
+    # The agent may still be writing its reply. Bound the preview and refuse
+    # symlinks in this agent-controlled output.
+    draft = ''
+    if current:
+        path = store.path.parent / 'chat-replies' / current['id'] / 'reply.md'
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= 40000:
+            draft = path.read_text(encoding='utf-8', errors='replace')[:40000]
+    return dict(output=output['output'], status=status, reply_draft=draft,
+                console_token=console_token(run, output['output']) if status == 'blocked' else None,
+                reply_job_id=current['id'] if current else None)
+
+
+def inspect_profile(store, body):
+    org_id, profile_id = text(body, 'organization_id', 40), text(body, 'profile_id', 40)
+    with store.lock, closing(store.connect()) as db:
+        store.get(db, 'organizations', org_id)
+        run = active_run(store, db, org_id, profile_id)
+        row = db.execute("SELECT data FROM jobs WHERE organization_id=? "
+                         "AND json_extract(data,'$.profile_id')=? "
+                         "AND json_extract(data,'$.kind')='chat' "
+                         "AND json_extract(data,'$.state')='running' ORDER BY rowid DESC LIMIT 1",
+                         (org_id, profile_id)).fetchone()
+        current = json.loads(row['data']) if row else None
+    return inspect_output(store, run, current)
 
 
 def facilitator(store, db, group):
@@ -161,22 +202,16 @@ def action(store, db, name, body, org):
         runs = []
         group_run = launch_group(store, db, group, org)
     if name == 'inspect':
-        agent = store.identity(runs[0], ready=False, agent=store.command('agent', 'get', runs[0]['alias'], timeout=2).get('agent'))
-        status = agent.get('agent_status', agent.get('state', 'unknown'))
-        source = 'recent-unwrapped' if status in ('idle', 'done') else 'visible'
-        output = store.command('agent', 'read', runs[0]['alias'], '--source', source, '--lines', '160', timeout=2)
-        # A reply file may appear while the agent is still writing it. Never read
-        # beyond the reply limit or follow a symlink from agent-controlled output.
-        draft = ''
-        jobs = [json.loads(row['data']) for row in db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
-        current = next((j for j in reversed(jobs) if j['kind'] == 'chat' and
-                        j.get('profile_id') == runs[0]['profile_id'] and j['state'] == 'running'), None)
-        if current:
-            path = store.path.parent / 'chat-replies' / current['id'] / 'reply.md'
-            if path.is_file() and not path.is_symlink() and path.stat().st_size <= 40000:
-                draft = path.read_text(encoding='utf-8', errors='replace')[:40000]
-        return {'output': output['output'], 'status': status, 'reply_draft': draft,
-                'reply_job_id': current['id'] if current else None}
+        # One targeted row instead of every job in the organization: this path
+        # runs on the console refresh interval, and the cost would otherwise
+        # grow with retained history.
+        row = db.execute("SELECT data FROM jobs WHERE organization_id=? "
+                         "AND json_extract(data,'$.profile_id')=? "
+                         "AND json_extract(data,'$.kind')='chat' "
+                         "AND json_extract(data,'$.state')='running' ORDER BY rowid DESC LIMIT 1",
+                         (org_id, runs[0]['profile_id'])).fetchone()
+        current = json.loads(row['data']) if row else None
+        return inspect_output(store, runs[0], current)
 
     ids = set(group['members']) if name == 'discuss' else {run['profile_id'] for run in runs}
     if name == 'discuss':
@@ -214,6 +249,11 @@ def action(store, db, name, body, org):
             raise ValueError('Unsupported terminal key.')
         item.update(profile_id=runs[0]['profile_id'], key=key, actor=str(body.get('_actor') or 'administrator')[:120],
                     decision_job_id=decision_job)
+        if 'console_token' in body:
+            token = text(body, 'console_token', 64)
+            if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
+                raise ValueError('Invalid console inspection token.')
+            item['console_token'] = token
     elif name == 'chat':
         item.update(profile_id=runs[0]['profile_id'], prompt=text(body, 'prompt', 8000),
                     wait_seconds=wait_seconds(body), integration_event=body.get('integration_event'))
@@ -647,6 +687,14 @@ def execute(store, job):
             with store.lock, closing(store.connect()) as db:
                 owner = store.get(db, 'jobs', job['decision_job_id'], job['organization_id'])
             run = verify_decision_input(store, owner, run)
+        if job.get('console_token'):
+            state = store.agent_state(run)
+            if state['status'] != 'blocked':
+                raise ValueError('Agent is no longer blocked; inspect the console again.')
+            output = store.command('agent', 'read', run['alias'], '--source', 'visible', '--lines', '160', timeout=2)
+            if console_token(run, output['output']) != job['console_token']:
+                raise ValueError('Console prompt changed; review the request again before responding.')
+            current_run(store, run, ready=False)
         store.command('agent', 'send-keys', run['alias'], job['key'])
         current_run(store, run, ready=False)
         store.update_job(job['id'], state='input_sent')
