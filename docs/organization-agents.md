@@ -267,3 +267,26 @@ Inspect the conversation, recover a saved result if it exists, or explicitly
 choose validation-only continuation when Git incorporation is verified. Recovery
 preserves the previous error and marks the reply verified without terminal input.
 Older jobs retain their existing evidence; an update cannot prove past delivery.
+
+## Organization limits and group proposals
+
+Select an organization under **Org chart**, then open **Automation & limits**.
+The same validated policy editor is available in **Group -> Settings**. Limits
+are scoped to the organization, including standalone group discussions; no task
+needs to exist to read or change them. Only administrators can save policies.
+Task automation retains its task-specific controls and a shortcut to organization
+settings.
+
+**Max per meeting** limits automatic queueing, not draft creation. Every valid
+proposal becomes a task; excess proposals stay unstarted drafts with the queue
+limit reason recorded. Follow-up depth, assignee queue and daily limits likewise
+defer automatic execution rather than discard proposals. Group opt-in and
+organization-wide queueing are separate; `needs_review` proposals remain drafts.
+A rejected proposal shows its recorded reason in **Group -> Proposals**, alongside
+its assignee and a link if a task was created. Task-linked reviews use the parent
+task's recorded materialization outcomes. Only finalized artifacts are parsed;
+viewing proposals does not create work or re-evaluate a discussion.
+
+Changing a limit affects future evaluation, not discussions already evaluated.
+Older history can be loaded from the proposals tab. Existing drafts remain in
+Tasks, where an operator may review, start or queue them.

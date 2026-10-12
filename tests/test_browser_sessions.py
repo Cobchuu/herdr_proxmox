@@ -113,12 +113,34 @@ class BrowserSessionTests(unittest.TestCase):
             return urlopen(Request(self.base + '/api/tasks/' + action,
                                    data=json.dumps(body).encode(),
                                    headers={'Authorization': 'Bearer secret', 'Content-Type': 'application/json'}))
-        self.assertEqual(json.load(post('build')), {'id': 't' * 32})
-        self.server.contributions.action.assert_called_once_with('build', body, 'dashboard', 'admin')
-        self.server.integration.wake.assert_called_once()
-        # Other task actions do not force a full watcher refresh.
-        self.server.integration.reset_mock()
-        post('refresh')
+        # Observe at the response boundary, not after the client receives it:
+        # the request thread can otherwise still be between reply() and wake().
+        wakes_at_reply = []
+        original_reply = gateway.Handler.reply
+        def record_reply(handler, status, data, cookie=None):
+            wakes_at_reply.append((handler.path, self.server.integration.wake.call_count))
+            return original_reply(handler, status, data, cookie=cookie)
+        with patch.object(gateway.Handler, 'reply', record_reply):
+            self.assertEqual(json.load(post('build')), {'id': 't' * 32})
+            self.server.contributions.action.assert_called_once_with('build', body, 'dashboard', 'admin')
+            self.assertEqual(wakes_at_reply, [('/api/tasks/build', 1)])
+            self.server.integration.wake.assert_called_once()
+            # Other task actions do not force a full watcher refresh.
+            self.server.integration.reset_mock()
+            post('refresh').close()
+            self.server.integration.wake.assert_not_called()
+            self.assertEqual(wakes_at_reply[-1], ('/api/tasks/refresh', 0))
+
+    def test_rejected_task_build_does_not_wake_the_integration_watcher(self):
+        self.server.contributions = Mock()
+        self.server.contributions.action.side_effect = ValueError('Build rejected.')
+        self.server.integration = Mock()
+        request = Request(self.base + '/api/tasks/build', data=b'{"task_id":"task"}',
+                          headers={'Authorization': 'Bearer secret', 'Content-Type': 'application/json'})
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request)
+        self.assertEqual(error.exception.code, 400)
+        self.assertIn('Build rejected.', error.exception.read().decode())
         self.server.integration.wake.assert_not_called()
 
     def test_notification_feed_requires_authentication_and_recovers_cursor(self):

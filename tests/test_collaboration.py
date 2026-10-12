@@ -84,6 +84,49 @@ class CollaborationTests(unittest.TestCase):
         self.drain()
         return group
 
+    def test_history_lists_created_and_skipped_proposals_without_reprocessing(self):
+        from contributions import Contributions
+        group_id = self.group()
+        items = [dict(title=title, description='Criteria and required checks', profile_id=self.max, needs_review=True)
+                 for title in ('First proposal', 'Second proposal')]
+        job = dict(id=uuid.uuid4().hex, kind='discussion', state='artifact_ready',
+                   organization_id=self.org, group_id=group_id,
+                   result='```json\n' + json.dumps(dict(task_proposals=items)) + '\n```')
+        parsed = Contributions.discussion_proposals(job)
+        job['proposals'] = dict(drafts=[parsed[0]['key']], queued=[],
+            created={parsed[0]['key']: 'created-task'}, skipped={parsed[1]['key']: 'meeting limit reached'},
+            deferred={parsed[0]['key']: 'daily automation limit reached'})
+        with closing(self.store.connect()) as db, db:
+            self.store.put(db, 'jobs', job)
+        history = self.store.history(dict(group_id=group_id))
+        details = next(j for j in history['jobs'] if j['id'] == job['id'])['proposal_details']
+        self.assertEqual([p['status'] for p in details], ['draft', 'skipped'])
+        self.assertEqual(details[0]['task_id'], 'created-task')
+        self.assertEqual(details[0]['reason'], 'daily automation limit reached')
+        self.assertEqual(details[1]['reason'], 'meeting limit reached')
+        self.assertNotIn('proposal_details', self.job(job['id']))
+
+    def test_history_resolves_task_linked_proposal_outcomes_from_parent_task(self):
+        import sqlite3
+        from contributions import Contributions
+        group_id = self.group()
+        proposal = dict(title='Linked proposal', description='Check behavior', profile_id=self.max)
+        job = dict(id=uuid.uuid4().hex, kind='discussion', state='artifact_ready',
+                   organization_id=self.org, group_id=group_id, task_id='parent',
+                   result='```json\n' + json.dumps(dict(task_proposals=[proposal])) + '\n```')
+        key = Contributions.discussion_proposals(job)[0]['key']
+        database = self.root / 'tasks-for-history.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('CREATE TABLE tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+            db.execute('INSERT INTO tasks VALUES (?,?)', ('parent', json.dumps(dict(
+                follow_up_tasks={key:'child'}, auto_queue={job['id']:dict(drafts=[key])}))))
+        with closing(self.store.connect()) as db, db:
+            self.store.put(db, 'jobs', job)
+        self.store.contributions = types.SimpleNamespace(connect=lambda: sqlite3.connect(database))
+        history = self.store.history(dict(group_id=group_id))
+        detail = next(j for j in history['jobs'] if j['id'] == job['id'])['proposal_details'][0]
+        self.assertEqual((detail['status'], detail['task_id']), ('draft', 'child'))
+
     def test_mixed_runtime_group_checks_every_members_permission_policy(self):
         with closing(self.store.connect()) as db, db:
             member = self.store.get(db, 'profiles', self.max)

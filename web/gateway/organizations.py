@@ -370,7 +370,38 @@ class OrganizationStore:
         limit = body.get('limit', 20)
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError('History page size must be between 1 and 50.')
-        return self.snapshot(group_id=text(body, 'group_id', 40), before=before, limit=limit)
+        data = self.snapshot(group_id=text(body, 'group_id', 40), before=before, limit=limit)
+        from contributions import Contributions
+        discussions = [j for j in data['jobs'] if j.get('kind') == 'discussion']
+        task_ids = {j['task_id'] for j in discussions if j.get('task_id')}
+        tasks = {}
+        if self.contributions is not None and task_ids:
+            with closing(self.contributions.connect()) as db:
+                rows = db.execute('SELECT id,data FROM tasks WHERE id IN (' + ','.join('?' for _ in task_ids) + ')', list(task_ids)).fetchall()
+                tasks = {row[0]: json.loads(row[1]) for row in rows}
+        for job in discussions:
+            task = tasks.get(job.get('task_id')) or {}
+            queue = task.get('auto_queue') if isinstance(task.get('auto_queue'), dict) else {}
+            # `proposals` is preferred when a job carries a recorded summary, but
+            # only a mapping is usable here: a non-dict value would raise on the
+            # lookups below and fail the whole history page.
+            outcome = job.get('proposals') if isinstance(job.get('proposals'), dict) else None
+            outcome = outcome or queue.get(job['id']) or {}
+            if not isinstance(outcome, dict):
+                outcome = {}
+            details = []
+            for proposal in Contributions.discussion_proposals(job):
+                key = proposal['key']
+                state = ('queued' if key in (outcome.get('queued') or []) else
+                         'draft' if key in (outcome.get('drafts') or []) else
+                         'skipped' if key in (outcome.get('skipped') or {}) or outcome.get('unavailable') else 'proposed')
+                details.append(dict(proposal, status=state,
+                                    task_id=(outcome.get('created') or {}).get(key) or
+                                    (task.get('follow_up_tasks') or {}).get(key),
+                                    reason=(outcome.get('skipped') or {}).get(key) or
+                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', '')))
+            job['proposal_details'] = details
+        return data
 
     def project(self, value):
         return str(project_directory(self.projects, value))

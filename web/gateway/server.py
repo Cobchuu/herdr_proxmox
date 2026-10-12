@@ -1,4 +1,5 @@
 """Local, authenticated dashboard gateway to the official Herdr CLI."""
+from contextlib import closing
 import hmac
 import secrets
 import time
@@ -281,6 +282,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/api/'):
             if not self.authenticated():
                 return
+            if urlsplit(self.path).path == '/api/organizations/automation':
+                org_id = (parse_qs(urlsplit(self.path).query).get('organization_id') or [''])[0]
+                try:
+                    with self.server.organizations.lock, closing(self.server.organizations.connect()) as db:
+                        self.server.organizations.get(db, 'organizations', org_id)
+                    self.reply(200, dict(organization_id=org_id, policy=self.server.contributions.policy(org_id)))
+                except (ValueError, TypeError):
+                    self.reply(400, {'error': 'Select an existing organization.'})
+                return
             if urlsplit(self.path).path == '/api/notifications':
                 query = parse_qs(urlsplit(self.path).query)
                 hub = getattr(getattr(self.server, 'organizations', None), 'events', None)
@@ -532,12 +542,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.contributions.discovery.action(body, actor, role))
             elif self.path.startswith('/api/tasks/'):
                 task_action = self.path.rsplit('/', 1)[1]
-                self.reply(200, self.server.contributions.action(task_action, body, actor, role))
+                result = self.server.contributions.action(task_action, body, actor, role)
                 if task_action == 'build':
                     # A submitted build must be noticed promptly; otherwise the
                     # watcher can sleep through its full idle interval before it
-                    # starts fast-polling the queue.
+                    # starts fast-polling the queue. Schedule the wake before
+                    # acknowledging submission so a client disconnect cannot
+                    # leave an accepted build waiting for the idle interval.
                     self.server.integration.wake()
+                self.reply(200, result)
             elif self.path == '/api/organizations/import':
                 self.reply(200, import_configuration(self.server.organizations, body))
             elif self.path == '/api/organizations/activity':

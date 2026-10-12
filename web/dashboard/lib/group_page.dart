@@ -1,3 +1,4 @@
+import 'organization_automation.dart';
 import 'artifact_export.dart';
 import 'dart:convert';
 import 'package:juice/juice.dart';
@@ -504,7 +505,7 @@ class _GroupPageState extends State<GroupPage> {
         .toList();
     final occupied = allJobs.any(
       (j) =>
-            ['queued', 'running', 'waiting_for_input'].contains(j['state']) &&
+          ['queued', 'running', 'waiting_for_input'].contains(j['state']) &&
           (j['participants'] as List? ?? [j['profile_id']]).any(
             members.contains,
           ),
@@ -637,6 +638,8 @@ class _GroupPageState extends State<GroupPage> {
                 for (final item in const {
                   'posts': 'Posts',
                   'artifacts': 'Artifacts',
+                  'proposals': 'Proposals',
+                  'settings': 'Settings',
                   'members': 'Members',
                   'about': 'About',
                 }.entries)
@@ -853,12 +856,12 @@ class _GroupPageState extends State<GroupPage> {
                           ),
                         ],
                         if (job == jobs.firstOrNull &&
-                          [
-                            'queued',
-                            'running',
-                            'needs_attention',
-                            'waiting_for_input',
-                          ].contains(job['state']))
+                            [
+                              'queued',
+                              'running',
+                              'needs_attention',
+                              'waiting_for_input',
+                            ].contains(job['state']))
                           liveDiscussion(job),
                         for (final round
                             in ((job['contributions'] as List? ?? [])
@@ -993,6 +996,108 @@ class _GroupPageState extends State<GroupPage> {
                     ),
                   ),
                 ),
+            ],
+            if (tab == 'settings') ...[
+              Text(
+                'Group settings',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              Text(
+                'Automatic queueing for this group: ${group!['create_tasks'] == true ? 'on' : 'off'}. Outcome reviews: ${group!['notify_outcomes'] != false ? 'on' : 'off'}.',
+              ),
+              Text(
+                'Read-only discussion: ${group!['read_only'] != false ? 'on' : 'off'}. Member permissions keep their individual settings.',
+              ),
+              TextButton(
+                onPressed: busy || archived ? null : edit,
+                child: const Text('Edit group settings'),
+              ),
+              const Divider(),
+              const Text(
+                'Inherited organization limits apply even when group queueing is off.',
+              ),
+              OrganizationAutomation(
+                key: ValueKey('group-policy-${group!['organization_id']}'),
+                organizationId: group!['organization_id'] as String,
+              ),
+            ],
+            if (tab == 'proposals') ...[
+              Text(
+                'Discussion proposals',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const Text(
+                'Creation and queueing outcomes are recorded per discussion. Skipped proposals have not become tasks.',
+              ),
+              if (!jobs.any(
+                (j) => (j['proposal_details'] as List? ?? []).isNotEmpty,
+              ))
+                const Text(
+                  'No finalized proposals in this loaded history. See the artifact for discussion findings.',
+                ),
+              for (final job in jobs)
+                for (final proposal in List<Map<String, dynamic>>.from(
+                  job['proposal_details'] ?? [],
+                ))
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${proposal['title']}',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          Text('Discussion: ${job['id']}'),
+                          Text(
+                            'Assignee: ${profiles.where((p) => p['id'] == proposal['profile_id']).firstOrNull?['name'] ?? proposal['profile_id']}',
+                          ),
+                          Text(
+                            proposal['status'] == 'draft'
+                                ? 'Draft created'
+                                : proposal['status'] == 'queued'
+                                ? 'Created and queued'
+                                : proposal['status'] == 'skipped'
+                                ? 'Skipped'
+                                : 'Awaiting proposal evaluation',
+                          ),
+                          if ('${proposal['reason'] ?? ''}'.isNotEmpty)
+                            SelectableText('${proposal['reason']}'),
+                          if (['true', 'yes'].contains(
+                            '${proposal['needs_review']}'.toLowerCase(),
+                          ))
+                            const Text(
+                              'Operator review required before execution.',
+                            ),
+                          ExpansionTile(
+                            title: const Text(
+                              'Acceptance criteria and required checks',
+                            ),
+                            children: [
+                              SelectableText('${proposal['description']}'),
+                            ],
+                          ),
+                          if (proposal['task_id'] != null)
+                            TextButton(
+                              onPressed: () => widget.coordinator.navigate(
+                                TaskDetailRoute(proposal['task_id'] as String),
+                              ),
+                              child: const Text('Open created task'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+              if (nextBefore != null)
+                TextButton(
+                  onPressed: loading ? null : loadOlder,
+                  child: const Text('Load older proposals'),
+                ),
+              TextButton(
+                onPressed: () => setState(() => tab = 'settings'),
+                child: const Text('View group and organization limits'),
+              ),
             ],
             if (tab == 'about') ...[
               Text(

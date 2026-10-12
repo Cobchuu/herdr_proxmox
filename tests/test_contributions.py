@@ -2067,6 +2067,50 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(list(marker['skipped'].values()), ['assignee belongs to another organization'])
         self.assertEqual(self.service.queued_assignments(), [])
 
+    def test_all_review_proposals_survive_zero_queue_limits(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        job = self.taskless_proposal_job(count=11)
+        payload = json.loads(job['result'].split('```json\n')[1].split('\n```')[0])
+        for proposal in payload['task_proposals']:
+            proposal['needs_review'] = True
+        job['result'] = '```json\n' + json.dumps(payload) + '\n```'
+        policy = dict(contributions.AUTOMATION_DEFAULTS, max_per_meeting=0,
+                      max_open_per_agent=0, daily_cap=0)
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(marker['drafts']), 11)
+        self.assertEqual(len(marker['created']), 11)
+        self.assertEqual(marker['skipped'], {})
+        self.assertEqual(marker['queued'], [])
+        self.assertEqual(self.service.queued_assignments(), [])
+        self.assertEqual(self.service.auto_created_today('org'), 0)
+        for task_id in marker['created'].values():
+            self.assertNotIn('assignment', self.service.get(task_id))
+
+    def test_taskless_meeting_overflow_is_durable_and_replay_safe(self):
+        self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
+        policy = dict(contributions.AUTOMATION_DEFAULTS, max_per_meeting=1,
+                      max_open_per_agent=10, daily_cap=10)
+        job = self.taskless_proposal_job(count=3)
+        self.service.materialize_discussion(job, policy, 'group_auto_queue')
+        marker = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(len(marker['queued']), 1)
+        self.assertEqual(len(marker['drafts']), 2)
+        self.assertEqual(len(marker['created']), 3)
+        self.assertEqual(marker['skipped'], {})
+        self.assertEqual(set(marker['deferred'].values()), {'meeting limit reached'})
+        for key in marker['drafts']:
+            task = self.service.get(marker['created'][key])
+            self.assertNotIn('assignment', task)
+            self.assertEqual(task['source']['auto_queued']['queue_reason'], 'meeting limit reached')
+        # Simulate a lost marker after durable task creation, then a larger budget.
+        self.service.materialize_discussion(job, dict(policy, max_per_meeting=10), 'group_auto_queue')
+        replay = self.store.update_job.call_args[1]['proposals']
+        self.assertEqual(replay['created'], marker['created'])
+        self.assertEqual(replay['deferred'], marker['deferred'])
+        self.assertEqual(replay['drafts'], marker['drafts'])
+        self.assertEqual(len(self.service.queued_assignments()), 1)
+
     def test_taskless_proposals_share_the_durable_daily_cap(self):
         self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
         policy = dict(contributions.AUTOMATION_DEFAULTS, daily_cap=1,
@@ -2074,10 +2118,10 @@ class ContributionTests(unittest.TestCase):
         self.service.materialize_discussion(self.taskless_proposal_job(count=2), policy, 'group_auto_queue')
         marker = self.store.update_job.call_args[1]['proposals']
         self.assertEqual(len(marker['queued']), 1)
-        self.assertEqual(list(marker['skipped'].values()), ['daily automation limit reached'])
+        self.assertEqual(list(marker['deferred'].values()), ['daily automation limit reached'])
         self.assertEqual(self.service.auto_created_today('org'), 1)
         self.service.materialize_discussion(self.taskless_proposal_job('next'), policy, 'group_auto_queue')
-        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['skipped'].values()),
+        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['deferred'].values()),
                          ['daily automation limit reached'])
         self.assertEqual(len(self.service.queued_assignments()), 1)
 
@@ -2100,7 +2144,7 @@ class ContributionTests(unittest.TestCase):
         self.service.materialize_meeting(host['id'], 'meeting', policy, 'group_auto_queue')
         marker = self.service.get(host['id'])['auto_queue']['meeting']
         self.assertEqual(marker['queued'], [])
-        self.assertEqual(list(marker['skipped'].values()), ['daily automation limit reached'])
+        self.assertEqual(list(marker['deferred'].values()), ['daily automation limit reached'])
 
     def test_taskless_recovery_does_not_spend_twice_or_duplicate_queue(self):
         self.store.snapshot.return_value['profiles'] = [dict(self.profile)]
@@ -2152,7 +2196,7 @@ class ContributionTests(unittest.TestCase):
         self.service.save(made, 'legacy_fixture', 'admin')
         self.assertEqual(self.service.auto_created_today('org'), 1)
         self.service.materialize_discussion(self.taskless_proposal_job('next'), policy, 'group_auto_queue')
-        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['skipped'].values()),
+        self.assertEqual(list(self.store.update_job.call_args[1]['proposals']['deferred'].values()),
                          ['daily automation limit reached'])
 
     def test_canonical_budget_record_wins_over_an_old_duplicate(self):
@@ -2292,8 +2336,10 @@ class ContributionTests(unittest.TestCase):
         origin = self.service.get(task['id'])
         marker = origin['auto_queue']['meeting']
         self.assertEqual(len(marker['queued']), 1)
-        self.assertEqual(len(marker['skipped']), 1)
-        self.assertIn('meeting limit', list(marker['skipped'].values())[0])
+        self.assertEqual(marker['skipped'], {})
+        self.assertEqual(len(marker['drafts']), 1)
+        self.assertEqual(len(origin['follow_up_tasks']), 2)
+        self.assertIn('meeting limit', list(marker['deferred'].values())[0])
         created = self.service.get(origin['follow_up_tasks'][marker['queued'][0]])
         self.assertEqual(created['state'], 'draft')
         self.assertEqual(created['assignment']['state'], 'queued')
@@ -2315,7 +2361,9 @@ class ContributionTests(unittest.TestCase):
         self.service.advance_proposals()
         marker = self.service.get(task['id'])['auto_queue']['deep']
         self.assertEqual(marker['queued'], [])
-        self.assertIn('depth', list(marker['skipped'].values())[0])
+        self.assertEqual(len(marker['drafts']), 1)
+        self.assertEqual(marker['skipped'], {})
+        self.assertIn('depth', list(marker['deferred'].values())[0])
         # Paused and disabled policies leave finalized meetings unprocessed.
         self.service.action('automation', dict(request_id='a-2', organization_id='org', paused=True), 'admin', 'admin')
         task = self._meeting(task, [dict(title='Paused', description='Must wait while automation is paused.', profile_id='worker')], job_id='paused')
@@ -2392,7 +2440,9 @@ class ContributionTests(unittest.TestCase):
         self.service.advance_proposals()
         marker = self.service.get(task['id'])['auto_queue']['capped']
         self.assertEqual(marker['queued'], [])
-        self.assertIn('queue limit', list(marker['skipped'].values())[0])
+        self.assertEqual(len(marker['drafts']), 1)
+        self.assertEqual(marker['skipped'], {})
+        self.assertIn('queue limit', list(marker['deferred'].values())[0])
         # A zero daily cap blocks even with a free agent.
         self.service.action('assignment', dict(request_id='cancel-cap', task_id=existing['id'], mode='cancel'), 'admin', 'admin')
         self.service.action('automation', dict(request_id='a-2', organization_id='org', daily_cap=0), 'admin', 'admin')
@@ -2400,7 +2450,9 @@ class ContributionTests(unittest.TestCase):
         self.service.advance_proposals()
         marker = self.service.get(task['id'])['auto_queue']['daily']
         self.assertEqual(marker['queued'], [])
-        self.assertIn('daily', list(marker['skipped'].values())[0])
+        self.assertEqual(len(marker['drafts']), 1)
+        self.assertEqual(marker['skipped'], {})
+        self.assertIn('daily', list(marker['deferred'].values())[0])
         # Replaying a policy request returns its stored response.
         replay = self.service.action('automation', dict(request_id='a-1', organization_id='org', auto_queue_proposals=True,
             max_open_per_agent=1, max_per_meeting=5, daily_cap=5), 'admin', 'admin')

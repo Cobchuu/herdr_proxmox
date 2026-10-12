@@ -163,6 +163,26 @@ class OrganizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differently'):
             self.action('resolve_delegation', organization_id=org, job_id=delegation, inspected=True, decision='cancel', reason='Different')
 
+    def test_organization_policy_read_requires_auth_and_checks_scope_without_tasks(self):
+        org = self.organization()
+        service = SimpleNamespace(policy=lambda identity: dict(max_per_meeting=2))
+        server = gateway.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
+        server.token, server.organizations, server.contributions = 'admin-token', self.store, service
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}/api/organizations/automation?organization_id='
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + org)
+            self.assertEqual(error.exception.code, 401)
+            result = json.load(urlopen(Request(base + org, headers={'Authorization': 'Bearer admin-token'})))
+            self.assertEqual(result, dict(organization_id=org, policy=dict(max_per_meeting=2)))
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(base + 'missing', headers={'Authorization': 'Bearer admin-token'}))
+            self.assertEqual(error.exception.code, 400)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
     def test_http_resolution_requires_admin(self):
         server = gateway.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
         server.token = 'admin-token'

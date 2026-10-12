@@ -1,3 +1,4 @@
+import 'organization_automation.dart';
 import 'dart:convert';
 import 'artifact_download.dart';
 import 'permission_options.dart';
@@ -728,25 +729,37 @@ class _OrganizationPageState extends State<OrganizationPage> {
                         ],
                       ),
                       const SizedBox(height: 12),
-                      SegmentedButton<String>(
-                        segments: const [
-                          ButtonSegment(
-                            value: 'chart',
-                            label: Text('Chart'),
-                            icon: Icon(Icons.account_tree_outlined),
-                          ),
-                          ButtonSegment(value: 'team', label: Text('Team')),
-                          ButtonSegment(value: 'runs', label: Text('Runs')),
-                          ButtonSegment(
-                            value: 'collaborate',
-                            label: Text('Chat'),
-                          ),
-                        ],
-                        selected: {view},
-                        onSelectionChanged: (values) =>
-                            setState(() => view = values.single),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(
+                              value: 'chart',
+                              label: Text('Chart'),
+                              icon: Icon(Icons.account_tree_outlined),
+                            ),
+                            ButtonSegment(value: 'team', label: Text('Team')),
+                            ButtonSegment(value: 'runs', label: Text('Runs')),
+                            ButtonSegment(
+                              value: 'automation',
+                              label: Text('Automation & limits'),
+                            ),
+                            ButtonSegment(
+                              value: 'collaborate',
+                              label: Text('Chat'),
+                            ),
+                          ],
+                          selected: {view},
+                          onSelectionChanged: (values) =>
+                              setState(() => view = values.single),
+                        ),
                       ),
                       const SizedBox(height: 18),
+                      if (view == 'automation')
+                        OrganizationAutomation(
+                          key: ValueKey('automation-${org['id']}'),
+                          organizationId: org['id'] as String,
+                        ),
                       if (view == 'collaborate')
                         CollaborationPanel(
                           key: ValueKey(org['id']),
