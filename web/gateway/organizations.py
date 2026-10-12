@@ -474,6 +474,9 @@ class OrganizationStore:
         key = text(body, 'request_id', 80)
         if not re.fullmatch(r'[A-Za-z0-9_-]{8,80}', key):
             raise ValueError('Invalid request ID.')
+        if action == 'inspect' and not body.get('job_id'):
+            from collaboration import inspect_profile
+            return inspect_profile(self, body)
         if action in ('inspect', 'transcript'):
             # Freeze records under the lock, then perform external reads without
             # holding the store lock or an on-disk transaction.

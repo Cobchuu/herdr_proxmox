@@ -84,6 +84,45 @@ class CollaborationTests(unittest.TestCase):
         self.drain()
         return group
 
+    def test_mixed_runtime_group_checks_every_members_permission_policy(self):
+        with closing(self.store.connect()) as db, db:
+            member = self.store.get(db, 'profiles', self.max)
+            member['runtime'] = 'codex'
+            self.store.put(db, 'profiles', member)
+            member = self.store.get(db, 'profiles', self.iris)
+            member['runtime'] = 'opencode'
+            self.store.put(db, 'profiles', member)
+        for members in ([self.max, self.iris], [self.iris, self.max]):
+            for policy in (dict(permission_mode='dashboard_outputs'), dict(accessible_paths=['/project/**'])):
+                with self.subTest(members=members, policy=policy):
+                    with self.assertRaisesRegex(ValueError, 'OpenCode only'):
+                        self.action('group', organization_id=self.org, name='Mixed',
+                                    description='Mixed-runtime team', members=members, **policy)
+
+    def test_recovery_paginates_past_unresolved_rows_while_successes_shrink_the_set(self):
+        ids = [uuid.uuid4().hex for _ in range(7)]
+        with closing(self.store.connect()) as db, db:
+            for job_id in ids:
+                self.store.put(db, 'jobs', dict(id=job_id, organization_id=self.org,
+                    kind='discussion', state='uncertain'))
+        recoverable = {ids[1], ids[3], ids[5], ids[6]}
+        visited = set()
+        def finalize(store, job_id, actor):
+            visited.add(job_id)
+            if job_id not in recoverable:
+                raise ValueError('Unresolved identity')
+            store.update_job(job_id, state='artifact_ready')
+            return dict(id=job_id)
+        offset, recovered = 0, set()
+        with patch('collaboration.finalize_discussion', side_effect=finalize):
+            for _ in range(8):
+                done, offset = recover_interrupted(self.store, offset, limit=2)
+                recovered.update(done)
+        self.assertEqual(visited, set(ids))
+        self.assertEqual(recovered, recoverable)
+        for job_id in set(ids) - recoverable:
+            self.assertEqual(self.job(job_id)['state'], 'uncertain')
+
     def test_removal_preserves_artifacts_and_members_but_closes_facilitator(self):
         group_id = self.group()
         discussion = self.action('discuss', organization_id=self.org, group_id=group_id)

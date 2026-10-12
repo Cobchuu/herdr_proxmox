@@ -1,13 +1,34 @@
 import 'package:flutter/material.dart';
 
+/// Snapshot agents have profile IDs only after the gateway verifies ownership,
+/// so both helpers key on the profile rather than a pane or alias heuristic.
+bool agentRequiresAttention(
+  String profileId,
+  List<Map<String, dynamic>> agents,
+) => agentActivity(profileId, agents) == 'attention';
+
+/// Classify one runtime status. Shared so the sidebar and the chart cannot
+/// disagree about what a status means.
+String agentStatusActivity(Object? status) => switch (status) {
+  'idle' || 'done' => 'idle',
+  'working' || 'running' || 'busy' || 'thinking' => 'working',
+  'blocked' => 'attention',
+  _ => 'offline',
+};
+
+/// The single status palette. A status must not render as two different colours
+/// in one view.
+Color agentActivityColor(String activity, ColorScheme scheme) =>
+    switch (activity) {
+      'idle' => const Color(0xff56c592),
+      'working' => const Color(0xff3a93ff),
+      'attention' => const Color(0xffffa14d),
+      _ => scheme.outline,
+    };
+
 String agentActivity(String profileId, List<Map<String, dynamic>> agents) {
   final agent = agents.where((a) => a['profile_id'] == profileId).firstOrNull;
-  return switch (agent?['agent_status'] ?? agent?['state']) {
-    'idle' || 'done' => 'idle',
-    'working' || 'running' || 'busy' || 'thinking' => 'working',
-    'blocked' => 'attention',
-    _ => 'offline',
-  };
+  return agentStatusActivity(agent?['agent_status'] ?? agent?['state']);
 }
 
 class AgentStatusIndicator extends StatefulWidget {
@@ -56,12 +77,10 @@ class _AgentStatusIndicatorState extends State<AgentStatusIndicator>
 
   @override
   Widget build(BuildContext context) {
-    final color = switch (widget.activity) {
-      'idle' => const Color(0xff56c592),
-      'working' => const Color(0xff3a93ff),
-      'attention' => const Color(0xffffa14d),
-      _ => Theme.of(context).colorScheme.outline,
-    };
+    final color = agentActivityColor(
+      widget.activity,
+      Theme.of(context).colorScheme,
+    );
     final label = switch (widget.activity) {
       'attention' => 'Attention required',
       'working' => 'Working',

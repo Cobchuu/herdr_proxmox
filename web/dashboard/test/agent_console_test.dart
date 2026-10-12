@@ -5,7 +5,6 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:juice/juice.dart';
 import 'package:herdr_dashboard/agent_console_page.dart';
-import 'package:herdr_dashboard/agent_attention.dart';
 import 'package:herdr_dashboard/agent_status_indicator.dart';
 import 'package:herdr_dashboard/org_chart.dart';
 import 'package:herdr_dashboard/routes.dart';
@@ -292,11 +291,11 @@ void main() {
       expect(find.text(output), findsOneWidget);
       expect(find.text('Requires attention'), findsNothing);
       final workingInspections = inspections;
-      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       expect(inspections, greaterThan(workingInspections));
       status = 'idle';
-      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       final idleInspections = inspections;
       await tester.pump(const Duration(seconds: 4));
@@ -312,4 +311,120 @@ void main() {
       await BlocScope.endAll();
     },
   );
+
+  for (final failureStatus in [400, 503]) {
+    testWidgets('console reconciles input after HTTP $failureStatus', (
+      tester,
+    ) async {
+      // The gateway applies the keystroke before it answers. If the answer is
+      // lost, a retry that carries a new request ID sends Enter a second time;
+      // the request ID is the only thing that deduplicates delivery.
+      tester.view.physicalSize = const Size(1200, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final requestIds = <String>[];
+      final keys = <String>[];
+      var fail = true;
+      var promptToken = 'reviewed-prompt';
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          final path = request.url.path;
+          if (path == '/api/organizations/inspect') {
+            return http.Response(
+              jsonEncode({
+                'status': 'blocked',
+                'output': 'Access requested: /project/private',
+                'console_token': promptToken,
+              }),
+              200,
+            );
+          }
+          if (path == '/api/organizations/input') {
+            requestIds.add('${jsonDecode(request.body)['request_id']}');
+            keys.add('${jsonDecode(request.body)['key']}');
+            if (fail) {
+              fail = false;
+              promptToken = 'changed-prompt';
+              return http.Response(
+                '{"error":"input request failed"}',
+                failureStatus,
+              );
+            }
+            return http.Response('{"id":"decision"}', 200);
+          }
+          if (path.startsWith('/api/organizations'))
+            return http.Response(
+              jsonEncode({
+                'organizations': [
+                  {'id': 'org', 'name': 'Engineering'},
+                ],
+                'profiles': [profile],
+                'jobs': [],
+              }),
+              200,
+            );
+          return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }),
+      );
+      BlocScope.register<DashboardBloc>(
+        () => connection,
+        lifecycle: BlocLifecycle.permanent,
+      );
+      final connected = connection.stream.firstWhere(
+        (_) => connection.state.connected,
+      );
+      connection.connect('token');
+      await connected;
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: AgentConsolePage(id: 'backend')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Confirm selected Allow / Reject'));
+      await tester.pumpAndSettle();
+      expect(requestIds, hasLength(1));
+      if (failureStatus == 400) {
+        // A rejected admission sent nothing; a new reviewed response is allowed.
+        expect(find.text('Recheck pending response'), findsNothing);
+        await tester.tap(find.text('Cancel request (Esc)'));
+        await tester.pumpAndSettle();
+        expect(requestIds, hasLength(2));
+        expect(requestIds.first, isNot(requestIds.last));
+        expect(keys, ['enter', 'esc']);
+      } else {
+        // A changed prompt or another selected key must not replace an uncertain
+        // response: the operator can only reconcile its original request identity.
+        expect(find.text('Requires attention'), findsOneWidget);
+        expect(
+          tester
+              .widget<FilledButton>(
+                find.widgetWithText(
+                  FilledButton,
+                  'Confirm selected Allow / Reject',
+                ),
+              )
+              .onPressed,
+          isNull,
+        );
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.widgetWithText(OutlinedButton, 'Cancel request (Esc)'),
+              )
+              .onPressed,
+          isNull,
+        );
+        await tester.tap(find.text('Recheck pending response'));
+        await tester.pumpAndSettle();
+        expect(requestIds, hasLength(2));
+        expect(requestIds.first, requestIds.last);
+        expect(keys, ['enter', 'enter']);
+      }
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.endAll();
+    });
+  }
 }

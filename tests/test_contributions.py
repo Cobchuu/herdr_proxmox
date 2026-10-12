@@ -362,6 +362,19 @@ class ContributionTests(unittest.TestCase):
         listed = next(t for t in self.service.snapshot()['tasks'] if t['id'] == task['id'])
         self.assertEqual(listed['commit_graph'], task['commit_graph'])
 
+    def test_commit_history_preserves_empty_refs_on_unreferenced_base(self):
+        (self.repo / 'file').write_text('new upstream\n')
+        self.git('add', 'file')
+        self.git('commit', '-m', 'upstream advances')
+        head = self.git('rev-parse', 'HEAD').strip()
+        self.git('update-ref', 'refs/remotes/origin/main', head)
+        self.assertEqual(self.git('show', '-s', '--format=%D', self.base).strip(), '')
+        history = self.service.commit_history(self.repo, self.base, head)
+        self.assertEqual(history[-1]['sha'], self.base)
+        self.assertEqual(history[-1]['refs'], '')
+        self.assertTrue(history[-1]['author'])
+        self.assertEqual(history[0]['subject'], 'upstream advances')
+
     def test_detail_loads_legacy_history_without_recapture_or_write(self):
         task = self.candidate()
         task.pop('commit_graph', None)

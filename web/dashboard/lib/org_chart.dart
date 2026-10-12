@@ -3,7 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'ui_colors.dart';
-import 'agent_attention.dart';
+import 'agent_status_indicator.dart';
+
+/// Agent card height. The connector painter starts its lines at the bottom of a
+/// card, so both must use this value or the edges detach from the cards.
+const double agentCardHeight = 108;
 
 class ChartLayout {
   ChartLayout(List<Map<String, dynamic>> profiles) {
@@ -97,12 +101,10 @@ class _OrgChartState extends State<OrgChart> {
                         a['name'] == run['alias'],
                   )
                   .firstOrNull);
-    return switch (agent?['agent_status']) {
-      'working' => const Color(0xff3a93ff),
-      'blocked' => const Color(0xffeebc32),
-      'idle' || 'done' => const Color(0xff56c592),
-      _ => const Color(0xff777777),
-    };
+    return agentActivityColor(
+      agentStatusActivity(agent?['agent_status'] ?? agent?['state']),
+      Theme.of(context).colorScheme,
+    );
   }
 
   @override
@@ -284,7 +286,7 @@ class _OrgChartState extends State<OrgChart> {
                             left: layout.positions[profile['id']]!.dx,
                             top: layout.positions[profile['id']]!.dy,
                             width: 188,
-                            height: 108,
+                            height: agentCardHeight,
                             child: Material(
                               color: Theme.of(context).colorScheme.surface,
                               shape: RoundedRectangleBorder(
@@ -468,7 +470,7 @@ class _Connections extends CustomPainter {
       final parent = positions[profile['manager_id']],
           child = positions[profile['id']];
       if (parent == null || child == null || parent.dy >= child.dy) continue;
-      final start = parent + const Offset(94, 108),
+      final start = parent + const Offset(94, agentCardHeight),
           end = child + const Offset(94, 0);
       final middle = (start.dy + end.dy) / 2;
       canvas.drawPath(

@@ -229,6 +229,7 @@ void main() {
       },
     };
     final posts = <Map<String, dynamic>>[];
+    var prCapability = 'needs_different_authentication';
     final connection = DashboardBloc(
       client: MockClient((request) async {
         if (request.url.path.endsWith('/tasks/pull'))
@@ -250,8 +251,7 @@ void main() {
                             'fork_access': 'verified',
                             'account_write_to_publishing': 'verified',
                             'token_write_capability': 'not_exercised',
-                            'upstream_pr_creation':
-                                'needs_different_authentication',
+                            'upstream_pr_creation': prCapability,
                           },
                         },
                       },
@@ -271,14 +271,32 @@ void main() {
     );
     await tester.pumpAndSettle();
     // Setup reports capability, and never claims to have exercised a write.
-    expect(find.textContaining('token write not_exercised'), findsOneWidget);
+    expect(find.textContaining('Token write access has not been tested'), findsOneWidget);
     expect(
-      find.textContaining('upstream PR needs_different_authentication'),
+      find.textContaining('Different GitHub authentication is required'),
       findsOneWidget,
     );
     await tester.tap(find.text('Open task'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Changes'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Configure authentication for upstream PR'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Open draft PR'), findsNothing);
+    await tester.tap(find.text('Configure authentication for upstream PR'));
+    await tester.pumpAndSettle();
+    expect(find.text('GitHub publishing'), findsOneWidget);
+    expect(posts, isEmpty);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    // Once compatible authentication is configured, the existing PR preview
+    // still distinguishes the fork branch from the upstream target.
+    prCapability = 'supported';
+    await tester.pump(const Duration(seconds: 15));
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('Open draft PR'),

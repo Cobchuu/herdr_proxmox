@@ -1783,7 +1783,9 @@ class Contributions:
             result.append(dict(sha=sha, parents=parents.split(), subject=subject[:300],
                                author=author[:120], date=date, refs=refs[:200]))
         if not any(n['sha'] == base for n in result):
-            row = project_git.git(repository, 'show', '-s', '--format=' + log_format, base, '--').strip()
+            # An undecorated base ends with the field separator: generic strip()
+            # removes that whitespace character and drops the empty refs field.
+            row = project_git.git(repository, 'show', '-s', '--format=' + log_format, base, '--').rstrip('\r\n')
             sha, parents, subject, author, date, refs = row.split('\x1f', 5)
             result.append(dict(sha=sha, parents=parents.split(), subject=subject[:300],
                                author=author[:120], date=date, refs=refs[:200]))

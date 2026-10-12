@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 import unittest
 import uuid
+import sqlite3
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'web/gateway'))
 import test_organizations as fixtures
@@ -58,6 +60,12 @@ class AgentConsoleTests(unittest.TestCase):
         self.assertEqual(result['state'], 'input_sent')
         self.assertTrue(result['actor'])
         self.assertIn(('agent', 'send-keys', self.run['alias'], 'enter'), [a for a, _ in self.calls])
+
+    def test_inspection_reads_frozen_bindings_without_copying_the_database(self):
+        with patch('organizations.sqlite3.connect', wraps=sqlite3.connect) as connect:
+            self.assertEqual(self.inspect()['output'], self.output)
+        self.assertFalse(any(call.args[0] == ':memory:' for call in connect.call_args_list))
+        self.assertTrue(connect.call_args_list)
 
     def test_changed_prompt_is_not_answered(self):
         token = self.inspect()['console_token']

@@ -26,6 +26,26 @@ String taskState(Map<String, dynamic> task) =>
     ? 'Queued'
     : taskStates['${task['state']}'] ?? '${task['state']}';
 
+bool needsPrAuthentication(Map github, String? repository) =>
+    (github['publication']
+        as Map?)?[repository]?['verification']?['upstream_pr_creation'] ==
+    'needs_different_authentication';
+
+String publicationSummary(String repository, Map entry) {
+  final verification = entry['verification'] as Map? ?? {};
+  final account = verification['account_write_to_publishing'] == 'verified'
+      ? 'Account write access verified'
+      : 'Account write access not verified';
+  final pr =
+      verification['upstream_pr_creation'] == 'needs_different_authentication'
+      ? 'Different GitHub authentication is required to create a PR in $repository. Configure a credential authorized for the upstream repository.'
+      : verification['upstream_pr_creation'] == 'supported'
+      ? 'PR authentication is compatible; creation has not been tested.'
+      : 'Upstream PR authentication has not been verified.';
+  return '$repository → ${entry['publishing_repository']}\n$account. '
+      'Token write access has not been tested. $pr';
+}
+
 /// A merged pull request is never presented as awaiting review, and a draft is
 /// never presented as ready.
 String pullStatus(Map<String, dynamic> task) {
@@ -687,6 +707,10 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   Future<void> previewPull(Map<String, dynamic> task) async {
+    if (needsPrAuthentication(github, task['github_repository'] as String?)) {
+      await configure();
+      return;
+    }
     final epoch = connection.generation;
     // Created up front so the dialog builder captures non-nullable controllers.
     final title = TextEditingController();
@@ -735,7 +759,9 @@ class _TasksPageState extends State<TasksPage> {
                       TextFormField(
                         controller: title,
                         maxLength: 256,
-                        decoration: const InputDecoration(labelText: 'PR title'),
+                        decoration: const InputDecoration(
+                          labelText: 'PR title',
+                        ),
                         validator: (value) =>
                             value == null || value.trim().isEmpty
                             ? 'Enter a title.'
@@ -799,7 +825,8 @@ class _TasksPageState extends State<TasksPage> {
               ),
               FilledButton(
                 onPressed: () {
-                  if (form.currentState!.validate()) Navigator.pop(context, true);
+                  if (form.currentState!.validate())
+                    Navigator.pop(context, true);
                 },
                 child: const Text('Create draft PR'),
               ),
@@ -855,7 +882,9 @@ class _TasksPageState extends State<TasksPage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Publish branch to: ${mode == 'fork' ? fork : upstream}'),
+                  Text(
+                    'Publish branch to: ${mode == 'fork' ? fork : upstream}',
+                  ),
                   Text('Open draft PR into: $upstream'),
                   const Text(
                     'The destination is recorded with this task and cannot change once the branch is published. The upstream repository is never force-pushed.',
@@ -1008,11 +1037,7 @@ class _TasksPageState extends State<TasksPage> {
                 for (final entry in (github['publication'] as Map).entries)
                   if (entry.value is Map && entry.value['mode'] == 'fork')
                     Text(
-                      '${entry.key} \u2192 fork ${entry.value['publishing_repository']} \u00b7 '
-                      'fork access ${entry.value['verification']?['fork_access'] ?? 'unknown'} \u00b7 '
-                      'account write ${entry.value['verification']?['account_write_to_publishing'] ?? 'unknown'} \u00b7 '
-                      'token write ${entry.value['verification']?['token_write_capability'] ?? 'unknown'} \u00b7 '
-                      'upstream PR ${entry.value['verification']?['upstream_pr_creation'] ?? 'unknown'}',
+                      publicationSummary('${entry.key}', entry.value as Map),
                     ),
               if (busy) const LinearProgressIndicator(),
               if ((error ?? readError) != null)
@@ -1518,92 +1543,127 @@ class _TasksPageState extends State<TasksPage> {
     final starts = TextEditingController(
       text: '${policy['daily_session_cap'] ?? 0}',
     );
+    final form = GlobalKey<FormState>();
+    Future<dynamic>? dialogClosed;
     final selected = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: const Text('Follow-up automation policy'),
-          content: SizedBox(
-            width: 480,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Applies to all group reviews in this organization. Qualifying proposals are created and queued; everything else stays a draft. Publishing, merging and deployment are never automatic.',
+      builder: (context) {
+        dialogClosed = ModalRoute.of(context)?.completed;
+        return StatefulBuilder(
+          builder: (context, update) => AlertDialog(
+            title: const Text('Follow-up automation policy'),
+            content: SizedBox(
+              width: 480,
+              child: SingleChildScrollView(
+                child: Form(
+                  key: form,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Applies to all group reviews in this organization. Qualifying proposals are created and queued; everything else stays a draft. Publishing, merging and deployment are never automatic.',
+                      ),
+                      SwitchListTile(
+                        value: enabled,
+                        onChanged: (value) =>
+                            update(() => enabled = value == true),
+                        title: const Text(
+                          'Automatically queue qualifying follow-up proposals',
+                        ),
+                      ),
+                      SwitchListTile(
+                        value: paused,
+                        onChanged: (value) =>
+                            update(() => paused = value == true),
+                        title: const Text('Pause automatic follow-up'),
+                        subtitle: const Text(
+                          'Queued work stays queued; nothing new starts automatically.',
+                        ),
+                      ),
+                      _limitField(perMeeting, 'Max per meeting', 10),
+                      _limitField(
+                        perAgent,
+                        'Max open per agent (queued + active)',
+                        50,
+                      ),
+                      _limitField(depth, 'Max follow-up depth', 10),
+                      _limitField(daily, 'Daily limit (organization)', 100),
+                      const Text(
+                        'Shared session budget: one limit over task executions, meetings, discovery and helpers. 0 turns a limit off.',
+                      ),
+                      _limitField(
+                        sessions,
+                        'Max active sessions (organization)',
+                        50,
+                      ),
+                      _limitField(
+                        meetings,
+                        'Max active meetings (organization)',
+                        10,
+                      ),
+                      _limitField(
+                        starts,
+                        'Daily session starts (organization)',
+                        500,
+                      ),
+                      SwitchListTile(
+                        value: reap,
+                        onChanged: (value) =>
+                            update(() => reap = value == true),
+                        title: const Text(
+                          'Close finished sessions automatically',
+                        ),
+                        subtitle: const Text(
+                          'Reclaims memory by archiving and closing sessions whose task already finished. They stay resumable from session archives; an agent that is still working is never closed.',
+                        ),
+                      ),
+                      SwitchListTile(
+                        value: reapOrphaned,
+                        onChanged: (value) =>
+                            update(() => reapOrphaned = value == true),
+                        title: const Text(
+                          'Reclaim panes orphaned by a restart',
+                        ),
+                        subtitle: const Text(
+                          'After a Herdr restart, panes can return as plain shells that no agent holds. This closes them once the pane is proven to run nothing and to sit in the recorded checkout. Ambiguous panes are left for you.',
+                        ),
+                      ),
+                    ],
                   ),
-                  SwitchListTile(
-                    value: enabled,
-                    onChanged: (value) => update(() => enabled = value == true),
-                    title: const Text(
-                      'Automatically queue qualifying follow-up proposals',
-                    ),
-                  ),
-                  SwitchListTile(
-                    value: paused,
-                    onChanged: (value) => update(() => paused = value == true),
-                    title: const Text('Pause automatic follow-up'),
-                    subtitle: const Text(
-                      'Queued work stays queued; nothing new starts automatically.',
-                    ),
-                  ),
-                  _limitField(perMeeting, 'Max per meeting'),
-                  _limitField(perAgent, 'Max open per agent (queued + active)'),
-                  _limitField(depth, 'Max follow-up depth'),
-                  _limitField(daily, 'Daily limit (organization)'),
-                  const Text(
-                    'Shared session budget: one limit over task executions, meetings, discovery and helpers. 0 turns a limit off.',
-                  ),
-                  _limitField(sessions, 'Max active sessions (organization)'),
-                  _limitField(meetings, 'Max active meetings (organization)'),
-                  _limitField(starts, 'Daily session starts (organization)'),
-                  SwitchListTile(
-                    value: reap,
-                    onChanged: (value) => update(() => reap = value == true),
-                    title: const Text('Close finished sessions automatically'),
-                    subtitle: const Text(
-                      'Reclaims memory by archiving and closing sessions whose task already finished. They stay resumable from session archives; an agent that is still working is never closed.',
-                    ),
-                  ),
-                  SwitchListTile(
-                    value: reapOrphaned,
-                    onChanged: (value) =>
-                        update(() => reapOrphaned = value == true),
-                    title: const Text('Reclaim panes orphaned by a restart'),
-                    subtitle: const Text(
-                      'After a Herdr restart, panes can return as plain shells that no agent holds. This closes them once the pane is proven to run nothing and to sit in the recorded checkout. Ambiguous panes are left for you.',
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  if (form.currentState?.validate() != true) return;
+                  Navigator.pop(context, {
+                    'auto_queue_proposals': enabled,
+                    'paused': paused,
+                    'reap_finished_sessions': reap,
+                    'reap_orphaned_panes': reapOrphaned,
+                    'max_per_meeting': int.tryParse(perMeeting.text.trim()),
+                    'max_open_per_agent': int.tryParse(perAgent.text.trim()),
+                    'max_follow_up_depth': int.tryParse(depth.text.trim()),
+                    'daily_cap': int.tryParse(daily.text.trim()),
+                    'max_active_sessions': int.tryParse(sessions.text.trim()),
+                    'max_active_meetings': int.tryParse(meetings.text.trim()),
+                    'daily_session_cap': int.tryParse(starts.text.trim()),
+                  });
+                },
+                child: const Text('Save policy'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, {
-                'auto_queue_proposals': enabled,
-                'paused': paused,
-                'reap_finished_sessions': reap,
-                'reap_orphaned_panes': reapOrphaned,
-                'max_per_meeting': int.tryParse(perMeeting.text.trim()),
-                'max_open_per_agent': int.tryParse(perAgent.text.trim()),
-                'max_follow_up_depth': int.tryParse(depth.text.trim()),
-                'daily_cap': int.tryParse(daily.text.trim()),
-                'max_active_sessions': int.tryParse(sessions.text.trim()),
-                'max_active_meetings': int.tryParse(meetings.text.trim()),
-                'daily_session_cap': int.tryParse(starts.text.trim()),
-              }),
-              child: const Text('Save policy'),
-            ),
-          ],
-        ),
-      ),
+        );
+      },
     );
+    await dialogClosed;
     perMeeting.dispose();
     perAgent.dispose();
     depth.dispose();
@@ -1612,17 +1672,26 @@ class _TasksPageState extends State<TasksPage> {
     meetings.dispose();
     starts.dispose();
     if (selected == null || !mounted || epoch != connection.generation) return;
-    selected.removeWhere((key, value) => value == null);
     await act('automation', {
       'organization_id': task['organization_id'],
       ...selected,
     });
   }
 
-  Widget _limitField(TextEditingController controller, String label) => Padding(
+  Widget _limitField(
+    TextEditingController controller,
+    String label,
+    int maximum,
+  ) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 4),
-    child: TextField(
+    child: TextFormField(
       controller: controller,
+      validator: (value) {
+        final number = int.tryParse(value?.trim() ?? '');
+        return number == null || number < 0 || number > maximum
+            ? 'Enter a whole number from 0 to $maximum.'
+            : null;
+      },
       keyboardType: TextInputType.number,
       decoration: InputDecoration(labelText: label, isDense: true),
     ),
@@ -1799,76 +1868,86 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   Future<void> consultTask(Map<String, dynamic> task) async {
+    final epoch = connection.generation;
     try {
       final agents = await _agents(task);
-      if (!mounted) return;
+      if (!mounted || epoch != connection.generation) return;
       if (agents.isEmpty) {
         setState(() => error = 'No agent works in this repository.');
         return;
       }
       String? consultant = '${agents.first['id']}';
       final question = TextEditingController();
-      final chosen = await showDialog<String>(
+      Future<dynamic>? dialogClosed;
+      final chosen = await showDialog<({String profileId, String question})>(
         context: context,
-        builder: (context) => StatefulBuilder(
-          builder: (context, update) => AlertDialog(
-            title: const Text('Ask a consultant'),
-            content: SizedBox(
-              width: 480,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'The answer is recorded as reported knowledge on this task. It is not validation evidence.',
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: consultant,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: 'Consultant'),
-                    items: [
-                      for (final p in agents)
-                        DropdownMenuItem(
-                          value: '${p['id']}',
-                          child: Text('${p['name']}'),
-                        ),
-                    ],
-                    onChanged: (v) => update(() => consultant = v),
-                  ),
-                  TextField(
-                    controller: question,
-                    maxLength: 2000,
-                    minLines: 3,
-                    maxLines: 6,
-                    decoration: const InputDecoration(labelText: 'Question'),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(
-                  context,
-                  question.text.trim().isEmpty
-                      ? null
-                      : '$consultant\u0000${question.text}',
+        builder: (context) {
+          dialogClosed = ModalRoute.of(context)?.completed;
+          return StatefulBuilder(
+            builder: (context, update) => AlertDialog(
+              title: const Text('Ask a consultant'),
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'The answer is recorded as reported knowledge on this task. It is not validation evidence.',
+                    ),
+                    DropdownButtonFormField<String>(
+                      initialValue: consultant,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Consultant',
+                      ),
+                      items: [
+                        for (final p in agents)
+                          DropdownMenuItem(
+                            value: '${p['id']}',
+                            child: Text('${p['name']}'),
+                          ),
+                      ],
+                      onChanged: (v) => update(() => consultant = v),
+                    ),
+                    TextField(
+                      controller: question,
+                      maxLength: 2000,
+                      minLines: 3,
+                      maxLines: 6,
+                      decoration: const InputDecoration(labelText: 'Question'),
+                    ),
+                  ],
                 ),
-                child: const Text('Ask'),
               ),
-            ],
-          ),
-        ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(
+                    context,
+                    question.text.trim().isEmpty || consultant == null
+                        ? null
+                        : (
+                            profileId: consultant!,
+                            question: question.text.trim(),
+                          ),
+                  ),
+                  child: const Text('Ask'),
+                ),
+              ],
+            ),
+          );
+        },
       );
+      await dialogClosed;
       question.dispose();
-      if (chosen != null && mounted) {
-        final parts = chosen.split('\u0000');
+      if (chosen != null && mounted && epoch == connection.generation) {
         await act('consult', {
           'task_id': task['id'],
-          'consultant_profile_id': parts.first,
-          'question': parts.length > 1 ? parts[1] : '',
+          'consultant_profile_id': chosen.profileId,
+          'question': chosen.question,
         });
       }
     } catch (e) {
@@ -2059,7 +2138,9 @@ class _TasksPageState extends State<TasksPage> {
               ),
             if (result.isNotEmpty)
               SelectableText(
-                result.length > 1200 ? '${result.substring(0, 1200)}…' : result,
+                result.length > 1200
+                    ? '${result.substring(0, 1200)}…'
+                    : result,
               ),
             if (ready)
               const Text(
@@ -2844,7 +2925,9 @@ class _TasksPageState extends State<TasksPage> {
               '${repair?['message'] ?? 'This PR cannot merge cleanly into its upstream base. Ask the assigned agent to repair its branch.'}',
             ),
             Text('Assigned agent: $agent'),
-            SelectableText('PR branch: ${task['branch']}\nPublish to: ${task['publishing_repository'] ?? task['github_repository']}\nPR target: ${task['github_repository']}'),
+            SelectableText(
+              'PR branch: ${task['branch']}\nPublish to: ${task['publishing_repository'] ?? task['github_repository']}\nPR target: ${task['github_repository']}',
+            ),
             const Text(
               'Repair keeps the existing PR branch. The agent commits locally; publication and merging remain separate actions.',
             ),
@@ -2997,7 +3080,11 @@ class _TasksPageState extends State<TasksPage> {
           onPressed: admin && !busy && github['configured'] == true
               ? () => previewPull(task)
               : null,
-          child: const Text('Open draft PR'),
+          child: Text(
+            needsPrAuthentication(github, task['github_repository'] as String?)
+                ? 'Configure authentication for upstream PR'
+                : 'Open draft PR',
+          ),
         ),
       if (task['pull'] is Map)
         OutlinedButton(
