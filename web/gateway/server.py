@@ -559,7 +559,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.organizations.history(body))
             elif self.path == '/api/sdk/install':
                 if role != 'admin':
-                    raise ValueError('Only an administrator can install the development SDK.')
+                    raise ValueError('Only an administrator can install a development toolchain.')
                 self.reply(200, self.server.sdk_install.install(body))
             elif self.path == '/api/validation/run':
                 self.reply(200, self.server.validation.submit(body, actor=actor))
@@ -585,13 +585,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.coordinator.repair_report(body, actor=actor))
                 self.server.integration.wake()
             elif self.path == '/api/projects/git':
-                if body.get('action') == 'update_base':
+                action = body.get('action')
+                if action == 'update_base':
                     from base_updates import update
-                    self.reply(200, update(PROJECTS, body, actor, role, self.server.organizations.checkout_in_use))
+                    result = update(PROJECTS, body, actor, role, self.server.organizations.checkout_in_use)
                 else:
-                    self.reply(200, self.server.integration.annotate_worktrees(project_git.inspect(PROJECTS, body)))
-                if body.get('action') in ('fetch', 'update_base'):
+                    result = self.server.integration.annotate_worktrees(project_git.inspect(PROJECTS, body))
+                # Woken before acknowledging, for the same reason as a submitted
+                # build: once the client has the response it treats the base
+                # update as accepted, so the watcher must not be left waiting for
+                # its idle interval — and a disconnect after the response must not
+                # drop the wake.
+                if action in ('fetch', 'update_base'):
                     self.server.integration.wake()
+                self.reply(200, result)
             elif self.path == '/api/projects/browse':
                 self.reply(200, project_explorer.browse(PROJECTS, body))
             elif self.path == '/api/projects/clone':

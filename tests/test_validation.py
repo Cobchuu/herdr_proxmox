@@ -41,6 +41,26 @@ BASH = usable_bash()
 
 
 class ValidationRunTests(unittest.TestCase):
+    def test_candidate_cannot_replace_the_approved_validation_script(self):
+        original = self.target
+        (self.repository / 'scripts/build-web.sh').write_text('#!/bin/sh\necho checks-disabled\n')
+        self.target = commit(self.repository, 'weaken validation')
+        git(self.repository, 'checkout', '--detach', original)
+        run = self.submit_and_wait()
+        self.assertEqual(run['state'], 'error')
+        self.assertEqual(run['blocker'], 'policy_changed')
+        self.assertEqual(run['policy_changes'], ['scripts/build-web.sh'])
+        self.assertIn('explicit review', run['note'])
+        self.assertNotIn('command', run.get('checks', {}))
+
+    def test_approved_policy_ignores_uncommitted_sdk_changes(self):
+        import toolchain_policy
+        (self.repository / '.fvmrc').write_text('{"flutter":"3.44.8"}')
+        commit(self.repository, 'approve SDK')
+        (self.repository / '.fvmrc').write_text('{"flutter":"9.9.9"}')
+        resolved = toolchain_policy.resolve_committed(self.repository)
+        self.assertEqual(resolved['toolchains'][0]['required'], '3.44.8')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

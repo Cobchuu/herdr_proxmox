@@ -15,7 +15,6 @@ class IntegrationBoard extends StatefulWidget {
 class _IntegrationBoardState extends State<IntegrationBoard> {
   DashboardBloc get connection => BlocScope.get<DashboardBloc>();
   Map<String, dynamic> data = const {};
-  Map<String, dynamic> sdk = const {};
   Map<String, dynamic> validation = const {};
   String? error;
   String? actionFailure;
@@ -254,7 +253,7 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
                         ),
                     ],
                     const Text(
-                      'SDK installation is requested from the root service on the Integration card; the dashboard itself never gains root access. Conflicts are reassessed by the worker; uncertain delivery and missing snapshots require separate inspection.',
+                      'Toolchain installation is requested from the root service and managed on the Settings page; the dashboard itself never gains root access. Conflicts are reassessed by the worker; uncertain delivery and missing snapshots require separate inspection.',
                     ),
                     TextField(
                       maxLength: 1000,
@@ -366,12 +365,7 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
     final epoch = connection.generation;
     try {
       final result = await connection.request('integration');
-      var sdkData = sdk, validationData = validation;
-      try {
-        sdkData = Map<String, dynamic>.from(await connection.request('sdk'));
-      } catch (e) {
-        sdkData = {'state': 'unavailable', 'error': e.toString()};
-      }
+      var validationData = validation;
       try {
         validationData = Map<String, dynamic>.from(
           await connection.request('validation'),
@@ -382,7 +376,6 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
       if (mounted && epoch == connection.generation)
         setState(() {
           data = Map<String, dynamic>.from(result['coordination'] ?? {});
-          sdk = sdkData;
           validation = validationData;
           checked = result['checked'];
           error = null;
@@ -410,32 +403,6 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
       if (mounted && epoch == connection.generation) {
         setState(() => actionFailure = e.toString());
       }
-    } finally {
-      if (mounted) {
-        setState(() => busy = false);
-        await refresh();
-      }
-    }
-  }
-
-  Future<void> installSdk() async {
-    final epoch = connection.generation;
-    setState(() {
-      busy = true;
-      error = null;
-    });
-    try {
-      await connection.request('sdk/install', const {});
-      if (mounted && epoch == connection.generation)
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'SDK installation queued. The root service installs the pinned toolchain.',
-            ),
-          ),
-        );
-    } catch (e) {
-      if (mounted) setState(() => error = e.toString());
     } finally {
       if (mounted) {
         setState(() => busy = false);
@@ -582,9 +549,9 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
           if (config?['enabled'] == true)
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Install the development SDK automatically'),
+              title: const Text('Install a missing toolchain automatically'),
               subtitle: const Text(
-                'Queue the pinned toolchain once when a worker reports missing tools. Only the root service installs it; the dashboard never gains root access.',
+                'Queue the pinned toolchain once when a worker reports missing tools, and only when the release declares exactly one toolchain. Toolchains are listed on the Settings page. Only the root service installs it; the dashboard never gains root access.',
               ),
               value: config?['auto_sdk'] == true,
               onChanged: busy || connection.operator.value['role'] != 'admin'
@@ -627,26 +594,6 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
                 title: Text('Automatic build waiting · ${event['name']}'),
                 subtitle: Text('${event['automatic_build_error']}'),
               ),
-          if (sdk['state'] == 'unavailable')
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.warning_amber_outlined),
-              title: const Text('SDK status unavailable'),
-              subtitle: Text(
-                '${sdk['error']}\nVerify that the updated gateway was restarted.',
-              ),
-            )
-          else if (sdk['state'] != null &&
-              sdk['supported'] != true &&
-              sdk['installed'] != true)
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.build_outlined),
-              title: Text('SDK installation service is not configured'),
-              subtitle: Text(
-                'Run bash /opt/herdr-web/install/web-install.sh as root inside the LXC to register the SDK service, then refresh this board.',
-              ),
-            ),
           if (validation['error'] != null)
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -654,45 +601,6 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
               title: const Text('Validation runner unavailable'),
               subtitle: Text('${validation['error']}'),
             ),
-          if (sdk['installed'] == true)
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.check_circle_outline),
-              title: Text('Development SDK installed'),
-            )
-          else if (sdk['supported'] == true) ...[
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.build_outlined),
-              title: const Text('Development SDK missing'),
-              subtitle: Text(
-                'State: ${sdk['state'] ?? 'idle'}. The pinned toolchain is installed by a root service on request.',
-              ),
-            ),
-            if ('${sdk['error'] ?? ''}'.isNotEmpty)
-              Text(
-                '${sdk['error']}',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            FilledButton.icon(
-              onPressed:
-                  busy ||
-                      (sdk['state'] == 'queued' || sdk['state'] == 'running') ||
-                      connection.operator.value['role'] != 'admin'
-                  ? null
-                  : installSdk,
-              icon: const Icon(Icons.download),
-              label: Text(
-                sdk['state'] == 'queued' || sdk['state'] == 'running'
-                    ? 'Installation running'
-                    : 'Install pinned SDK',
-              ),
-            ),
-            if (connection.operator.value['role'] != 'admin')
-              const Text(
-                'Only an administrator can request the SDK installation.',
-              ),
-          ],
           if (busy) const LinearProgressIndicator(),
           // Polling may clear transport errors, but operator-action failures
           // remain visible until another action is attempted.
@@ -842,7 +750,8 @@ class _IntegrationBoardState extends State<IntegrationBoard> {
                       ),
                     ],
                     TextButton(
-                      onPressed: busy || connection.operator.value['role'] != 'admin'
+                      onPressed:
+                          busy || connection.operator.value['role'] != 'admin'
                           ? null
                           : () async {
                               final confirmed = await showDialog<bool>(

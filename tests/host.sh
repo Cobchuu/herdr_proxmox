@@ -119,7 +119,14 @@ cp "$repo/install/operator-admin.py" "$tmp/install/"
 cp "$repo/install/dev-tools-install.sh" "$tmp/install/"
 cp "$repo/install/flutter-release.py" "$tmp/install/"
 cp "$repo/install/build-install.sh" "$tmp/install/"
+# The release archive ships the catalog too: the root SDK worker reads it, and
+# the gateway resolves the declared version through it.
+cp "$repo/install/toolchains.json" "$tmp/install/"
 touch "$tmp/web/public/index.html" "$tmp/web/public/main.dart.js" "$tmp/web/public/dashboard/index.html"
+# A script invoked by path treats its parent directory as the checkout, so the
+# release content has to sit in $tmp as well. That includes the version
+# declaration, which the release archive carries and the catalog reads.
+cp "$repo/.fvmrc" "$tmp/"
 printf 'ssh-ed25519 AAAA test\n' >"$tmp/public.key"
 export HERDR_TEST_WEB_CONTENTS="$tmp/web-contents"
 bash "$tmp/ct/herdr.sh" --web --ssh-key "$tmp/public.key" --template local:vztmpl/debian-13-standard_test_amd64.tar.zst >"$tmp/output"
@@ -127,8 +134,13 @@ for file in cli_setup.py pty_exec.py run_logs.py log_view.html skills/herdr-work
 grep -q 'install/sdk-install.py' "$HERDR_TEST_WEB_CONTENTS"
 grep -q 'install/operator-admin.py' "$HERDR_TEST_WEB_CONTENTS"
 grep -q 'install/build-install.sh' "$HERDR_TEST_WEB_CONTENTS"
+# The archive carries the project's own version declaration, which is the only
+# place the required SDK version is stated.
+grep -q '^\.fvmrc$' "$HERDR_TEST_WEB_CONTENTS"
+grep -q 'install/toolchains.json' "$HERDR_TEST_WEB_CONTENTS"
 mkdir "$tmp/package/herdr-proxmox"
 cp -R "$tmp/ct" "$tmp/install" "$tmp/web" "$tmp/package/herdr-proxmox/"
+cp "$repo/.fvmrc" "$tmp/package/herdr-proxmox/"
 export HERDR_TEST_SOURCE_ARCHIVE="$tmp/herdr-proxmox.tar.gz"
 tar -czf "$HERDR_TEST_SOURCE_ARCHIVE" -C "$tmp/package" herdr-proxmox
 (cd "$tmp" && sha256sum herdr-proxmox.tar.gz >herdr-proxmox.tar.gz.sha256)

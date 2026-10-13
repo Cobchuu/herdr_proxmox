@@ -411,7 +411,16 @@ class IntegrationCoordinator:
             return
         try:
             self.sdk_request()
-        except (ValueError, OSError):
+        except (ValueError, OSError) as exc:
+            # Auto-install cannot choose between several absent toolchains, so a
+            # blocked build would otherwise stall with no explanation. Record the
+            # refusal once; later polls must not repeat it into the reason.
+            if not event.get('sdk_note'):
+                event['sdk_note'] = (str(exc) or type(exc).__name__)[:400]
+                # Keep the refusal visible even when the original build reason
+                # already uses the full display budget.
+                reason = str(event.get('reason', ''))[:1999 - len(event['sdk_note'])]
+                event['reason'] = (reason + ' ' + event['sdk_note']).strip()
             return
         event['sdk_requested'] = True
         event['reason'] = (str(event.get('reason', '')) + ' The dashboard queued the pinned SDK installation.').strip()[:2000]

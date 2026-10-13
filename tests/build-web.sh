@@ -8,6 +8,9 @@ mkdir -p "$tmp/bin" "$tmp/project/scripts" "$tmp/project/web/dashboard" "$tmp/pr
 # Exercise the actual build entrypoint with its evidence helper present, just
 # as it is in a checkout. Copying only the shell entrypoint hides dependencies.
 cp "$repo/scripts/build-web.sh" "$repo/scripts/check-evidence.py" "$tmp/project/scripts/"
+# The build entrypoint reads the version from the project's own declaration, so
+# the fixture must declare one exactly as a real checkout does.
+cp "$repo/.fvmrc" "$tmp/project/"
 printf '<html>shell</html>\n' >"$tmp/project/web/shell/web/index.html"
 export HERDR_BUILD_TEST_STATE="$tmp/initialized" HERDR_BUILD_TEST_LOG="$tmp/commands"
 cat >"$tmp/bin/flutter" <<'EOF'

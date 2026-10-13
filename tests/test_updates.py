@@ -259,6 +259,7 @@ class UpdateTests(unittest.TestCase):
             (root / 'VERSION').write_text('v0.1.0')
             (root / 'install').mkdir()
             (root / 'install/web-install.sh').write_text('old installer')
+            (root / '.fvmrc').write_text('{"flutter":"1.2.3"}')
             config.mkdir()
             (config / 'organizations.sqlite3').write_bytes(b'original database')
             request.write_text('{"version":"v0.2.0"}')
@@ -270,6 +271,8 @@ class UpdateTests(unittest.TestCase):
             (package / 'install').mkdir()
             (package / 'install/web-install.sh').write_text('new installer')
             (package / 'install/sdk-install.py').write_text('new sdk worker')
+            (package / 'install/toolchains.json').write_text('{}')
+            (package / '.fvmrc').write_text('{"flutter":"4.5.6"}')
             (package / 'VERSION').write_text('v0.2.0')
             archive = base / 'archive.tar.gz'
             with tarfile.open(archive, 'w:gz') as file:
@@ -290,6 +293,7 @@ class UpdateTests(unittest.TestCase):
                 if action == 'start' and (root / 'VERSION').read_text() == 'v0.2.0':
                     self.assertEqual((root / 'install/web-install.sh').read_text(), 'new installer')
                     self.assertTrue((root / 'install/sdk-install.py').exists())
+                    self.assertEqual(json.loads((root / '.fvmrc').read_text())['flutter'], '4.5.6')
             service = mocks.enter_context(patch.object(worker, 'service', side_effect=inspect_service))
             mocks.enter_context(patch.object(worker, 'urlopen', side_effect=OSError('unavailable')))
             mocks.enter_context(patch.object(worker.time, 'sleep'))
@@ -297,6 +301,7 @@ class UpdateTests(unittest.TestCase):
                 worker.main()
             self.assertEqual((root / 'install/web-install.sh').read_text(), 'old installer')
             self.assertFalse((root / 'install/sdk-install.py').exists())
+            self.assertEqual(json.loads((root / '.fvmrc').read_text())['flutter'], '1.2.3')
             self.assertEqual((root / 'VERSION').read_text(), 'v0.1.0')
             self.assertEqual((root / 'web/gateway/server.py').read_text(), 'old gateway')
             self.assertEqual((config / 'organizations.sqlite3').read_bytes(), b'original database')
@@ -415,6 +420,11 @@ class UpdateTests(unittest.TestCase):
                 target.write_text('new ' + name)
             (package / 'VERSION').write_text('v0.9.9')
             (package / 'BUILD.json').write_text(json.dumps(dict(build_id=run_id, source_sha='b' * 40, deployment_mode='local')))
+            # The release carries its version declaration and the catalog that
+            # reads it; a package without them is refused before promotion.
+            (package / '.fvmrc').write_text('{"flutter":"3.44.8"}')
+            (package / 'install').mkdir()
+            (package / 'install/toolchains.json').write_text('{}')
             (artifacts / run_id).mkdir(parents=True)
             archive = artifacts / run_id / 'deployment.tar.gz'
             with tarfile.open(archive, 'w:gz') as file:

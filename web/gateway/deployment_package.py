@@ -10,7 +10,8 @@ import tarfile
 LIMIT = 256 * 1024 * 1024
 FILE_LIMIT = 20000
 REQUIRED = ('web/gateway/server.py', 'web/public/index.html',
-            'web/public/main.dart.js', 'web/public/dashboard/index.html')
+            'web/public/main.dart.js', 'web/public/dashboard/index.html',
+            '.fvmrc', 'install/toolchains.json')
 
 
 def retain(tree, folder, run):
@@ -19,7 +20,7 @@ def retain(tree, folder, run):
         if not (tree / required).is_file():
             raise ValueError('Full deployment output is incomplete: ' + required)
     files, total = [], 0
-    for part in ('web/gateway', 'web/public'):
+    for part in ('web/gateway', 'web/public', 'install'):
         source = tree / part
         if source.is_symlink() or source.parent.is_symlink():
             raise ValueError('Deployment package must not use symlinks.')
@@ -40,6 +41,13 @@ def retain(tree, folder, run):
                 files.append((path, relative))
                 if total > LIMIT or len(files) > FILE_LIMIT:
                     raise ValueError('Deployment package exceeds retention limit.')
+    declaration = tree / '.fvmrc'
+    if not stat.S_ISREG(declaration.lstat().st_mode):
+        raise ValueError('Deployment package requires a regular SDK declaration.')
+    total += declaration.stat().st_size
+    files.append((declaration, '.fvmrc'))
+    if total > LIMIT or len(files) > FILE_LIMIT:
+        raise ValueError('Deployment package exceeds retention limit.')
     try:
         version = (tree / 'VERSION').read_text().strip()
     except OSError:
@@ -63,6 +71,9 @@ def retain(tree, folder, run):
                     file_count=len(files) + 2, validation_exit_code=run['exit_code'] if 'exit_code' in run else 0,
                     deployment_authorized=False, checks=run.get('checks', []),
                     toolchain_pin=run.get('toolchain_pin'),
+                    policy_digest=run.get('policy_digest'),
+                    toolchain_evidence=run.get('toolchain_evidence'),
+                    policy_changes=run.get('policy_changes'),
                     task_id=run.get('task_id'), validation_waiver=run.get('validation_waiver'),
                     required_checks_verified=run.get('required_checks_verified', False))
     temporary.replace(folder / 'deployment.tar.gz')

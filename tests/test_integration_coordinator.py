@@ -760,6 +760,38 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(queued, [])
         self.assertFalse(service.snapshot()['events'][0].get('sdk_requested'))
 
+    def test_a_refused_automatic_sdk_request_is_explained_once(self):
+        # Several absent toolchains leave the automatic path with nothing to
+        # choose, so the blocked build must say so rather than stall silently.
+        def refuse():
+            raise ValueError('Several toolchains are missing; choose which to install: flutter, go')
+        service = IntegrationCoordinator(self.path, self.store, sdk_request=refuse)
+        with closing(service.connect()) as db, db:
+            config = json.loads(db.execute('SELECT data FROM settings').fetchone()[0])
+            config['auto_sdk'] = True
+            db.execute('UPDATE settings SET data=?', (json.dumps(config),))
+        service.observe([self.notice])
+        service.tick()
+        self.store.jobs[service.snapshot()['events'][0]['job_id']].update(
+            state='answered', result=json.dumps({'decision': 'blocked', 'blocker': 'missing_toolchain', 'reason': 'No Go'}))
+        service.tick()
+        event = service.snapshot()['events'][0]
+        self.assertIn('choose which to install', event['reason'])
+        self.assertFalse(event.get('sdk_requested'))
+        service.tick()
+        service.tick()
+        self.assertEqual(service.snapshot()['events'][0]['reason'], event['reason'])
+
+    def test_sdk_refusal_stays_visible_after_a_long_build_reason(self):
+        service = IntegrationCoordinator(self.path, self.store, sdk_request=Mock(side_effect=ValueError('Choose a toolchain')))
+        event = {'blocker': 'missing_toolchain', 'reason': 'x' * 2000}
+        service.missing_toolchain({'auto_sdk': True}, event)
+        self.assertTrue(event['reason'].endswith('Choose a toolchain'))
+        self.assertLessEqual(len(event['reason']), 2000)
+        previous = event['reason']
+        service.missing_toolchain({'auto_sdk': True}, event)
+        self.assertEqual(event['reason'], previous)
+
     def approval_event(self, **approval):
         self.service.observe([self.notice])
         event = self.event()

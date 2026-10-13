@@ -1,16 +1,55 @@
-"""Request the fixed-purpose SDK install service; the root worker installs it."""
+"""Request the SDK install service; the root worker installs what the release declares."""
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import threading
 
+import toolchain_policy
+
+CATALOG = toolchain_policy.CATALOG
+
 
 class SdkInstall:
     def __init__(self, queue='/var/lib/herdr-sdk-requests',
-                 state='/var/lib/herdr-sdk/status.json',
-                 flutter='/home/herdr/.local/bin/flutter'):
-        self.queue, self.state, self.flutter = Path(queue), Path(state), Path(flutter)
+                 state='/var/lib/herdr-sdk/status.json', catalog=None, release=None):
+        self.queue, self.state, self.catalog = Path(queue), Path(state), Path(CATALOG if catalog is None else catalog)
+        # The release root holds the repository's own declaration (.fvmrc), which
+        # is the only place a required version is stated.
+        self.release = Path(release) if release is not None else self.catalog.parents[1]
         self.lock = threading.RLock()
+
+    def declared(self):
+        """Toolchains this release can install. Empty when it ships no catalog."""
+        return toolchain_policy.catalog(self.catalog)
+
+    def toolchains(self, declared=None):
+        """Every catalogued toolchain, with its requirement and whether it is present."""
+        found = {}
+        for name, entry in (self.declared() if declared is None else declared).items():
+            version, declared_by = toolchain_policy.declared_version(entry, self.release)
+            executable = toolchain_policy.expand(entry, 'executable', version) if version else None
+            try:
+                installed = bool(executable) and Path(executable).is_file()
+            except (OSError, TypeError, ValueError):
+                installed = False
+            found[name] = {'label': str(entry.get('label') or name),
+                           'required': version or '',
+                           'declared_by': declared_by,
+                           'executable': (toolchain_policy.expand(entry, 'executable', version)
+                                          if version else None),
+                           'installed': installed}
+        return found
+
+    def missing(self):
+        return sorted(name for name, entry in self.toolchains().items()
+                      if entry['required'] and not entry['installed'])
+
+    def queued(self):
+        """The toolchain a not-yet-claimed request asked for."""
+        try:
+            return json.loads((self.queue / 'request.json').read_text()).get('toolchain')
+        except (OSError, ValueError, AttributeError):
+            return None
 
     def snapshot(self):
         with self.lock:
@@ -28,13 +67,21 @@ class SdkInstall:
                     stale = True
                 if stale:
                     status = dict(status, state='failed', error='SDK installation did not finish within its service deadline; inspect the service before retrying.')
-            installed = self.flutter.is_file()
-            if (self.queue / 'request.json').exists():
-                status = dict(status, state='queued')
-            return dict(status, installed=installed, supported=self.queue.is_dir())
+            if (self.queue / 'request.json').exists() and status.get('state') != 'running':
+                status = dict(state='queued', toolchain=self.queued())
+            catalog_error = None
+            try:
+                declared = toolchain_policy.catalog(self.catalog, strict=True)
+            except ValueError as error:
+                declared, catalog_error = {}, str(error)
+            toolchains = self.toolchains(declared)
+            return dict(status, toolchains=toolchains, catalog_error=catalog_error,
+                        missing=sorted(name for name, entry in toolchains.items()
+                                       if entry['required'] and not entry['installed']),
+                        supported=self.queue.is_dir())
 
     def install(self, body):
-        if body not in (None, {}):
+        if not isinstance(body, dict) or set(body) - {'toolchain'}:
             raise ValueError('SDK installation does not accept options.')
         with self.lock:
             info = self.snapshot()
@@ -42,10 +89,31 @@ class SdkInstall:
                 raise ValueError('Install the SDK service as root first.')
             if info['state'] in ('queued', 'running'):
                 raise ValueError('An SDK installation is already running.')
-            if info['installed'] and info['state'] != 'failed':
-                raise ValueError('The development SDK is already installed.')
+            name = body.get('toolchain')
+            if not self.declared():
+                raise ValueError('This release does not provision any toolchain.')
+            if 'toolchain' in body and (not isinstance(name, str) or not name or name not in info['toolchains']):
+                raise ValueError('This release does not provision that toolchain.')
+            # Checked before "already installed": a toolchain with no declared
+            # version is not absent, it is unprovisionable, and saying otherwise
+            # sends the operator looking for the wrong problem.
+            if name is not None and not info['toolchains'][name]['required']:
+                raise ValueError('This release declares no version for that toolchain; '
+                                 'state it in the file the catalog reads before installing.')
+            if name is None:
+                # An omitted name means "whatever is absent", which is only
+                # unambiguous while exactly one declared toolchain is missing.
+                if len(info['toolchains']) != 1:
+                    raise ValueError('Several toolchains are declared; choose which to install: '
+                                     + ', '.join(sorted(info['toolchains'])))
+                if not info['missing']:
+                    raise ValueError('The toolchains this release provisions are already installed.')
+                name = info['missing'][0]
+            elif name not in info['missing']:
+                raise ValueError('That toolchain is already installed.')
             request = self.queue / 'request.json'
             temporary = self.queue / 'request.tmp'
-            temporary.write_text(json.dumps({'action': 'install'}))
+            temporary.write_text(json.dumps({'action': 'install', 'toolchain': name}), encoding='utf-8')
             temporary.replace(request)
-            return {'state': 'queued'}
+            return {'state': 'queued', 'toolchain': name,
+                    'required': info['toolchains'][name]['required']}

@@ -16,6 +16,7 @@ from project_files import project_directory
 from permissions import accessible_paths, permission_mode, prepare_permissions
 from session_ownership import active, reserves
 from herdr_ids import is_pane_id, is_workspace_id
+import toolchain_policy
 from herdr_errors import HerdrError, delivery_for, parse_completion, parse_resume, preview as preview_text
 
 
@@ -68,6 +69,30 @@ def launch_arguments(profile):
         if reasoning:
             args += ['--effort', reasoning]
     return args
+
+
+def policy_guidance(frozen):
+    """The rule an agent needs about the SDK it must build with.
+
+    Stated as an instruction rather than enforced, because agents share one Unix
+    user and launch settings cannot guarantee which executable a command picks.
+    The guarantee comes from verification, which selects and probes the SDK
+    itself; this makes the expectation explicit so a mismatch is reported instead
+    of worked around.
+    """
+    if not frozen or not frozen.get('policy', {}).get('toolchains'):
+        return ''
+    lines = ['\nToolchain policy for this task, frozen when this session started:']
+    for entry in frozen['policy']['toolchains']:
+        lines.append(f"- {entry['label']} {entry['required']} (declared by {entry['declared_by']})")
+        for executable in entry['executables']:
+            lines.append(f'  use {executable}')
+    lines.append(f"Policy digest: {frozen['digest']}")
+    lines.append('Use these tools for every build and check. If a command reports a different '
+                 'version, stop and report the mismatch rather than switching or installing an SDK '
+                 'yourself. Propose an SDK upgrade as a separate change for review; never fold it '
+                 'into the task you are delivering.')
+    return '\n'.join(lines) + '\n'
 
 
 class OrganizationStore:
@@ -296,6 +321,28 @@ class OrganizationStore:
         """Narrow durable profile read with no runtime queries or integration callbacks."""
         with self.lock, closing(self.connect()) as db:
             return [json.loads(row['data']) for row in db.execute('SELECT data FROM profiles ORDER BY rowid')]
+
+    def frozen_policy(self, job, profile):
+        """The approved toolchain policy as it stood when this session started.
+
+        Frozen and recorded with its digest: a later change to the project's own
+        declaration then shows up as a change to verify against, rather than
+        silently applying to work already in flight.
+        """
+        value = job.get('worktree_path') or job.get('source_project') or profile.get('project')
+        if not value:
+            return None
+        path = Path(str(value))
+        if not path.is_absolute():
+            path = self.projects / path
+        try:
+            policy = toolchain_policy.resolve_committed(path)
+        except (OSError, ValueError):
+            return None
+        if not policy.get('toolchains') and not policy.get('checks'):
+            return None
+        return {'policy': policy, 'digest': toolchain_policy.digest(policy),
+                'frozen_at': now(), 'checkout': path.as_posix()}
 
     def checkout_in_use(self, path):
         """Fail closed for busy/uncertain managed jobs bound to this checkout.
@@ -1407,6 +1454,11 @@ class OrganizationStore:
                 # from the editable profile and any later in-TUI model changes.
                 job = self.update_job(job_id, launch_arguments=arguments)
                 job = self.update_job(job_id, launch_stage='agent_starting')
+                # Frozen before the agent starts, so the session's policy is the
+                # one that applied when the work began.
+                frozen = self.frozen_policy(job, profile)
+                if frozen:
+                    job = self.update_job(job_id, toolchain_policy=frozen)
                 self.command('agent', 'start', job['alias'], '--kind', profile['runtime'], '--pane', pane, '--timeout', '60000', *(['--', *arguments] if arguments else []), timeout=70)
                 agent = self.identity(job)
                 job = self.update_job(job_id, agent_session=agent.get('agent_session'))
@@ -1454,12 +1506,12 @@ class OrganizationStore:
                                'publication authorization. Dashboard task publishing is administrator-controlled.')
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    self.command('agent', 'prompt', job['alias'], prompt, '--wait', '--timeout', '180000', timeout=190)
+                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen), '--wait', '--timeout', '180000', timeout=190)
                     self.identity(job)
                 else:
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    response = self.command('agent', 'prompt', job['alias'], prompt)
+                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen))
                     self.update_job(job_id, delivery=dict(stage='sent', at=now(),
                                                           completion=self.completion_baseline(response)))
                 self.update_job(job_id, state='persona_sent')

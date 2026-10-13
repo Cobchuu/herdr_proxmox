@@ -52,7 +52,7 @@ def read_report(path, script):
     return result
 
 
-def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=None):
+def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=None, environment=None):
     checks, tail = [], bytearray()
     deadline = time.monotonic() + timeout
     timed_out = False
@@ -85,7 +85,8 @@ def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=Non
             try:
                 process = subprocess.Popen([bash, script], cwd=tree, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, start_new_session=os.name != 'nt',
-                    env=dict(os.environ, CI='1', GIT_TERMINAL_PROMPT='0', HERDR_CHECK_REPORT=str(report.resolve())))
+                    env=dict(os.environ if environment is None else environment,
+                             CI='1', GIT_TERMINAL_PROMPT='0', HERDR_CHECK_REPORT=str(report.resolve())))
                 def collect(proc=process):
                     while chunk := proc.stdout.read(4096):
                         log(chunk)

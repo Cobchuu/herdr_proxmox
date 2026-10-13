@@ -12,7 +12,7 @@ void main() {
   testWidgets('configure CLI, render prompt, send code and close session', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(1200, 1600);
+    tester.view.physicalSize = const Size(1200, 2600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -23,6 +23,14 @@ void main() {
         expect(request.headers['Authorization'], 'Bearer token');
         if (request.url.path == '/api/snapshot') {
           return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }
+        // The Settings page lists provisionable toolchains. Answered before the
+        // mutation log so it is not mistaken for an operator action.
+        if (request.url.path == '/api/sdk') {
+          return http.Response(
+            '{"state":"idle","supported":true,"toolchains":{}}',
+            200,
+          );
         }
         if (request.url.path == '/api/ssh-access') {
           return http.Response('{"key_count":0}', 200);
@@ -202,7 +210,7 @@ void main() {
   });
 
   testWidgets('Claude account test confirms a real reply', (tester) async {
-    tester.view.physicalSize = const Size(1200, 1600);
+    tester.view.physicalSize = const Size(1200, 2600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -211,6 +219,14 @@ void main() {
       client: MockClient((request) async {
         if (request.url.path == '/api/snapshot') {
           return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }
+        // The Settings page lists provisionable toolchains. Answered before the
+        // mutation log so it is not mistaken for an operator action.
+        if (request.url.path == '/api/sdk') {
+          return http.Response(
+            '{"state":"idle","supported":true,"toolchains":{}}',
+            200,
+          );
         }
         if (request.url.path == '/api/cli-setup/verify') {
           verifications.add(jsonDecode(request.body) as Map<String, dynamic>);
@@ -269,7 +285,7 @@ void main() {
 
   testWidgets('integration banner reports which agents are connected',
       (tester) async {
-    tester.view.physicalSize = const Size(1200, 1800);
+    tester.view.physicalSize = const Size(1200, 2600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -278,6 +294,14 @@ void main() {
       client: MockClient((request) async {
         if (request.url.path == '/api/snapshot') {
           return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }
+        // The Settings page lists provisionable toolchains. Answered before the
+        // mutation log so it is not mistaken for an operator action.
+        if (request.url.path == '/api/sdk') {
+          return http.Response(
+            '{"state":"idle","supported":true,"toolchains":{}}',
+            200,
+          );
         }
         if (request.url.path == '/api/cli-setup') {
           return http.Response(

@@ -22,7 +22,7 @@ import time
 
 import project_git
 from project_files import project_directory
-
+import toolchain_policy
 COMMANDS = ('scripts/validate.sh', 'scripts/build-web.sh')
 BASH = 'bash'
 EVENT_ID = re.compile(r'[a-f0-9]{64}')
@@ -36,6 +36,18 @@ ARTIFACT_LIMIT = 256 * 1024 * 1024
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
+
+
+def toolchain_message(mismatch):
+    """The refusal an agent can act on: what was required, and what was found.
+
+    Phrased for the agent that is waiting on the delivery, because the useful
+    outcome is a retry under the configured SDK rather than a silent failure.
+    """
+    first = mismatch[0]
+    return (f"Required {first['name'].capitalize()} {first['required']}; "
+            f"detected {first['actual'] or 'no installed SDK'}. "
+            'Verification did not run. Use the configured SDK and retry.')
 
 
 class ValidationRuns:
@@ -198,7 +210,13 @@ class ValidationRuns:
             if self.queue is not None:
                 if shutil.disk_usage(self.projects).free < self.minimum_free_bytes:
                     raise ValueError('Insufficient free disk space to queue a build.')
-                run, created = self.queue.enqueue(run, retry=body.get('retry', False))
+                # The queue's identity must name the approved toolchain, not a
+                # default: two runs under different SDKs are different builds.
+                approved = toolchain_policy.resolve_committed(self._checkout(event.get('path')))
+                toolchain = ','.join(f"{entry['name']}-{entry['required']}"
+                                     for entry in approved['toolchains']) or 'none'
+                run['policy_digest'] = toolchain_policy.digest(approved)
+                run, created = self.queue.enqueue(run, toolchain=toolchain, retry=body.get('retry', False))
                 if not created:
                     return run
             folder = self.root / run['id']
@@ -218,6 +236,27 @@ class ValidationRuns:
             head = project_git.git(worktree, 'rev-parse', 'HEAD').strip()
             if head != run['target']:
                 raise ValueError('The worktree does not match the exact target commit.')
+            # The policy is resolved from the approved checkout, never from the
+            # candidate: a candidate must not redefine the rules that judge it.
+            policy = toolchain_policy.resolve_committed(checkout)
+            if run.get('policy_digest') and run['policy_digest'] != toolchain_policy.digest(policy):
+                run['blocker'] = 'policy_changed'
+                raise ValueError('Approved policy changed while this build was queued. Submit verification again.')
+            run['policy'] = policy
+            run['policy_digest'] = toolchain_policy.digest(policy)
+            run['policy_changes'] = toolchain_policy.changes(policy, toolchain_policy.resolve_committed(worktree))
+            if run['policy_changes']:
+                run['blocker'] = 'policy_changed'
+                raise ValueError('Candidate changes protected toolchain policy files; explicit review is required: '
+                                 + ', '.join(run['policy_changes']))
+            # Probe the real executables before running anything. A declared pin
+            # cannot prove which SDK runs, so verification measures it.
+            probed = toolchain_policy.verify(policy)
+            run['toolchain_evidence'] = probed
+            mismatch = [item for item in probed if not item['matches']]
+            if mismatch:
+                run['blocker'] = 'missing_toolchain'
+                raise ValueError(toolchain_message(mismatch))
             commands = self._commands(worktree)
             command = ' + '.join(commands)
             if not commands:
@@ -229,7 +268,8 @@ class ValidationRuns:
                 run['checks'] = checks
                 self._write(folder, run)
             checks, exit_code, timed_out = run_scripts(worktree, commands, folder,
-                self.timeout, BASH, OUTPUT_LIMIT, changed=evidence)
+                self.timeout, BASH, OUTPUT_LIMIT, changed=evidence,
+                environment=toolchain_policy.environment(policy))
             # Repository scripts can report subchecks, but cannot certify that
             # they left the requested commit and tracked source unchanged.
             checks.extend(self._integrity_checks(worktree, run['target']))
@@ -252,6 +292,7 @@ class ValidationRuns:
                 except (ValueError, OSError) as error:
                     run['deployment_package_error'] = str(error)[:500]
         except (ValueError, OSError) as error:
+            run['note'] = str(error)[:2000]
             lines.append(f'Validation could not run: {error}\n')
         finally:
             self._cleanup(checkout=locals().get('checkout'), worktree=worktree)
@@ -272,7 +313,11 @@ class ValidationRuns:
         self.record(event_id, dict(run_id=run['id'], state=run['state'], target=run['target'],
                                    command=run.get('command'), exit_code=run.get('exit_code'), checks=run.get('checks', []),
                                    required_checks_verified=run.get('required_checks_verified', False),
-                                   finished_at=run.get('finished_at'), note=run.get('note'),
+                                   policy_digest=run.get('policy_digest'),
+                                   toolchain_evidence=run.get('toolchain_evidence'),
+                                   policy_changes=run.get('policy_changes'),
+                                   blocker=run.get('blocker'), note=run.get('note'),
+                                   finished_at=run.get('finished_at'),
                                    actor=run.get('actor')))
 
     def _integrity_checks(self, worktree, target):
@@ -341,6 +386,9 @@ class ValidationRuns:
                         file_count=len(files), validation_exit_code=0,
                         checks=run.get('checks', []), required_checks_verified=run.get('required_checks_verified', False),
                         toolchain_pin=run.get('toolchain_pin'),
+                        policy_digest=run.get('policy_digest'),
+                        toolchain_evidence=run.get('toolchain_evidence'),
+                        policy_changes=run.get('policy_changes'),
                         task_id=run.get('task_id'), validation_waiver=run.get('validation_waiver'),
                         deployment_authorized=False)
         temporary.replace(folder / 'artifact.tar.gz')
