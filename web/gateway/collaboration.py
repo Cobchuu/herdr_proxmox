@@ -445,8 +445,8 @@ def validate_contributions(contributions, runs):
 
 def discussion_directory(store, job):
     directory = store.path.parent / 'discussion-artifacts' / job['id']
-    if directory.is_symlink():
-        raise ValueError('Discussion output directory must not be a symlink.')
+    if directory.is_symlink() or directory.parent.is_symlink():
+        raise ValueError('Discussion output directories must not be symlinks.')
     return directory
 
 
@@ -804,8 +804,13 @@ def execute(store, job):
     group_run = current_run(store, group_run)
     for run in job['runs']:
         current_run(store, run)
-    directory = store.path.parent / 'discussion-artifacts' / job['id']
-    directory.mkdir(parents=True, mode=0o700)
+    if job.get('discussion_submitted_at'):
+        raise ValueError('This discussion was already submitted; recover its output instead of replaying its prompt.')
+    directory = discussion_directory(store, job)
+    # An earlier preparation may have created the directory before failing.
+    # Preserve its files: the fresh attempt-bound receipt prevents stale output
+    # from being accepted as completion of the new submission.
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     artifact = directory / 'action-plan.md'
     transcript = directory / 'discussion.json'
     receipt = directory / RECEIPT_NAME

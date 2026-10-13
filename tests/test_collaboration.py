@@ -297,6 +297,56 @@ class CollaborationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'submitted'):
             self.action('retry_discussion', organization_id=self.org, job_id=meeting, inspected=True)
 
+    def test_discussion_preparation_retry_reuses_directory_and_preserves_files(self):
+        from collaboration import execute
+        group = self.group()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        self.agents[run['alias']]['agent_status'] = 'working'
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.agents[run['alias']]['agent_status'] = 'idle'
+        with patch('collaboration.repository_review_context', side_effect=ValueError('Baseline lookup failed')):
+            self.store.advance_discussions()
+            self.drain()
+        job = self.job(meeting)
+        self.assertEqual(job['state'], 'needs_attention')
+        self.assertIn('no discussion prompt was sent', job['error'])
+        self.assertNotIn('terminal input may have been sent', job['error'])
+        directory = self.store.path.parent / 'discussion-artifacts' / meeting
+        self.assertTrue(directory.is_dir())
+        preserved = directory / 'operator-notes.txt'
+        preserved.write_text('Keep this evidence', encoding='utf-8')
+        self.action('retry_discussion', organization_id=self.org, job_id=meeting, inspected=True)
+        self.drain()
+        job = self.job(meeting)
+        self.assertEqual(job['state'], 'artifact_ready', job.get('error'))
+        self.assertEqual(preserved.read_text(encoding='utf-8'), 'Keep this evidence')
+        prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
+        self.assertEqual(len(prompts), 1)
+        with self.assertRaisesRegex(ValueError, 'already submitted'):
+            execute(self.store, job)
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]), 1)
+
+    def test_discussion_output_directory_rejects_a_file_or_link_without_prompting(self):
+        from collaboration import discussion_directory
+        group = self.group()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        self.agents[run['alias']]['agent_status'] = 'working'
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        directory = self.store.path.parent / 'discussion-artifacts' / meeting
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        directory.write_text('Do not overwrite', encoding='utf-8')
+        self.agents[run['alias']]['agent_status'] = 'idle'
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+        self.assertEqual(directory.read_text(encoding='utf-8'), 'Do not overwrite')
+        self.assertFalse(any(a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3] for a, _ in self.calls))
+        with patch('pathlib.Path.is_symlink', return_value=True):
+            with self.assertRaisesRegex(ValueError, 'symlinks'):
+                discussion_directory(self.store, dict(id=meeting))
+
     def test_waiting_meeting_can_be_cancelled_without_terminal_input(self):
         group = self.group()
         run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')

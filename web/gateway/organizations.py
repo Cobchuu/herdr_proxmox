@@ -1448,6 +1448,14 @@ class OrganizationStore:
             code = getattr(exc, 'code', '')
             delivery = delivery_for(exc)
             detail = str(exc)[:500]
+            discussion_not_submitted = False
+            if job['kind'] == 'discussion':
+                try:
+                    with self.lock, closing(self.connect()) as db:
+                        current = self.get(db, 'jobs', job_id)
+                    discussion_not_submitted = not current.get('discussion_submitted_at')
+                except Exception:
+                    pass  # Unavailable evidence must not claim delivery certainty.
             if job['kind'] in ('launch', 'chat', 'delegate') and delivery in ('blocked', 'unknown') and code:
                 self.update_job(job_id, delivery=dict(stage='blocked' if delivery == 'blocked' else 'unknown',
                                                       code=code, at=now()))
@@ -1460,6 +1468,8 @@ class OrganizationStore:
                 except Exception:
                     stage = 'unknown'
                 detail += f' Delivery stage: {stage}. Inspect Org chart → Chat before retrying; terminal input may have been sent.'
+            elif discussion_not_submitted:
+                detail += ' Discussion preparation failed before submission; no discussion prompt was sent. Retry inspected preparation after resolving the cause.'
             elif job['kind'] == 'launch' and job.get('launch_stage') == 'preflight':
                 detail += ' Launch failed during preflight; no workspace or pane was created and no terminal input was sent.'
             elif job['kind'] == 'launch' and job.get('launch_stage') == 'workspace_preparing':
