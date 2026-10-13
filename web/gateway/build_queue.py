@@ -18,8 +18,11 @@ class BuildQueue:
     def connect(self):
         return sqlite3.connect(self.database, timeout=10)
 
-    def enqueue(self, run, policy='scripts-v1', toolchain='flutter-3.44.8', retry=False):
-        identity = hashlib.sha256(json.dumps([run['repository'], run['target'], policy, toolchain], separators=(',', ':')).encode()).hexdigest()
+    def enqueue(self, run, policy='scripts-v1', toolchain='unknown', retry=False):
+        # No default toolchain: the approved policy names it, and a built-in pin
+        # here would be one more version to keep in step with .fvmrc.
+        identity = hashlib.sha256(json.dumps([run['repository'], run['target'], policy, toolchain,
+                                             run.get('policy_digest')], separators=(',', ':')).encode()).hexdigest()
         with closing(self.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT data FROM builds WHERE identity=?', (identity,)).fetchone()

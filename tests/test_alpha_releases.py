@@ -13,6 +13,23 @@ spec.loader.exec_module(alpha)
 
 
 class AlphaTests(unittest.TestCase):
+    def test_tag_shape_is_pinned_independently_of_the_producer(self):
+        # The producer (scripts/alpha-release.py) and the two validators
+        # (updates.ALPHA for the gateway, worker.ALPHA for the installer)
+        # implement the same formula separately. Asserting against a regenerated
+        # value lets both sides move together, so this pins a literal instead:
+        # a change to the slug rule, the digest length or the run suffix on
+        # either side fails here rather than mid-release.
+        tag = alpha.alpha_tag('alpha/login', 'alpha: login', 42)
+        self.assertEqual(tag, 'alpha-login-ff848c600647-b42')
+        for validator in (updates.ALPHA, worker.ALPHA):
+            self.assertIsNotNone(validator.fullmatch(tag))
+            for malformed in ('alpha-login-ff848c600647-b042',
+                              'alpha-login-ff848c6006470-b42',
+                              'alpha-login-FF848C600647-b42',
+                              'alpha_login-ff848c600647-b42'):
+                self.assertIsNone(validator.fullmatch(malformed), malformed)
+
     def test_trigger_is_exact_and_branch_identity_does_not_collide(self):
         for branch, subject in [('main', 'alpha: test'), ('alpha/', 'alpha: test'),
                                 ('alpha/test', 'fix: alpha: test'), ('alpha/test', 'Alpha: test')]:

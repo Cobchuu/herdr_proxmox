@@ -27,6 +27,7 @@ import project_git
 from repository_lock import repository_lock
 from herdr_errors import HerdrError, format_handover, parse_handover
 from session_ownership import reserves as session_reserves
+import toolchain_policy
 import pr_repairs
 import task_delivery
 MAX_INSTANCES_PER_TEMPLATE = 2
@@ -577,6 +578,12 @@ class Contributions:
                     head = task.get('head_sha')
                     evidence = task.get('builds', {}).get(head, {})
                     if evidence.get('target') != head or evidence.get('state') != 'complete' or evidence.get('required_checks_verified') is not True:
+                        self.toolchain_block(task, evidence)
+                        continue
+                    # Passing checks under a policy that has since moved is not
+                    # evidence under the current rules.
+                    if not self.policy_matches(task, evidence):
+                        self.toolchain_block(task, evidence, moved=True)
                         continue
                     jobs = self.store.snapshot(live_status=False).get('jobs', [])
                     if any(session_reserves(j, task['profile_id']) for j in jobs):
@@ -980,6 +987,57 @@ class Contributions:
             return True
         except (ValueError, OSError, sqlite3.Error):
             return False
+
+    def policy_matches(self, task, evidence):
+        """Whether a run's evidence was produced under the approved policy.
+
+        A candidate that changed the declaration, the checks or a lockfile has
+        not been verified against the rules that now apply, so its evidence
+        cannot authorise publication.
+        """
+        try:
+            approved = toolchain_policy.resolve_committed(self.path_for(task))
+        except (OSError, ValueError):
+            return False
+        # A repository that declares no toolchain has no policy to gate on;
+        # blocking it would refuse work for a rule that does not exist.
+        if not approved['toolchains']:
+            return True
+        return (not evidence.get('policy_changes')
+                and evidence.get('policy_digest') == toolchain_policy.digest(approved)
+                and bool(evidence.get('toolchain_evidence'))
+                and all(item.get('matches') is True for item in evidence['toolchain_evidence']))
+
+    def toolchain_block(self, task, evidence, moved=False):
+        """Keep the delivery pending and say why, in terms the agent can act on.
+
+        Silence would leave a waiting agent with an unexplained pending
+        delivery, so the refusal names what was required and what was detected.
+        Recorded once per distinct message: this runs on every poll.
+        """
+        if not evidence:
+            return
+        mismatch = [item for item in evidence.get('toolchain_evidence') or [] if not item.get('matches')]
+        if evidence.get('blocker') == 'missing_toolchain' or mismatch:
+            message = (mismatch[0].get('detail') if mismatch else '') or \
+                'Required toolchain was unavailable. Verification did not run. Use the configured SDK and retry.'
+            kind = 'missing_toolchain'
+        elif moved or evidence.get('blocker') == 'policy_changed':
+            message = evidence.get('note') or ('The approved toolchain policy changed after this commit was verified. '
+                       'Verify again against the newly approved policy before delivery.')
+            kind = 'policy_changed'
+        else:
+            return
+        if task.get('delivery_blocker', {}).get('message') == message:
+            return
+        task['delivery_blocker'] = dict(kind=kind, message=message, at=stamp(),
+                                        head_sha=task.get('head_sha'),
+                                        policy_digest=evidence.get('policy_digest'))
+        task['error'] = message[:500]
+        try:
+            self.save(task, 'publication_blocked', 'gateway')
+        except (ValueError, OSError, sqlite3.Error):
+            pass
 
     def record_error(self, task_id, error, action, actor):
         """Surface a background failure once, without masking storage faults."""
@@ -1582,6 +1640,11 @@ class Contributions:
                 self.save(task, 'build_evidence_mismatch', summary.get('actor', 'build_runner'))
                 return True
             task.setdefault('builds', {})[event['target']] = summary
+            if (event['target'] == task.get('head_sha') and summary.get('state') == 'complete'
+                    and summary.get('required_checks_verified') is True and self.policy_matches(task, summary)):
+                blocker = task.pop('delivery_blocker', None)
+                if blocker and task.get('error') == blocker.get('message', '')[:500]:
+                    task.pop('error', None)
             self.save(task, 'build_result', summary.get('actor', 'build_runner'))
         return True
 
@@ -2918,7 +2981,7 @@ class Contributions:
             with closing(self.connect()) as db, db:
                 db.execute('INSERT OR IGNORE INTO build_events VALUES (?,?)', (event_id, json.dumps(event)))
             previous = task.get('builds', {}).get(target)
-            run = self.validation.submit(dict(id=event_id, retry=bool(previous and previous.get('state') in ('failed', 'interrupted'))), actor=actor)
+            run = self.validation.submit(dict(id=event_id, retry=bool(previous and previous.get('state') in ('failed', 'error', 'interrupted', 'cancelled'))), actor=actor)
             if previous and previous.get('run_id') == run['id']:
                 # The durable queue deduplicated to the existing run; keep its
                 # full evidence instead of replacing it with the queue record.

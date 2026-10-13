@@ -160,7 +160,9 @@ void main() {
       await tester.tap(find.text('Integration coordinator'));
       await tester.pumpAndSettle();
       expect(find.text('Not configured'), findsOneWidget);
-      expect(find.text('SDK status unavailable'), findsOneWidget);
+      // Toolchain provisioning moved to Settings; the coordinator keeps only
+      // the automatic-installation policy.
+      expect(find.textContaining('Development toolchains'), findsNothing);
       expect(find.text('Validation runner unavailable'), findsOneWidget);
       await tester.tap(find.text('Enable coordinator'));
       await tester.pumpAndSettle();
@@ -322,11 +324,10 @@ void main() {
     },
   );
 
-  testWidgets('SDK, exact-commit validation and blocker labels stay scoped', (
+  testWidgets('exact-commit validation and blocker labels stay scoped', (
     tester,
   ) async {
     final calls = <String>[];
-    var queued = false;
     final connection = DashboardBloc(
       client: MockClient((request) async {
         final endpoint = request.url.path;
@@ -340,26 +341,12 @@ void main() {
           expect(body['repository'], 'repo');
           return http.Response('{}', 200);
         }
-        if (endpoint.endsWith('/sdk/install')) {
-          expect(request.method, 'POST');
-          queued = true;
-          return http.Response(jsonEncode({'state': 'queued'}), 200);
-        }
         if (endpoint.endsWith('/validation/run')) {
           expect(jsonDecode(request.body)['id'], 'e1');
           return http.Response('{}', 200);
         }
         if (endpoint.endsWith('/validation/log'))
           return http.Response('runner log text', 200);
-        if (endpoint.endsWith('/sdk'))
-          return http.Response(
-            jsonEncode({
-              'state': queued ? 'queued' : 'idle',
-              'installed': false,
-              'supported': true,
-            }),
-            200,
-          );
         if (endpoint.endsWith('/validation'))
           return http.Response(
             jsonEncode({
@@ -428,23 +415,20 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Integration coordinator'));
     await tester.pumpAndSettle();
-    expect(find.text('Signed in: dashboard · admin'), findsOneWidget);
-    expect(find.text('Development SDK missing'), findsOneWidget);
-    expect(find.textContaining('Blocker: Missing toolchain'), findsOneWidget);
-    expect(
-      find.textContaining('Exact-commit validation: complete'),
-      findsOneWidget,
-    );
-    await tester.ensureVisible(find.text('Install pinned SDK'));
-    await tester.tap(find.text('Install pinned SDK'));
-    await tester.pumpAndSettle();
-    expect(calls.where((c) => c.endsWith('/api/sdk/install')), hasLength(1));
-    expect(find.text('Installation running'), findsOneWidget);
-    await tester.ensureVisible(
-      find.text('Install the development SDK automatically'),
-    );
-    await tester.tap(find.text('Install the development SDK automatically'));
-    await tester.pumpAndSettle();
+expect(find.text('Signed in: dashboard · admin'), findsOneWidget);
+      expect(find.textContaining('Blocker: Missing toolchain'), findsOneWidget);
+      expect(
+        find.textContaining('Exact-commit validation: complete'),
+        findsOneWidget,
+      );
+      expect(calls.where((c) => c.endsWith('/api/sdk')), isEmpty);
+      await tester.ensureVisible(
+        find.text('Install a missing toolchain automatically'),
+      );
+      await tester.tap(
+        find.text('Install a missing toolchain automatically'),
+      );
+      await tester.pumpAndSettle();
     expect(
       calls.where((c) => c.endsWith('/api/integration/configure')),
       hasLength(1),
@@ -476,7 +460,7 @@ void main() {
     await BlocScope.reset();
   });
 
-  testWidgets('operators see their identity and cannot install the SDK', (
+  testWidgets('operators see their identity and cannot change coordinator policy', (
     tester,
   ) async {
     final connection = DashboardBloc(
@@ -488,15 +472,6 @@ void main() {
               'authenticated': true,
               'operator': 'kit',
               'role': 'operator',
-            }),
-            200,
-          );
-        if (endpoint.endsWith('/sdk'))
-          return http.Response(
-            jsonEncode({
-              'state': 'idle',
-              'installed': false,
-              'supported': true,
             }),
             200,
           );
@@ -542,18 +517,6 @@ void main() {
             ),
           )
           .onChanged,
-      isNull,
-    );
-    expect(
-      find.text('Only an administrator can request the SDK installation.'),
-      findsOneWidget,
-    );
-    expect(
-      tester
-          .widget<FilledButton>(
-            find.widgetWithText(FilledButton, 'Install pinned SDK'),
-          )
-          .onPressed,
       isNull,
     );
     await tester.pumpWidget(const SizedBox.shrink());

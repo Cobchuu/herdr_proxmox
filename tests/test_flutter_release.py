@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import sys
 import unittest
 
 spec = importlib.util.spec_from_file_location('flutter_release', Path(__file__).parents[1] / 'install/flutter-release.py')
@@ -25,13 +27,50 @@ class FlutterReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.select_release({'releases': [self.release(**changes)]}, '3.44.8', 'x64')
 
-    def test_installer_pin_matches_project_build_guard(self):
+    def test_installer_reads_the_declared_version_instead_of_its_own_pin(self):
         root = Path(__file__).parents[1]
         installer = (root / 'install/dev-tools-install.sh').read_text()
         build = (root / 'scripts/build-web.sh').read_text()
-        self.assertIn('version=3.44.8', installer)
-        self.assertIn('v=="3.44.8"', build)
+        # One pin, in .fvmrc. A literal in either script is a second copy that
+        # goes stale the moment the project moves.
+        for name, text in (('installer', installer), ('build', build)):
+            self.assertIn('.fvmrc', text, name)
+            self.assertNotRegex(text, r'3\.\d+\.\d+', name)
         self.assertLess(installer.index('sha256sum --check'), installer.index('tar --no-same-owner'))
+
+    def test_every_site_derives_the_pin_from_the_project_declaration(self):
+        # .fvmrc is the declared source of truth. Everything that needs the
+        # version must read it: the installer, the build guard, CI, and the
+        # catalog. Nothing may state a version of its own.
+        root = Path(__file__).parents[1]
+        pinned = '3.44.8'
+        self.assertEqual(json.loads((root / '.fvmrc').read_text())['flutter'], pinned)
+        ci = (root / '.github/workflows/ci.yml').read_text()
+        self.assertIn('.fvmrc', ci)
+        self.assertNotRegex(ci, r'3\.\d+\.\d+')
+        queue = (root / 'web/gateway/build_queue.py').read_text()
+        self.assertNotIn('flutter-', queue)
+        catalog = json.loads((root / 'install/toolchains.json').read_text())
+        entry = catalog['flutter']
+        # The catalog locates and installs; it does not carry the version.
+        self.assertEqual(entry['version_source'], {'file': '.fvmrc', 'key': 'flutter'})
+        self.assertNotIn('version', entry)
+        self.assertIn('{version}', entry['install_root'])
+        self.assertIn('{version}', entry['executable'])
+        self.assertEqual(entry['script'], 'install/dev-tools-install.sh')
+        self.assertTrue((root / entry['script']).is_file())
+        for name, value in catalog.items():
+            self.assertFalse(value['script'].startswith('/'), name)
+            self.assertNotIn('..', value['script'], name)
+            self.assertIn('version_source', value, name)
+        # The declared version must be resolvable through the catalog the same
+        # way the gateway resolves it.
+        sys.path.insert(0, str(root / 'web/gateway'))
+        import toolchain_policy
+        resolved, declared_by = toolchain_policy.declared_version(entry, root)
+        self.assertEqual((resolved, declared_by), (pinned, '.fvmrc#flutter'))
+        self.assertEqual(toolchain_policy.expand(entry, 'executable', resolved),
+                         f'/home/herdr/.local/share/flutter-{pinned}/bin/flutter')
 
     def test_the_product_build_requires_only_its_own_pinned_toolchain(self):
         # Tools an agent may install for its own task. The product must never make

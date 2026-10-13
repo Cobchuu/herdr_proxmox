@@ -93,6 +93,12 @@ def reconcile(service, task):
         flow = dict(sha=head, state='waiting_verification', attempt=0, started_at=stamp())
         task['delivery_workflow'] = flow
         service.save(task, 'delivery_started', ACTOR)
+    evidence = task.get('builds', {}).get(head, {})
+    if evidence.get('state') == 'complete' and not service.policy_matches(task, evidence):
+        flow['failure_stage'] = 'verification'
+        service.save(task, 'delivery_policy_blocked', ACTOR)
+        raise ValueError('Verification no longer satisfies the approved toolchain policy. '
+                         'Review policy changes and verify again before delivery.')
     if flow.get('state') == 'complete':
         if pending(task):
             raise ValueError('Durable verification changed after delivery inspection; inspect before releasing the agent.')

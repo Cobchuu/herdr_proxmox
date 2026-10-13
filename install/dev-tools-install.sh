@@ -3,7 +3,13 @@
 set -Eeuo pipefail
 [[ $EUID == 0 ]] || { echo 'Run as root inside the development container.' >&2; exit 1; }
 [[ $(getent passwd herdr | cut -d: -f6) == /home/herdr ]] || { echo 'Install the herdr user first.' >&2; exit 1; }
-version=3.44.8
+# The repository declares its own SDK version in .fvmrc. Reading it here keeps
+# one pin: a second copy in this script or in the catalog would be one more
+# place to forget when the project moves.
+release=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+[[ -f $release/.fvmrc ]] || { echo 'This release does not include .fvmrc, so it declares no SDK version.' >&2; exit 1; }
+version=$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1])).get("flutter"); print(value if isinstance(value,str) else "")' "$release/.fvmrc" 2>/dev/null) || version=
+[[ $version =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo 'This release does not declare a usable Flutter version in .fvmrc.' >&2; exit 1; }
 case "$(uname -m)" in
   x86_64) architecture=x64 ;;
   aarch64) architecture=arm64 ;;

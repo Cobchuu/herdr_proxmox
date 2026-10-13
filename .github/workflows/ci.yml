@@ -46,17 +46,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Flutter 3.44.8 from its official repository
+      - name: Install the project's declared Flutter from its official repository
         shell: bash
         run: |
-          git clone --depth 1 --branch 3.44.8 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          # .fvmrc is the single source of the version. Pinning it here too
+          # would be a second copy to forget when the project moves.
+          version=$(python3 -c 'import json; print(json.load(open(".fvmrc"))["flutter"])')
+          echo "FLUTTER_VERSION=$version" >> "$GITHUB_ENV"
+          git clone --depth 1 --branch "$version" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
       - name: Cache Dart package downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.pub-cache
-          key: dart-linux-${{ runner.arch }}-3.44.8-${{ hashFiles('web/**/pubspec.lock') }}
-          restore-keys: dart-linux-${{ runner.arch }}-3.44.8-
+          key: dart-linux-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('web/**/pubspec.lock') }}
+          restore-keys: dart-linux-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
       - name: Analyze, test and build both web applications
         run: bash scripts/build-web.sh
       - name: Verify request IDs in compiled JavaScript
@@ -102,7 +106,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/package/herdr-proxmox/web"
           cp -R ct install "$RUNNER_TEMP/package/herdr-proxmox/"
-          cp README.md "$RUNNER_TEMP/package/herdr-proxmox/"
+          cp README.md .fvmrc "$RUNNER_TEMP/package/herdr-proxmox/"
           printf '%s\n' "$RELEASE_TAG" > "$RUNNER_TEMP/package/herdr-proxmox/VERSION"
           python3 -c 'import json,os,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(dict(build_id=os.environ["RELEASE_TAG"], source_sha=os.environ["GITHUB_SHA"], package_version=os.environ["RELEASE_TAG"], deployment_mode="release", channel=os.environ["RELEASE_CHANNEL"], source_branch=os.environ["GITHUB_REF_NAME"] if os.environ["RELEASE_CHANNEL"] == "alpha" else None)))' "$RUNNER_TEMP/package/herdr-proxmox/BUILD.json"
           cp -R web/gateway web/public "$RUNNER_TEMP/package/herdr-proxmox/web/"

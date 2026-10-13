@@ -9,7 +9,7 @@ trap 'check_status=$?; python3 "$check_runner" --finish "${planned_checks[@]}" |
 # separately so only the version response is captured by the parser.
 check flutter-config flutter config --no-analytics
 version=$(check flutter-version flutter --version --machine)
-printf '%s' "$version" | check flutter-pin python3 -c 'import json,sys; v=json.load(sys.stdin)["frameworkVersion"]; assert v=="3.44.8", "Flutter 3.44.8 required, found "+v'
+printf '%s' "$version" | check flutter-pin python3 -c 'import json,sys; required=json.load(open(".fvmrc"))["flutter"]; v=json.load(sys.stdin)["frameworkVersion"]; assert v==required, "Flutter "+required+" required, found "+v'
 mkdir -p web/public/dashboard
 cd web/dashboard
 check flutter-dependencies flutter pub get

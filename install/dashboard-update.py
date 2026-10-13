@@ -25,7 +25,12 @@ CONFIG = Path('/home/herdr/.config/herdr-web')
 LOCAL_ARTIFACTS = Path('/home/herdr/herdr-validation')
 REPOSITORY = 'Ultarius/herdr_proxmox'
 REQUIRED = ('web/gateway/server.py', 'web/public/index.html',
-            'web/public/main.dart.js', 'web/public/dashboard/index.html', 'VERSION')
+            'web/public/main.dart.js', 'web/public/dashboard/index.html', 'VERSION',
+            # The release must carry the project's version declaration and the
+            # catalog that reads it. Without them the deployed gateway cannot
+            # resolve the required SDK version, so refuse the package rather
+            # than install one that has quietly lost that ability.
+            '.fvmrc', 'install/toolchains.json')
 RELEASE = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+')
 ALPHA = re.compile(r'alpha-[a-z0-9-]+-[a-f0-9]{12}-b[1-9][0-9]*')
 # Operator state that outlives any single deployment: task records and the
@@ -226,6 +231,9 @@ def replace_install(source, build_identity):
         for installed in (ROOT / 'install').rglob('*'):
             installed.chmod(0o755 if installed.is_dir() else 0o644)
     shutil.copy2(source / 'VERSION', ROOT / 'VERSION')
+    if (source / '.fvmrc').is_file():
+        shutil.copy2(source / '.fvmrc', ROOT / '.fvmrc')
+        (ROOT / '.fvmrc').chmod(0o644)
     (ROOT / 'BUILD.json').write_text(json.dumps(build_identity))
     (ROOT / 'BUILD.json').chmod(0o644)
 
@@ -239,6 +247,8 @@ def backup_current():
     shutil.copytree(CONFIG, backup / 'config')
     if (ROOT / 'VERSION').exists():
         shutil.copy2(ROOT / 'VERSION', backup / 'VERSION')
+    if (ROOT / '.fvmrc').exists():
+        shutil.copy2(ROOT / '.fvmrc', backup / '.fvmrc')
     if (ROOT / 'BUILD.json').exists():
         shutil.copy2(ROOT / 'BUILD.json', backup / 'BUILD.json')
     return backup
@@ -271,6 +281,9 @@ def restore(backup):
         (ROOT / 'VERSION').unlink(missing_ok=True)
         if (backup / 'VERSION').exists():
             shutil.copy2(backup / 'VERSION', ROOT / 'VERSION')
+        (ROOT / '.fvmrc').unlink(missing_ok=True)
+        if (backup / '.fvmrc').exists():
+            shutil.copy2(backup / '.fvmrc', ROOT / '.fvmrc')
         (ROOT / 'BUILD.json').unlink(missing_ok=True)
         if (backup / 'BUILD.json').exists():
             shutil.copy2(backup / 'BUILD.json', ROOT / 'BUILD.json')

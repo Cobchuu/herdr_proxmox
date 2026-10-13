@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, str(Path(__file__).parents[1] / 'web/gateway'))
 from organizations import OrganizationStore
 import contributions
+import toolchain_policy
 from contributions import Contributions, remote_info
 from github_api import GitHub, GitHubError
 import project_git
@@ -336,7 +337,11 @@ class ContributionTests(unittest.TestCase):
         task = self.service.action('policy', dict(request_id='delivery-policy', task_id=task['id'],
                                     auto_validate=True, auto_publish=publish), 'admin', 'admin')
         task['builds'] = {task['head_sha']: dict(target=task['head_sha'], state=build_state,
-                                                required_checks_verified=verified, checks=[dict(id='tests', status='passed')])}
+                                                required_checks_verified=verified, checks=[dict(id='tests', status='passed')],
+                                                # Evidence carries the policy it was produced
+                                                # under; publication requires it to match.
+                                                policy_digest=toolchain_policy.digest(
+                                                    toolchain_policy.resolve(self.service.path_for(task))))}
         self.service.save(task, 'build_result', 'tests')
         pull = self.pull_data(task, mergeable=True)
         self.api.find_pull.return_value = []
@@ -846,6 +851,55 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(self.service.action('complete', body, 'admin', 'admin')['state'], 'completed')
         with self.assertRaisesRegex(ValueError, 'closed'):
             self.service.action('publish', dict(request_id='after-done', task_id=task['id'], head_sha=task['head_sha']), 'admin', 'admin')
+
+    def test_publication_requires_evidence_from_the_approved_policy(self):
+        # A repository that declares a toolchain: evidence produced under a
+        # different policy must not authorise publication, and the refusal must
+        # say so rather than leaving the delivery quietly pending.
+        task = self.candidate()
+        head = task['head_sha']
+        (self.repo / '.fvmrc').write_text('{"flutter": "3.44.8"}')
+        self.git('add', '.fvmrc')
+        self.git('commit', '-m', 'declare toolchain')
+        approved = toolchain_policy.digest(toolchain_policy.resolve(self.repo))
+        task['builds'] = {head: dict(target=head, state='complete', required_checks_verified=True,
+                                     policy_digest='stale-digest',
+                                     toolchain_evidence=[dict(name='flutter', required='3.44.8',
+                                                              actual='3.24.0', matches=False,
+                                                              detail='Required Flutter 3.44.8; detected 3.24.0. '
+                                                                     'Verification did not run. Use the configured SDK and retry.')])}
+        self.service.save(task, 'build_result', 'runner')
+        self.assertFalse(self.service.policy_matches(task, task['builds'][head]))
+        # A detected mismatch is more specific than a moved policy, so it is the
+        # message the waiting agent gets.
+        self.service.toolchain_block(task, task['builds'][head], moved=True)
+        blocked = self.service.get(task['id'])
+        self.assertEqual(blocked['delivery_blocker']['kind'], 'missing_toolchain')
+        self.assertIn('detected 3.24.0', blocked['delivery_blocker']['message'])
+        self.assertIn('Verification did not run', blocked['delivery_blocker']['message'])
+        # A stale digest with no detected mismatch names the policy change.
+        task['builds'][head].update(toolchain_evidence=[], policy_digest='stale-digest')
+        self.service.toolchain_block(task, task['builds'][head], moved=True)
+        moved = self.service.get(task['id'])
+        self.assertEqual(moved['delivery_blocker']['kind'], 'policy_changed')
+        self.assertIn('Verify again', moved['delivery_blocker']['message'])
+        # Matching evidence under the same policy is not blocked.
+        task['builds'][head].update(policy_digest=approved, toolchain_evidence=[dict(matches=True)])
+        self.assertTrue(self.service.policy_matches(task, task['builds'][head]))
+
+    def test_automatic_delivery_blocks_stale_policy_before_pushing(self):
+        import task_delivery
+        task, run, _ = self._delivery_task()
+        (self.repo / '.fvmrc').write_text('{"flutter":"3.44.8"}')
+        self.git('add', '.fvmrc')
+        self.git('commit', '-m', 'approve toolchain')
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+        push.assert_not_called()
+        flow = self.service.get(task['id'])['delivery_workflow']
+        self.assertEqual(flow['failure_stage'], 'verification')
+        self.assertIn('approved toolchain policy', flow['error'])
+        self.assertEqual(flow['result_kind'], 'delivery_failed')
 
     def test_automatic_completion_requires_exact_tree_and_verified_checks(self):
         task = self.candidate()

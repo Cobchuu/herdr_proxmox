@@ -8,6 +8,17 @@ from build_queue import BuildQueue
 
 
 class BuildQueueTests(unittest.TestCase):
+    def test_changed_policy_does_not_reuse_a_completed_build_for_the_same_sdk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queue = BuildQueue(directory)
+            run = dict(id='a' * 32, repository='repo', target='b' * 40,
+                       event_id='event', policy_digest='original')
+            saved, _ = queue.enqueue(run, toolchain='sdk-1.0')
+            queue.finish(dict(saved, state='complete'))
+            fresh, created = queue.enqueue(dict(run, id='c' * 32, policy_digest='changed'), toolchain='sdk-1.0')
+            self.assertTrue(created)
+            self.assertEqual(fresh['policy_digest'], 'changed')
+
     def test_dedup_survives_restart_and_only_one_build_can_be_claimed(self):
         with tempfile.TemporaryDirectory() as directory:
             queue = BuildQueue(directory)

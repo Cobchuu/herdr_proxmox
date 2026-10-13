@@ -1,0 +1,13 @@
+{
+  "flutter": {
+    "label": "Flutter",
+    "version_source": {
+      "file": ".fvmrc",
+      "key": "flutter"
+    },
+    "install_root": "/home/herdr/.local/share/flutter-{version}",
+    "executable": "/home/herdr/.local/share/flutter-{version}/bin/flutter",
+    "companion": "/home/herdr/.local/share/flutter-{version}/bin/dart",
+    "script": "install/dev-tools-install.sh"
+  }
+}
