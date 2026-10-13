@@ -557,4 +557,45 @@ void main() {
       expect(posts.first['id'], 'original');
     },
   );
+  test(
+    'task index opens the workflow and retains original list navigation',
+    () async {
+      await mount(
+        const TasksPage(),
+        (request) => taskResponse(request, publishedTask()),
+      );
+      final tabs = elements('button[role="tab"]').toList();
+      final workflow = tabs.firstWhere(
+        (node) => node.textContent!.startsWith('Workflow'),
+      );
+      final list = tabs.firstWhere(
+        (node) => node.textContent!.startsWith('List'),
+      );
+      expect(workflow.getAttribute('aria-selected'), 'true');
+      expect(button('Create task').disabled, false);
+      expect(elements('canvas'), isEmpty);
+      posts.clear();
+      list.click();
+      await settle();
+      expect(list.getAttribute('aria-selected'), 'true');
+      expect(
+        elements('h2').any((node) => node.textContent == 'Ready task'),
+        true,
+      );
+      expect(button('Open task').disabled, false);
+      workflow.click();
+      await settle();
+      expect(workflow.getAttribute('aria-selected'), 'true');
+      expect(
+        posts,
+        isEmpty,
+        reason: 'Changing presentation never changes task state.',
+      );
+      list.click();
+      await settle();
+      await click('Open task');
+      expect(web.window.location.hash, '#/tasks/task');
+      expect(posts, isEmpty);
+    },
+  );
 }

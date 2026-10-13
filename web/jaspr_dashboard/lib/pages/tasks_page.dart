@@ -3,6 +3,7 @@ import '../services.dart';
 import 'discovery_panel.dart';
 import 'task_activity.dart';
 import 'task_timeline.dart';
+import 'task_workflow.dart';
 import 'task_clipboard.dart';
 
 /// Task lifecycle labels. The gateway owns these states; an unknown value is
@@ -109,9 +110,11 @@ class TasksPage extends StatefulComponent {
   const TasksPage({
     super.key,
     this.taskId,
+    this.initialView = 'workflow',
     this.coordinator = const AppCoordinator(),
   });
   final String? taskId;
+  final String initialView;
   final AppCoordinator? coordinator;
   @override
   State<TasksPage> createState() => _TasksPageState();
@@ -1062,37 +1065,55 @@ class _TasksPageState extends State<TasksPage> {
                         : 'No development tasks yet.',
                   ),
                 ),
-              for (final task in started) _summary(task),
-              // Drafts are proposals waiting on an operator, not work in flight.
-              // Grouping them keeps the active list readable when a group has
-              // proposed several follow-ups.
-              if (drafts.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Row(
-                    children: [
-                      Text(
-                        'Drafts (${drafts.length})',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'Work that has not started. Open a task for its next step.',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
+              TaskWorkflow(
+                tasks: tasks,
+                initialView: component.initialView,
+                profiles: [
+                  for (final profile
+                      in connection.organizationDirectory.value['profiles']
+                              as List? ??
+                          [])
+                    if (profile is Map<String, dynamic>) profile,
+                ],
+                onOpenTask: openTask,
+                executor: executor,
+                loading: refreshing,
+                listView: Column(
+                  children: [
+                    for (final task in started) _summary(task),
+                    // Drafts are proposals waiting on an operator, not work in flight.
+                    // Grouping them keeps the active list readable when a group has
+                    // proposed several follow-ups.
+                    if (drafts.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Row(
+                          children: [
+                            Text(
+                              'Drafts (${drafts.length})',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Work that has not started. Open a task for its next step.',
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
                               ),
+                            ),
+                          ],
                         ),
                       ),
+                      for (final task in drafts) _summary(task),
                     ],
-                  ),
+                  ],
                 ),
-                for (final task in drafts) _summary(task),
-              ],
+              ),
               DiscoveryPanel(coordinator: component.coordinator),
             ],
           )

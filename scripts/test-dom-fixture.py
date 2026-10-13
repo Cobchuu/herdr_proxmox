@@ -6,13 +6,15 @@ installs tools, updates services, changes SSH, deploys, or reads real projects.
 The OperationsFixture class can also be attached to preview-jaspr.py.
 """
 import argparse
+import copy
 import importlib.util
 import json
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 import sys
 import tempfile
-from urllib.parse import urlsplit
+import uuid
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "web/gateway"))
@@ -49,9 +51,103 @@ class OperationsFixture:
                           recovery=dict(ref="refs/herdr/recovery/dom-event", commit="d" * 40))
         self.config = dict(repository="demo", organization_id="demo-org", enabled=False,
                            profile_id="demo-coordinator", coordinator_state="persona_sent")
+        self.tasks = []
+        self.seed_task_evidence()
+
+    def seed_task_evidence(self, organization=None):
+        """Recorded fixture provenance, never inferred task dependencies.
+
+        Contributions.snapshot/detail are the real gateway contracts. The
+        gateway has no prerequisite_task_ids field: links below come only from
+        source.task_id, follow_up_tasks, and blocking_execution.task_id.
+        """
+        organization = organization or {}
+        org_id = next(iter(organization.get("organizations", [])), {}).get("id", "demo-org")
+        profiles = {p["name"]: p for p in organization.get("profiles", []) if not p.get("group_id")}
+        groups = organization.get("groups", [])
+        jobs = {j.get("profile_id"): j for j in organization.get("jobs", []) if j.get("kind") == "launch"}
+        ids = {name: uuid.uuid5(uuid.NAMESPACE_URL, "herdr-dom-fixture:" + name).hex
+               for name in ("foundation", "widgets", "review", "checks", "merge", "follow-up")}
+        base, candidate, merged = "b" * 40, "a" * 40, "c" * 40
+        at = "2026-10-13T12:00:00Z"
+
+        def task(key, title, state, name, **values):
+            profile = profiles.get(name, dict(id="demo-" + name.lower(), name=name, runtime="opencode", role="Developer"))
+            run = jobs.get(profile["id"])
+            value = dict(id=ids[key], organization_id=org_id, title=title,
+                         description="Fixture-only sample: " + title + ". Verify recorded candidate and required checks before any publication.",
+                         state=state, repository="demo", github_repository="example/dom-fixture",
+                         base_ref="refs/remotes/origin/main", base_sha=base,
+                         branch="herdr/task-" + ids[key][:12], profile_id=profile["id"],
+                         assigned_agent={k: profile.get(k) for k in ("id", "name", "role", "runtime")},
+                         created_at=at, updated_at=at, audit=[], participants=[],
+                         sessions=[], meeting_results=[], consultations=[],
+                         auto_validate=False, auto_review=False, auto_publish=False, await_verification=False, checks=[],
+                         availability=dict(state="occupied" if run else "offline", action="queue" if run else "start",
+                                           detail="Fixture-only live session state.", run_id=run.get("id") if run else None),
+                         builds={}, launch_retryable=False, blocking_execution=None,
+                         current_upstream_sha=base, already_upstream=None, fixture_only=True)
+            if run and state != "draft":
+                value["run_id"] = run["id"]
+                value["participants"] = [dict(profile_id=profile["id"], run_id=run["id"], name=name,
+                                               role=profile.get("role", ""), runtime=profile["runtime"],
+                                               assigned_at=at, provenance="launch_record")]
+                value["sessions"] = [{k: run.get(k) for k in ("id", "kind", "state", "profile_id", "created_at", "updated_at", "pane_id", "alias") } | dict(history=[])]
+            value.update(values)
+            return value
+
+        foundation = task("foundation", "Native widget foundation", "completed", "Quinn",
+                          head_sha=base, completion=dict(outcome="no_changes", candidate=base, upstream=base,
+                                                        validation="not_applicable", reason="Fixture-only baseline inspection found no changes required.", actor="Preview", at=at))
+        widgets = task("widgets", "Port workspace widgets", "implementing", "Max",
+                       source=dict(task_id=ids["foundation"], depth=1, receipt_follow_up=True),
+                       worktree="demo/.herdr-worktrees/dom-widgets")
+        review = task("review", "Review DOM interactions", "review_ready", "Iris", head_sha=candidate,
+                      source=dict(task_id=ids["widgets"], depth=2, receipt_follow_up=True),
+                      diff="diff --git a/widgets.dart b/widgets.dart\n+Native DOM workspace interactions\n",
+                      diff_stat=" widgets.dart | 1 +\n", worktree="demo/.herdr-worktrees/dom-review",
+                      completion_receipt=dict(commit=candidate, outcome="complete", tests=[dict(command="dart test", result="Reported complete; independent validation remains separate.")]))
+        checks = task("checks", "Verify interaction safeguards", "draft", "Max",
+                      assignment=dict(state="queued", profile_id=widgets["profile_id"], queued_at=at, actor="Preview", position=1),
+                      blocking_execution=dict(run_id=widgets.get("run_id", "demo-worker-run"), state="persona_sent",
+                                              task_id=widgets["id"], task_title=widgets["title"], task_state=widgets["state"],
+                                              handoff_ready=False, alias=(jobs.get(widgets["profile_id"]) or {}).get("alias"),
+                                              pane_id=(jobs.get(widgets["profile_id"]) or {}).get("pane_id")))
+        merged_task = task("merge", "Integrate verified dashboard", "merged", "Sage", head_sha=candidate, merge_sha=merged,
+                           pull=dict(number=24, url="https://github.com/example/dom-fixture/pull/24", state="closed", draft=False,
+                                     head_sha=candidate, mergeable=True),
+                           builds={merged: dict(run_id="dom-exact-build", target=merged, state="complete", required_checks_verified=True, checks=[dict(id="unit", status="passed")])})
+        follow_up = task("follow-up", "Improve workspace keyboard navigation", "implementing", "Eli",
+                         source=dict(task_id=ids["merge"], depth=1, receipt_follow_up=True),
+                         worktree="demo/.herdr-worktrees/dom-keyboard")
+        foundation["follow_up_tasks"] = {"receipt:fixture-widgets": widgets["id"]}
+        widgets["follow_up_tasks"] = {"receipt:fixture-review": review["id"]}
+        merged_task["follow_up_tasks"] = {"receipt:fixture-keyboard": follow_up["id"]}
+        if groups:
+            review["meetings"] = [dict(group_id=groups[0]["id"], job_id="fixture-review-meeting", candidate=candidate, at=at)]
+            review["meeting_results"] = [dict(review["meetings"][0], state="completed", result="Fixture-only review: keyboard and focus behavior need explicit checks.", proposals=[])]
+        for value in (review, merged_task):
+            value["commit_graph"] = [dict(sha=candidate, parents=[base], subject="Native DOM interactions (fixture)", author="Preview", date=at, refs=value["branch"]),
+                                     dict(sha=base, parents=[], subject="Verified fixture baseline", author="Preview", date=at, refs="origin/main")]
+        self.tasks = [foundation, widgets, review, checks, merged_task, follow_up]
+        self.run.update(target=merged, task_id=merged_task["id"], event_id=self.event["id"], event_ids=[self.event["id"]])
+        self.event.update(organization_id=org_id, target=merged, state="completed",
+                          tests=dict(status="passed", summary="Fixture-only worker-reported checks; retained separately from build evidence."),
+                          blocker_label="", validation_run=dict(run_id=self.run["id"], target=merged, state="complete"))
+        self.config.update(organization_id=org_id, profile_id=profiles.get("Sage", {}).get("id", "demo-coordinator"))
+        return {value["profile_id"]: value["id"] for value in (widgets, review, follow_up)}
 
     def get(self, path):
-        endpoint = urlsplit(path).path.removeprefix("/api/")
+        parsed = urlsplit(path)
+        endpoint = parsed.path.removeprefix("/api/")
+        query = parse_qs(parsed.query)
+        if endpoint == "tasks":
+            return dict(tasks=[{k: copy.deepcopy(v) for k, v in task.items() if k != "diff"} for task in self.tasks],
+                        github=dict(configured=False), executor="service", automation={},
+                        fixture_only=True, fixture_notice="Simulated UI evidence only; task links are recorded follow-up provenance or execution waits, never inferred prerequisites.")
+        if endpoint == "tasks/detail":
+            selected = next((task for task in self.tasks if task["id"] == (query.get("id") or [""])[0]), None)
+            return copy.deepcopy(selected) if selected else dict(error="Fixture task not found.")
         if endpoint == "__fixture/actions":
             return {"actions": self.actions}
         if endpoint == "validation":

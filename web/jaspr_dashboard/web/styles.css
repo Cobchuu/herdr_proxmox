@@ -64,3 +64,10 @@ input,select,textarea{border:1px solid var(--color-border-input);border-radius:v
 .expansion-heading{width:100%;text-align:left}.native-expansion+.native-expansion{margin-top:12px}.evidence-text{max-height:420px;overflow:auto}.checkbox-field{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.checkbox-field input[type=checkbox]{width:auto}.native-text{margin:0}
 .btn.drawer-close,.btn.drawer-toggle{display:none}
 @media(max-width:1023.98px){.btn.drawer-close,.btn.drawer-toggle{display:inline-flex}}
+.organization-page{display:flex;flex-direction:column;gap:20px;min-width:0}
+.organization-page>.card:first-child .card__body>.actions+.actions{margin-top:12px}
+.organization-page>.card:first-child details{margin:12px 0}
+.organization-heading h1{margin-bottom:6px}.organization-heading p{max-width:72ch;margin:0;color:var(--color-text-secondary)}
+.organization-navigation{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-bottom:4px}
+.organization-page>details{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);padding:12px 16px}
+.organization-page>details>summary{font-size:12px;font-weight:600}.organization-page>details[open]>summary{margin-bottom:16px}

@@ -309,7 +309,10 @@ class _DashboardAppState extends State<DashboardApp> {
         initialView: route.queryParameters['view'] ?? 'chart',
         key: key,
       ),
-      '/tasks' => TasksPage(key: key),
+      '/tasks' => TasksPage(
+        key: key,
+        initialView: route.queryParameters['view'] ?? 'workflow',
+      ),
       '/knowledge' => KnowledgePage(
         organizationId: route.queryParameters['organization'] ?? '',
         key: key,

@@ -501,11 +501,14 @@ void main() {
         nodes('.status').map((n) => n.textContent),
         contains('No live session'),
       );
-      await click('Zoom in');
-      expect(
-        nodes('.status').map((n) => n.textContent).join(' '),
-        contains('115%'),
+      final beforeZoom = double.parse(
+        nodes('.org-chart-scene').single.getAttribute('data-zoom')!,
       );
+      await click('Zoom in');
+      final afterZoom = double.parse(
+        nodes('.org-chart-scene').single.getAttribute('data-zoom')!,
+      );
+      expect(afterZoom, closeTo((beforeZoom + .15).clamp(.1, 2.5), .0001));
     },
   );
 

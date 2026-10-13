@@ -616,11 +616,11 @@ class _OrganizationPageState extends State<OrganizationPage> {
         .where((j) => j['organization_id'] == org?['id'])
         .toList();
     return el('div', [
-      card('Organization', [
-        select('Organization', '${org?['id'] ?? ''}', {
-          '': 'Select organization',
-          for (final o in organizations) '${o['id']}': '${o['name']}',
-        }, (v) => selected = v.isEmpty ? null : v),
+      el('header', [
+        el('div', [
+          el('h1', [text('Organization')]),
+          if (org != null) prose(org['purpose']),
+        ]),
         row([
           button(
             'Create organization',
@@ -639,24 +639,24 @@ class _OrganizationPageState extends State<OrganizationPage> {
             disabled: state.busy,
           ),
         ]),
-        if (state.error != null) notice(state.error, error: true),
-        if (error != null) notice(error, error: true),
-        if (bloc.pending != null)
-          row([
-            button(
-              'Retry same request',
-              () => bloc.send(bloc.pending!),
-              disabled: state.busy,
-            ),
-            button(
-              'Dismiss request',
-              () => setState(() => bloc.pending = null),
-              disabled: state.busy,
-            ),
-          ]),
-        if (org != null) ...[
-          prose(org['purpose']),
-          details('Shared instructions', [pre(org['instructions'])]),
+      ], classes: 'page-heading organization-heading'),
+      if (state.error != null) notice(state.error, error: true),
+      if (error != null) notice(error, error: true),
+      if (bloc.pending != null)
+        row([
+          button(
+            'Retry same request',
+            () => bloc.send(bloc.pending!),
+            disabled: state.busy,
+          ),
+          button(
+            'Dismiss request',
+            () => setState(() => bloc.pending = null),
+            disabled: state.busy,
+          ),
+        ]),
+      if (org != null)
+        el('div', [
           row([
             for (final item in {
               'chart': 'Org chart',
@@ -684,8 +684,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
               disabled: busy || profiles.length < 2,
             ),
           ]),
-        ],
-      ]),
+        ], classes: 'organization-navigation'),
       if (org != null && view == 'chart')
         OrgChart(
           profiles: profiles,
@@ -789,6 +788,14 @@ class _OrganizationPageState extends State<OrganizationPage> {
           key: ValueKey('policy-${org['id']}'),
           organizationId: '${org['id']}',
         ),
+      details('Organization settings', [
+        select('Organization', '${org?['id'] ?? ''}', {
+          '': 'Select organization',
+          for (final o in organizations) '${o['id']}': '${o['name']}',
+        }, (v) => selected = v.isEmpty ? null : v),
+        if (org != null)
+          details('Shared instructions', [pre(org['instructions'])]),
+      ]),
       details('Migration & backup', [
         prose(
           'Exports all organizations, archived entries, models, personas, permissions, project paths, worktree preferences, reporting lines and groups. Runtime sessions, discussions, repositories, recovery snapshots and credentials need separate backups.',
@@ -806,6 +813,6 @@ class _OrganizationPageState extends State<OrganizationPage> {
           ),
         ]),
       ]),
-    ]);
+    ], classes: 'organization-page');
   }
 }
