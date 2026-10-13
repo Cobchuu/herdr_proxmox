@@ -1,0 +1,119 @@
+import 'package:web/web.dart' as web;
+import 'operations_support.dart';
+
+class DashboardAccessControls extends StatefulComponent {
+  const DashboardAccessControls({super.key, required this.keyCount});
+  final int keyCount;
+  @override
+  State<DashboardAccessControls> createState() => _AccessState();
+}
+
+class _AccessState extends OperationsState<DashboardAccessControls> {
+  String? mode, pending;
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    final epoch = connection.generation;
+    try {
+      final data = await connection.request('dashboard-access');
+      if (valid(epoch))
+        setState(() {
+          mode = data['mode'] as String?;
+          pending = data['pending_mode'] as String?;
+        });
+    } catch (e) {
+      if (valid(epoch)) setState(() => error = '$e');
+    }
+  }
+
+  Future<void> change(String target) async {
+    if (busy ||
+        pending != null ||
+        mode == null ||
+        (target == 'ssh' && component.keyCount < 1))
+      return;
+    final epoch = connection.generation;
+    var tested = false;
+    final confirmed = await showDialog<bool>(
+      target == 'ssh' ? 'Enable SSH-only access?' : 'Enable LAN access?',
+      (close) => stack([
+        if (target == 'ssh') ...[
+          paragraph(
+            'Test this tunnel and open http://127.0.0.1:8787 first. Direct LAN access closes 5 seconds after applying.',
+          ),
+          codeText(
+            'ssh -N -L 8787:127.0.0.1:8787 herdr@${['localhost', '127.0.0.1'].contains(web.window.location.hostname) ? '<lxc-ip>' : web.window.location.hostname}',
+          ),
+          toggle(
+            'I tested the tunnel and can open the dashboard through it.',
+            tested,
+            (value) {
+              tested = value;
+              refreshDialogs();
+            },
+          ),
+        ] else
+          paragraph(
+            'The dashboard will accept direct LAN connections. Access-token login remains required. The change applies in 5 seconds.',
+          ),
+        actions([
+          button('Cancel', () => close(false)),
+          button(
+            'Apply access mode',
+            () => close(true),
+            primary: true,
+            disabled: target == 'ssh' && !tested,
+          ),
+        ]),
+      ]),
+    );
+    if (confirmed != true || !valid(epoch)) return;
+    await perform((epoch) async {
+      final data = await connection.request('dashboard-access', {
+        'mode': target,
+        'tunnel_ready': tested,
+      });
+      if (valid(epoch))
+        setState(() {
+          pending = data['pending_mode'] as String?;
+          message = target == 'ssh'
+              ? 'SSH-only access applies in 5 seconds. Continue through your tunnel at http://127.0.0.1:8787.'
+              : 'LAN access applies in 5 seconds. Reconnect using the LXC IP.';
+        });
+    });
+  }
+
+  @override
+  Component build(BuildContext context) => card('Dashboard access', [
+    if (mode != null)
+      paragraph(
+        'Current mode: ${mode == 'ssh' ? 'SSH only' : 'Local network'}${pending == null ? '' : ' · switching to $pending'}',
+      ),
+    paragraph(
+      'SSH keys protect SSH login. Choose whether the dashboard also requires an SSH tunnel.',
+    ),
+    actions([
+      button(
+        'Allow LAN access',
+        () => change('lan'),
+        disabled: busy || pending != null || mode == null || mode == 'lan',
+      ),
+      button(
+        'Require SSH tunnel',
+        () => change('ssh'),
+        disabled:
+            busy ||
+            pending != null ||
+            mode == null ||
+            mode == 'ssh' ||
+            component.keyCount < 1,
+      ),
+      button('Refresh access status', load, disabled: busy),
+    ]),
+    feedback(),
+  ]);
+}

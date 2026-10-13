@@ -24,7 +24,8 @@ from its own upstream repository, where a renamed Herdr installer does not exist
 
 This targets **herdrdev/herdr**, not the separate **herdr-webui** project.
 Access terminals through the Proxmox console or SSH. An optional custom dashboard
-uses Flutter **3.44.8**, Jaspr **0.23.5**, Juice **1.10.0** and ZenRouter **3.0.0**.
+uses Jaspr **0.23.5** with the preserved Juice **1.10.0** bloc core.
+Flutter **3.44.8** supplies the pinned Dart toolchain and legacy contract tests.
 Herdr starts its session server when you launch it and
 keeps panes running after you detach. Dashboard installation adds an on-demand
 `herdr-session` user service so the dashboard can start its server.
@@ -209,12 +210,16 @@ restoration depends on Herdr and the individual agent's resume support.
 
 ## Custom web dashboard
 
-Jaspr renders the DOM shell, containing the Flutter dashboard in an iframe.
-Juice owns the shared dashboard connection, refresh timer, loading/error state,
-and workspace action use cases. A feature-owned Juice bloc manages organization
-requests through that same connection. ZenRouter handles workspace, agent and organization views,
-including browser back navigation in the embedded dashboard. Tokens stay in
-memory and are cleared on disconnect; no credentials are saved in the browser.
+The entire dashboard renders native HTML/CSS through client-only Jaspr, including
+DOM terminals and SVG organization/commit graphs. The release has no Flutter
+canvas or iframe. The [migration notes](docs/jaspr-migration.md) describe workflow
+coverage, settings and verification. Phase 2 design tokens, icons, rail/sidebar,
+cards, status controls and responsive layout are included.
+
+Juice retains the original shared dashboard and organization blocs, connection,
+refresh timer, errors and workspace use cases. Browser hash routes preserve old
+deep links and back navigation. Tokens stay in memory and clear on disconnect;
+the existing server-issued browser session handles restoration.
 
 Build on your development machine with Flutter 3.44.8 on PATH:
 
@@ -235,7 +240,8 @@ build-time tools and do not need to run inside the CT.
 
 ### Publish an installable web release
 
-The GitHub CI workflow builds and tests both applications. A pushed `v*` tag also
+The GitHub CI workflow validates the preserved Flutter contracts, tests native
+DOM workflows in Chrome and builds the Jaspr release. A pushed `v*` tag also
 publishes `herdr-proxmox.tar.gz` and `herdr-proxmox.tar.gz.sha256` as GitHub release
 assets, containing the installers, complete gateway and compiled dashboard from
 that same tag. Commit and push the finished changes first, then create a version
@@ -254,7 +260,7 @@ host; the hosted Debian smoke job tests provisioning, not Proxmox storage/networ
 ### VS Code preview
 
 Open this repository in VS Code, select **Web build: Edge** (or **Chrome**) in
-Run and Debug, and press **F5**. The prelaunch tasks build both apps, start a
+Run and Debug, and press **F5**. The prelaunch tasks validate and build the dashboard, start a
 static Dart server on `127.0.0.1:8788`, and launch the browser. Flutter 3.44.8
 and its Dart executable must be on PATH. The preview server remains in the task
 terminal; terminate **web: serve build** when finished.
@@ -264,14 +270,13 @@ the Proxmox gateway. Open its LAN URL directly, or establish the optional SSH
 tunnel described below and choose **Proxmox dashboard: SSH tunnel**. Release builds are
 optimized; use these browser launches for inspection, rather than Dart hot reload.
 
-For an interactive local chat/group preview without Proxmox, build
-`web/dashboard` and run `python3 scripts/preview-mock.py`. Open
-`http://127.0.0.1:8789/dashboard/` and connect with `local-preview-token`.
-The preview seeds Max and Iris, uses the real authenticated gateway, SQLite
-storage and background jobs, and simulates agent responses and artifact files.
-Enter `mock:block` to exercise a permission prompt and terminal controls.
-Container configuration and updates are disabled. All preview data is temporary
-and removed when the process exits normally; no real agent is launched.
+For a disposable native DOM preview without Proxmox, run
+`bash scripts/build-jaspr-dashboard.sh` and `python3 scripts/preview-jaspr.py`.
+Open `http://127.0.0.1:8793/` with `jaspr-preview-token`. The preview uses real
+browser-session handlers and temporary organization storage; operational actions
+are simulated. Use `--production` to inspect packaged `web/public` assets after
+the production build. All preview data is removed when the process exits normally;
+no real agent is launched. Do not enter real provider credentials into this demo.
 
 For an existing CT, copy `web/public`, the complete `web/gateway` directory,
 `install/web-install.sh`, `install/dashboard-update.py`, `install/sdk-install.py`,
@@ -514,7 +519,7 @@ plugins are required for this first implementation.
 
 Local checks: Bash syntax, mocked host command tests (`tests/host.sh`), gateway
 tests (`python3 -m unittest discover -s tests`), Flutter analyzer/use-case tests,
-and release compilation of the Flutter/Jaspr UI.
+and native Jaspr release compilation and Chrome workflow tests.
 An actual Proxmox creation, Debian provisioning, SSH login and interactive Herdr
 session still require testing on a real Proxmox host. No deployment was performed
 from the Windows development workspace.
@@ -629,4 +634,4 @@ Before a merge request, the gateway pins a stash-shaped snapshot under `refs/her
 
 ### Development agent toolchain
 
-For an LXC used for Flutter development, explicitly run `bash install/dev-tools-install.sh` as root from this repository. It installs Flutter 3.44.8 for the `herdr` user, selects the exact stable architecture from the official manifest, verifies SHA-256 before extraction, and adds `flutter` and `dart` under `~/.local/bin`. Existing unrelated launchers are preserved. The SDK, package cache and build outputs add several GiB, so size `var_disk` with headroom for them. Run `scripts/build-web.sh` as `herdr` from the assigned repository/worktree to validate the dashboard and shell. Dashboard-only installations do not need this SDK. The web installer also provides a root-owned `herdr-sdk.path` service: when the Integration card reports a missing toolchain, an administrator can queue the same pinned installation from the dashboard, which only writes a fixed request file. Existing OpenCode processes must be relaunched to pick up saved dashboard-output permission policies; changing a profile does not change a running process.
+For an LXC used for Flutter development, explicitly run `bash install/dev-tools-install.sh` as root from this repository. It installs Flutter 3.44.8 for the `herdr` user, selects the exact stable architecture from the official manifest, verifies SHA-256 before extraction, and adds `flutter` and `dart` under `~/.local/bin`. Existing unrelated launchers are preserved. The SDK, package cache and build outputs add several GiB, so size `var_disk` with headroom for them. Run `scripts/build-web.sh` as `herdr` from the assigned repository/worktree to validate the preserved contracts and build the Jaspr dashboard. Dashboard-only installations do not need this SDK. The web installer also provides a root-owned `herdr-sdk.path` service: when the Integration card reports a missing toolchain, an administrator can queue the same pinned installation from the dashboard, which only writes a fixed request file. Existing OpenCode processes must be relaunched to pick up saved dashboard-output permission policies; changing a profile does not change a running process.

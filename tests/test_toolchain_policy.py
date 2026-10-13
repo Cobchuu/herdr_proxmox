@@ -12,6 +12,19 @@ import toolchain_policy as policy
 
 
 class ToolchainPolicyTests(unittest.TestCase):
+    def test_native_dashboard_dependency_changes_invalidate_build_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('web/dashboard/pubspec.lock', 'web/jaspr_dashboard/pubspec.lock'):
+                lock = root / name
+                lock.parent.mkdir(parents=True)
+                lock.write_text('original dependency resolution')
+            original = policy.resolve(root)
+            self.assertEqual(set(original['lockfiles']), {
+                'web/dashboard/pubspec.lock', 'web/jaspr_dashboard/pubspec.lock'})
+            (root / 'web/jaspr_dashboard/pubspec.lock').write_text('changed dependency resolution')
+            self.assertNotEqual(policy.digest(original), policy.digest(policy.resolve(root)))
+
     def test_bundled_dart_is_probed_against_the_flutter_report(self):
         with tempfile.TemporaryDirectory() as directory:
             flutter, dart = (Path(directory) / name for name in ('flutter', 'dart'))
