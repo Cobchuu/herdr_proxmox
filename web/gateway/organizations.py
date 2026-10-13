@@ -379,7 +379,10 @@ class OrganizationStore:
             with closing(self.contributions.connect()) as db:
                 rows = db.execute('SELECT id,data FROM tasks WHERE id IN (' + ','.join('?' for _ in task_ids) + ')', list(task_ids)).fetchall()
                 tasks = {row[0]: json.loads(row[1]) for row in rows}
+        from discussion_recovery import mismatches
+        launches = self.job_records(launches_only=True)
         for job in discussions:
+            job['project_mismatches'] = mismatches(self, job, launches)
             task = tasks.get(job.get('task_id')) or {}
             queue = task.get('auto_queue') if isinstance(task.get('auto_queue'), dict) else {}
             # `proposals` is preferred when a job carries a recorded summary, but
@@ -685,7 +688,7 @@ class OrganizationStore:
             self.jobs_changed.set()
         return job
 
-    def manage_session(self, body, actor):
+    def manage_session(self, body, actor, allow_busy=False):
         if body.get('mode') in ('archives', 'view_archive'):
             from session_archives import listing, read
             org_id = text(body, 'organization_id', 40)
@@ -710,6 +713,8 @@ class OrganizationStore:
                     results.append(dict(id=job_id, state='skipped', reason=str(error)))
             return {'results': results}
         mode = body.get('mode')
+        if allow_busy and mode != 'close':
+            raise ValueError('Forced stopping is only supported for archive and close.')
         if mode not in ('close', 'restart', 'continue', 'finish', 'resume', 'handover') or body.get('inspected') is not True:
             raise ValueError('Inspect the session and choose close or restart.')
         request_id = body.get('request_id')
@@ -799,13 +804,17 @@ class OrganizationStore:
                         saved = archive(self, run, actor, unavailable='Agent and recorded pane were already absent. Terminal history cannot be recovered from them.')
                         status = 'already_closed'
                 else:
-                    self.close_identity(run, live=live)
-                    output = self.command('agent', 'read', run['alias'], '--source', 'recent-unwrapped', '--lines', '2000', timeout=10)
+                    self.close_identity(run, live=live, ready=not allow_busy)
+                    if allow_busy:
+                        self.update_job(run['id'], forced_stop_requested_at=now(), forced_stop_actor=actor)
+                    output = self.command('agent', 'read', run['alias'], '--source',
+                                          'visible' if allow_busy else 'recent-unwrapped', '--lines',
+                                          '160' if allow_busy else '2000', timeout=10)
                     terminal = output.get('output') if isinstance(output, dict) else None
                     if not isinstance(terminal, str) or not terminal.strip():
                         raise ValueError('Terminal preservation failed or returned empty output; the pane was not closed.')
                     saved = archive(self, run, actor, terminal=terminal[-40000:])
-                    self.close_identity(run)  # Recheck ownership after capture and immediately before closure.
+                    self.close_identity(run, ready=not allow_busy)  # Recheck ownership before closure.
                     self.command('pane', 'close', run['pane_id'], timeout=10)
                 terminal = 'finished' if mode == 'finish' else 'released'
                 run = self.update_job(run['id'], state=terminal, session_closed_at=now(),
@@ -1108,7 +1117,7 @@ class OrganizationStore:
         except OSError:
             return False
 
-    def close_identity(self, run, live=None):
+    def close_identity(self, run, live=None, ready=True):
         """Verify pane ownership for closure, including runtimes without session IDs.
 
         The legacy fallback identifies the managed pane and checkout, not a
@@ -1122,7 +1131,7 @@ class OrganizationStore:
         matches = [item for item in live if item.get('name') == run.get('alias')]
         if len(matches) != 1:
             raise ValueError('Original session is absent or ambiguous; refresh its run before closure.')
-        agent = self.identity(run, agent=matches[0])
+        agent = self.identity(run, ready=ready, agent=matches[0])
         if run.get('agent_session'):
             return agent
         pane = run.get('pane_id')

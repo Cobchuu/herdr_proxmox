@@ -191,7 +191,7 @@ class OrganizationTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            for endpoint in ('resolve_delegation', 'retry_discussion', 'cancel_discussion'):
+            for endpoint in ('resolve_delegation', 'retry_discussion', 'cancel_discussion', 'realign_discussion_session'):
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(f'http://127.0.0.1:{server.server_port}/api/organizations/{endpoint}',
                         headers={'Authorization':'Bearer operator-token','Content-Type':'application/json'}, data=b'{}'))

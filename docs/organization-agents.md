@@ -379,3 +379,21 @@ already-published branch/PR. Disable capture/verification to disable publication
 and stop requiring this barrier. An active inspection chat must still settle
 before another task can use its session. No-change receipts remain terminal
 without creating a pointless commit or PR.
+
+## Fixing stale projects from a discussion
+
+An unsubmitted repository review shows each session project mismatch directly
+in the group post: agent name, saved session project, current configured project
+and group target. Administrators can choose **Archive and relaunch in current
+project** to preserve and close an idle stale session and launch a fresh one from
+its current profile. The group retries inspected preparation when all mismatches
+are resolved. It does not restart in the retained, outdated checkout.
+
+**Force realign session** confirms an explicit stop of that stale session even
+when it is working or blocked. It preserves visible terminal output and checkout
+files before closure and records the operator and stop request. It still refuses
+task-owned sessions, other job reservations, ambiguous identities and failed
+archives. Submitted discussions cannot use either action. Partial recovery stays
+visible and retries reuse the recorded launch request instead of duplicating a
+session. If current profile projects themselves disagree, update group/agent
+settings first; these controls do not silently redirect agents to another project.

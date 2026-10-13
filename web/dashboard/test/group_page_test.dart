@@ -9,6 +9,121 @@ import 'package:herdr_dashboard/group_page.dart';
 import 'package:herdr_dashboard/routes.dart';
 
 void main() {
+  for (final force in [false, true]) {
+    testWidgets(
+      'project mismatch realignment uses explicit confirmation (force=$force)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1400, 1400);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final job = <String, dynamic>{
+          'id': 'meeting',
+          'kind': 'discussion',
+          'group_id': 'group',
+          'organization_id': 'org',
+          'state': 'needs_attention',
+          'created_at': '2026-10-13',
+          'preparation_version': 1,
+          'prompt': 'Review',
+          'error': 'Project mismatch',
+          'group': {'description': 'Review'},
+          'project_mismatches': [
+            {
+              'run_id': 'old-felix',
+              'alias': 'felix-alias',
+              'name': 'Felix',
+              'session_project': '/projects',
+              'configured_project': '/projects/repo',
+              'expected_project': '/projects/repo',
+              'repairable': true,
+            },
+          ],
+        };
+        final data = {
+          'organizations': [
+            {'id': 'org'},
+          ],
+          'profiles': [],
+          'jobs': [job],
+          'groups': [
+            {
+              'id': 'group',
+              'organization_id': 'org',
+              'name': 'Review',
+              'description': 'Review',
+              'members': ['one'],
+            },
+          ],
+        };
+        final posted = <String, Map<String, dynamic>>{};
+        final connection = DashboardBloc(
+          client: MockClient((request) async {
+            if (request.url.path.endsWith('/realign_discussion_session')) {
+              posted['realign'] =
+                  jsonDecode(request.body) as Map<String, dynamic>;
+              job['project_mismatches'] = [];
+              return http.Response(
+                '{"id":"meeting","new_run_id":"new-felix"}',
+                200,
+              );
+            }
+            if (request.url.path.endsWith('/retry_discussion')) {
+              posted['retry'] =
+                  jsonDecode(request.body) as Map<String, dynamic>;
+              job['state'] = 'queued';
+              return http.Response('{"id":"meeting"}', 200);
+            }
+            return http.Response(
+              jsonEncode(
+                request.url.path.contains('/organizations')
+                    ? data
+                    : {'authenticated': true, 'workspaces': [], 'agents': []},
+              ),
+              200,
+            );
+          }),
+        );
+        BlocScope.register<DashboardBloc>(() => connection);
+        final connected = connection.stream.firstWhere(
+          (_) => connection.state.connected,
+        );
+        connection.connect('token');
+        await connected;
+        connection.operator.value = {'role': 'admin'};
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: GroupPage(id: 'group', coordinator: AppCoordinator()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Felix: session project mismatch'), findsOneWidget);
+        final action = find.text(
+          force
+              ? 'Force realign session'
+              : 'Archive and relaunch in current project',
+        );
+        await tester.ensureVisible(action);
+        await tester.tap(action);
+        await tester.pumpAndSettle();
+        expect(posted, isEmpty);
+        await tester.tap(
+          find.text(force ? 'Force stop and realign' : 'Archive and relaunch'),
+        );
+        await tester.pumpAndSettle();
+        expect(posted['realign']?['force'], force);
+        expect(posted['realign']?['run_id'], 'old-felix');
+        expect(posted['realign']?['expected_project'], '/projects/repo');
+        expect(posted['retry']?['inspected'], true);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await connection.disconnect();
+        BlocScope.endAll();
+      },
+    );
+  }
   testWidgets(
     'failed preparation retries only after explicit inspection confirmation',
     (tester) async {
@@ -193,8 +308,11 @@ void main() {
       expect(find.text('Waiting for your decision'), findsOneWidget);
       // The state must be polled, or the block is invisible and cannot be
       // answered from the page that shows it.
-      expect(inspected, greaterThan(0),
-          reason: 'a waiting discussion must still be inspected; saw $paths');
+      expect(
+        inspected,
+        greaterThan(0),
+        reason: 'a waiting discussion must still be inspected; saw $paths',
+      );
       expect(find.textContaining('Product Council: blocked'), findsOneWidget);
       expect(tester.takeException(), isNull);
     } finally {

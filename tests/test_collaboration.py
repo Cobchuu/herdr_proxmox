@@ -347,6 +347,118 @@ class CollaborationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'symlinks'):
                 discussion_directory(self.store, dict(id=meeting))
 
+    def _project_mismatch(self):
+        group = self.group()
+        self.action('group', organization_id=self.org, id=group, name='Planning', description='Scan repository',
+                    members=[self.max, self.iris], review_scope='repository')
+        self.drain()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        stale = dict(run['profile'], project=str(self.projects.parent))
+        self.store.update_job(run['id'], profile=stale)
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        return meeting, self.job(run['id'])
+
+    def test_group_exposes_project_mismatch_and_realigns_to_current_profile(self):
+        from discussion_recovery import realign
+        meeting, run = self._project_mismatch()
+        history = self.store.history(dict(group_id=self.job(meeting)['group_id']))
+        mismatch = next(j for j in history['jobs'] if j['id'] == meeting)['project_mismatches'][0]
+        self.assertEqual(mismatch['name'], 'Max')
+        self.assertEqual(mismatch['session_project'], str(self.projects.parent))
+        self.assertEqual(mismatch['configured_project'], str(self.projects))
+        self.assertTrue(mismatch['repairable'])
+        body = dict(organization_id=self.org, job_id=meeting, run_id=run['id'],
+                    expected_project=str(self.projects), expected_alias=run['alias'], inspected=True, force=False)
+        response = realign(self.store, body, 'admin')
+        self.drain()
+        new = self.job(response['new_run_id'])
+        self.assertEqual(new['profile']['project'], str(self.projects))
+        self.assertNotEqual(new['id'], run['id'])
+        self.assertEqual(self.job(run['id'])['state'], 'released')
+        self.assertTrue(self.job(run['id'])['session_archive_id'])
+        launches = len([a for a, _ in self.calls if a[:2] == ('agent', 'start')])
+        self.assertEqual(realign(self.store, body, 'admin')['new_run_id'], new['id'])
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('agent', 'start')]), launches)
+        with patch('project_git.git', side_effect=['a' * 40, '']):
+            self.action('retry_discussion', organization_id=self.org, job_id=meeting, inspected=True)
+            self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready', self.job(meeting).get('error'))
+
+    def test_force_realign_stops_busy_stale_session_but_normal_action_refuses(self):
+        from discussion_recovery import realign
+        meeting, run = self._project_mismatch()
+        self.agents[run['alias']]['agent_status'] = 'working'
+        body = dict(organization_id=self.org, job_id=meeting, run_id=run['id'],
+                    expected_project=str(self.projects), expected_alias=run['alias'], inspected=True, force=False)
+        with self.assertRaisesRegex(ValueError, 'still working'):
+            realign(self.store, body, 'admin')
+        self.assertEqual(self.job(run['id'])['state'], 'persona_sent')
+        body['force'] = True
+        response = realign(self.store, body, 'admin')
+        self.drain()
+        self.assertEqual(self.job(response['new_run_id'])['profile']['project'], str(self.projects))
+        old = self.job(run['id'])
+        self.assertEqual(old['forced_stop_actor'], 'admin')
+        self.assertTrue(old['forced_stop_requested_at'])
+        self.assertTrue(old['session_archive_id'])
+        self.assertTrue(any(a[:2] == ('agent', 'read') and '--source' in a and a[a.index('--source') + 1] == 'visible' for a, _ in self.calls))
+
+    def test_force_realign_retains_binding_on_archive_failure_and_rejects_changed_identity(self):
+        from discussion_recovery import realign
+        meeting, run = self._project_mismatch()
+        body = dict(organization_id=self.org, job_id=meeting, run_id=run['id'],
+                    expected_project=str(self.projects), expected_alias=run['alias'], inspected=True, force=True)
+        before = len([a for a, _ in self.calls if a[:2] == ('pane', 'close')])
+        with patch('session_archives.archive', side_effect=ValueError('Cannot preserve evidence')):
+            with self.assertRaisesRegex(ValueError, 'preserve evidence'):
+                realign(self.store, body, 'admin')
+        self.assertEqual(self.job(run['id'])['state'], 'persona_sent')
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('pane', 'close')]), before)
+        self.agents[run['alias']]['pane_id'] = 'different-pane'
+        with self.assertRaisesRegex(ValueError, 'binding changed'):
+            realign(self.store, body, 'admin')
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('pane', 'close')]), before)
+        self.assertEqual(self.job(meeting)['session_realignments'][run['id']]['state'], 'failed')
+
+    def test_realign_recovers_lost_launch_response_without_duplicate_new_session(self):
+        from discussion_recovery import realign
+        meeting, run = self._project_mismatch()
+        body = dict(organization_id=self.org, job_id=meeting, run_id=run['id'],
+                    expected_project=str(self.projects), expected_alias=run['alias'], inspected=True, force=False)
+        original = self.store.action
+        def lost(action, fields):
+            result = original(action, fields)
+            if action == 'launch':
+                raise ValueError('Launch response lost')
+            return result
+        with patch.object(self.store, 'action', side_effect=lost):
+            with self.assertRaisesRegex(ValueError, 'response lost'):
+                realign(self.store, body, 'admin')
+        self.drain()
+        history = self.store.history(dict(group_id=self.job(meeting)['group_id']))
+        pending = next(j for j in history['jobs'] if j['id'] == meeting)['project_mismatches'][0]
+        self.assertTrue(pending['recovery_pending'])
+        before = len([a for a, _ in self.calls if a[:2] == ('agent', 'start')])
+        realign(self.store, body, 'admin')
+        self.drain()
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('agent', 'start')]), before)
+
+    def test_realign_rejects_submitted_meetings_changed_targets_and_task_owned_runs(self):
+        from discussion_recovery import realign
+        meeting, run = self._project_mismatch()
+        body = dict(organization_id=self.org, job_id=meeting, run_id=run['id'],
+                    expected_project='/different', expected_alias=run['alias'], inspected=True, force=True)
+        with self.assertRaisesRegex(ValueError, 'selection changed'):
+            realign(self.store, body, 'admin')
+        body['expected_project'] = str(self.projects)
+        self.store.update_job(run['id'], task_id='task-owned')
+        with self.assertRaisesRegex(ValueError, 'selection changed'):
+            realign(self.store, body, 'admin')
+        self.store.update_job(meeting, discussion_submitted_at='already')
+        with self.assertRaisesRegex(ValueError, 'unsubmitted'):
+            realign(self.store, body, 'admin')
+
     def test_waiting_meeting_can_be_cancelled_without_terminal_input(self):
         group = self.group()
         run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')

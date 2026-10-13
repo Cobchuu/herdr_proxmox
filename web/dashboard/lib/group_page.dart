@@ -266,6 +266,59 @@ class _GroupPageState extends State<GroupPage> {
     if (values != null && mounted) await submit('group', values);
   }
 
+  Future<void> realignSession(Map job, Map mismatch, bool force) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          force
+              ? 'Force realign ${mismatch['name']}?'
+              : 'Realign ${mismatch['name']}?',
+        ),
+        content: Text(
+          'Session project: ${mismatch['session_project']}\n'
+          'Current project: ${mismatch['configured_project']}\n\n'
+          '${force ? 'Stop this stale session even if it is working or blocked, after preserving its visible terminal output.' : 'Archive and close this stale session only when it is idle.'} '
+          'Launch a fresh session from the current profile. Checkout files are preserved. '
+          'Other jobs and ambiguous session identities still prevent closure. '
+          'When all project mismatches are resolved, retry this unsubmitted discussion.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(
+              force ? 'Force stop and realign' : 'Archive and relaunch',
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await submit('realign_discussion_session', {
+      'job_id': job['id'],
+      'run_id': mismatch['run_id'],
+      'expected_project': mismatch['configured_project'],
+      'expected_alias': mismatch['alias'],
+      'inspected': true,
+      'force': force,
+    });
+    final current = jobs.where((j) => j['id'] == job['id']).firstOrNull;
+    if (mounted &&
+        error == null &&
+        pending == null &&
+        current != null &&
+        (current['project_mismatches'] as List? ?? []).isEmpty) {
+      await submit('retry_discussion', {
+        'job_id': job['id'],
+        'inspected': true,
+      });
+    }
+  }
+
   void viewArtifact(Map<String, dynamic> job) => setState(() {
     tab = 'artifacts';
     artifact = job['id'] as String;
@@ -802,6 +855,67 @@ class _GroupPageState extends State<GroupPage> {
                           Text(job['progress'] as String),
                         if ((job['error'] as String? ?? '').isNotEmpty)
                           Text(job['error'] as String),
+                        for (final mismatch
+                            in job['project_mismatches'] as List? ?? [])
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '${mismatch['name']}: session project mismatch',
+                                  ),
+                                  if (mismatch['recovery_pending'] == true)
+                                    Text(
+                                      'Archived session awaits relaunch: ${mismatch['recovery_error'] ?? ''}',
+                                    ),
+                                  SelectableText(
+                                    'Session: ${mismatch['session_project']}\nConfigured: ${mismatch['configured_project']}\nGroup target: ${mismatch['expected_project']}',
+                                  ),
+                                  if (mismatch['repairable'] != true)
+                                    const Text(
+                                      'Update the agent/group project settings first. Task-owned or starting sessions require inspection.',
+                                    ),
+                                  if (connection.operator.value['role'] ==
+                                          'admin' &&
+                                      mismatch['repairable'] == true &&
+                                      [
+                                        'needs_attention',
+                                        'uncertain',
+                                      ].contains(job['state']))
+                                    Wrap(
+                                      children: [
+                                        TextButton(
+                                          onPressed: busy
+                                              ? null
+                                              : () => realignSession(
+                                                  job,
+                                                  mismatch,
+                                                  false,
+                                                ),
+                                          child: const Text(
+                                            'Archive and relaunch in current project',
+                                          ),
+                                        ),
+                                        TextButton(
+                                          onPressed: busy
+                                              ? null
+                                              : () => realignSession(
+                                                  job,
+                                                  mismatch,
+                                                  true,
+                                                ),
+                                          child: const Text(
+                                            'Force realign session',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
                         if (connection.operator.value['role'] == 'admin' &&
                             job['preparation_version'] == 1 &&
                             job['discussion_submitted_at'] == null &&
