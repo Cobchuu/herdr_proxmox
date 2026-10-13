@@ -9,7 +9,7 @@ import uuid
 import unittest
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from contextlib import closing
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'web/gateway'))
 import test_organizations as fixtures
@@ -1136,6 +1136,133 @@ class CollaborationTests(unittest.TestCase):
             self.assertIn('Discussion directory:', delivered)
         launches = [a for a, _ in self.calls if a[:2] == ('agent', 'start') and a[2] == run['alias']]
         self.assertEqual(len(launches), 1)
+
+    def test_repository_review_default_freezes_scope_but_custom_messages_override_it(self):
+        group_id = self.action('group', organization_id=self.org, name='Refactoring',
+                               description='Scan the whole repository; inventory coverage.',
+                               members=[self.max, self.iris], review_scope='repository')
+        self.drain()
+        baseline = 'a' * 40
+        with patch('project_git.git', side_effect=[baseline + '\n', ' M tracked.py\n']) as git:
+            job_id = self.action('discuss', organization_id=self.org, group_id=group_id)
+            self.drain()
+        job = self.job(job_id)
+        self.assertEqual(job['state'], 'artifact_ready')
+        self.assertEqual(job['discussion_scope'], 'repository')
+        self.assertEqual(job['review_context']['commit'], baseline)
+        self.assertTrue(job['review_context']['dirty'])
+        self.assertEqual([call.args[1:] for call in git.call_args_list],
+                         [('rev-parse', '--verify', 'HEAD^{commit}'),
+                          ('status', '--porcelain=v1', '--untracked-files=normal')])
+        delivered = next(a[3] for a, _ in reversed(self.calls)
+                         if a[:3] == ('agent', 'prompt', job['group_run']['alias']))
+        self.assertIn('Repository-wide review baseline:', delivered)
+        self.assertIn(baseline, delivered)
+        self.assertIn('inventory all tracked top-level areas', delivered)
+        self.assertIn('not a claim every line was audited', delivered)
+        self.assertIn('Pass this exact baseline to every member', delivered)
+        # A supplied task/question is not silently widened by the group default.
+        with patch('project_git.git') as git:
+            custom = self.action('discuss', organization_id=self.org, group_id=group_id,
+                                 prompt='Review only the session ownership functions at the supplied SHA.')
+            self.drain()
+        self.assertEqual(self.job(custom)['discussion_scope'], 'topic')
+        self.assertNotIn('review_context', self.job(custom))
+        git.assert_not_called()
+
+    def test_repository_review_scope_validates_and_survives_group_edits(self):
+        with self.assertRaisesRegex(ValueError, 'review scope'):
+            self.action('group', organization_id=self.org, name='Bad', description='Review',
+                        members=[self.max, self.iris], review_scope='everything')
+        group_id = self.action('group', organization_id=self.org, name='Review', description='Survey',
+                               members=[self.max, self.iris], review_scope='repository')
+        self.drain()
+        self.action('group', id=group_id, organization_id=self.org, name='Review',
+                    description='Edited survey', members=[self.max, self.iris])
+        self.drain()
+        group = next(g for g in self.store.snapshot()['groups'] if g['id'] == group_id)
+        self.assertEqual(group['review_scope'], 'repository')
+        other = self.projects / 'other'
+        other.mkdir()
+        outsider = self.hire(self.org, 'Other', project=str(other))
+        with self.assertRaisesRegex(ValueError, 'same configured project'):
+            self.action('group', organization_id=self.org, name='Mixed', description='Survey',
+                        members=[self.max, outsider], review_scope='repository')
+
+    def test_repository_review_reuses_baseline_and_never_broadens_task_reviews(self):
+        from collaboration import repository_review_context
+        existing = dict(repository=str(self.projects), commit='a' * 40, dirty=False)
+        with patch('project_git.git') as git:
+            self.assertEqual(repository_review_context(self.store, dict(
+                id='review', discussion_scope='repository', review_context=existing)), existing)
+            self.assertEqual(repository_review_context(self.store, dict(
+                id='review', discussion_scope='repository', task_id='task')), {})
+            git.assert_not_called()
+
+    def test_repository_review_reads_current_git_head_without_changing_working_files(self):
+        import project_git
+        from collaboration import repository_review_context
+        project_git.git(self.projects, 'init')
+        source = self.projects / 'tracked.txt'
+        source.write_text('committed baseline', encoding='utf-8')
+        project_git.git(self.projects, 'add', 'tracked.txt')
+        project_git.git(self.projects, 'commit', '-m', 'baseline')
+        head = project_git.git(self.projects, 'rev-parse', 'HEAD').strip()
+        source.write_text('uncommitted changes', encoding='utf-8')
+        store = types.SimpleNamespace(projects=self.projects, update_job=Mock())
+        run = dict(profile=dict(project=str(self.projects)), worktree_path=str(self.projects / 'old-worktree'))
+        job = dict(id='review', discussion_scope='repository', group_run=run, runs=[run])
+        context = repository_review_context(store, job)
+        self.assertEqual(context['commit'], head)
+        self.assertTrue(context['dirty'])
+        self.assertEqual(source.read_text(encoding='utf-8'), 'uncommitted changes')
+        self.assertEqual(project_git.git(self.projects, 'rev-parse', 'HEAD').strip(), head)
+        store.update_job.assert_called_once_with('review', review_context=context)
+
+    def test_repository_review_detects_project_changes_after_group_configuration(self):
+        from collaboration import repository_review_context
+        job = dict(id='review', discussion_scope='repository',
+                   group_run=dict(profile=dict(project=str(self.projects))),
+                   runs=[dict(profile=dict(project=str(self.projects / 'other')))])
+        with patch('project_git.git') as git:
+            with self.assertRaisesRegex(ValueError, 'participants changed projects'):
+                repository_review_context(self.store, job)
+            git.assert_not_called()
+
+    def test_repository_review_missing_git_is_visible_before_prompt_delivery(self):
+        group_id = self.action('group', organization_id=self.org, name='Review', description='Survey',
+                               members=[self.max, self.iris], review_scope='repository')
+        self.drain()
+        before = len(self.calls)
+        with patch('project_git.git', side_effect=ValueError('Git information is unavailable for this checkout.')):
+            job_id = self.action('discuss', organization_id=self.org, group_id=group_id)
+            self.drain()
+        job = self.job(job_id)
+        self.assertEqual(job['state'], 'needs_attention')
+        self.assertIn('Git information is unavailable', job['error'])
+        self.assertFalse(any(a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]
+                             for a, _ in self.calls[before:]))
+
+    def test_delivery_feedback_is_dispatched_to_the_original_session_with_a_verified_reply(self):
+        import task_delivery
+        from unittest.mock import Mock
+        run = next(j for j in self.store.snapshot()['jobs'] if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        task = dict(id=uuid.uuid4().hex, organization_id=self.org, profile_id=self.max,
+                    run_id=run['id'], head_sha='a' * 40, github_repository='owner/repo', builds={})
+        flow = dict(sha=task['head_sha'], state='notifying_agent', result_kind='success')
+        task['delivery_workflow'] = flow
+        service = types.SimpleNamespace(store=self.store, save=Mock())
+        task_delivery.notify_agent(service, task, flow)
+        self.drain()
+        reply = self.job(flow['chat_id'])
+        self.assertEqual(reply['state'], 'answered')
+        self.assertEqual(reply['runs'][0]['id'], run['id'])
+        self.assertEqual(reply['task_id'], task['id'])
+        self.assertTrue(reply['delivery_inspection'])
+        self.assertEqual(reply['delivery']['stage'], 'reply_verified')
+        with self.assertRaisesRegex(ValueError, 'Original task conversation changed'):
+            self.action('chat', organization_id=self.org, profile_id=self.max, prompt='Inspect delivery',
+                        expected_run_id='different-run')
 
     def test_group_autonomy_settings_round_trip_and_validate(self):
         group_id = self.action('group', organization_id=self.org, name='Planning', description='Discuss architecture',

@@ -57,6 +57,36 @@ String taskNextStep(Map task, {String executor = 'service'}) {
   }
   if (task['automation_error'] != null)
     return 'Automation needs attention: ${task['automation_error']}';
+  final delivery = task['delivery_workflow'] as Map?;
+  if ((task['await_verification'] == true || task['auto_publish'] == true) &&
+      delivery != null &&
+      !['merged', 'closed', 'completed'].contains(task['state'])) {
+    switch (delivery['state']) {
+      case 'attention':
+        return 'Delivery needs attention: ${delivery['error'] ?? 'Inspect the results.'}';
+      case 'waiting_verification':
+        return 'Waiting for durable verification; the task agent remains reserved.';
+      case 'accepting_repair':
+        return 'Capturing the agent repair for fresh durable verification.';
+      case 'publishing':
+        return 'Publishing the validated branch; the task agent remains reserved.';
+      case 'opening_pr':
+        return 'Opening the draft PR; the branch has been published.';
+      case 'waiting_remote':
+        return 'Waiting for GitHub mergeability and CI checks; the task agent remains reserved.';
+      case 'notifying_agent':
+      case 'waiting_agent':
+        if (delivery['repair_allowed'] == true) {
+          return 'Waiting for the agent to repair failed checks or report an operator issue.';
+        }
+        return 'Waiting for the task agent to inspect verification and publication results.';
+      case 'complete':
+        if (delivery['sha'] == task['head_sha'])
+          return task['auto_publish'] == true
+              ? 'Validated draft PR checked by the task agent; ready for human review.'
+              : 'Durable verification results checked by the task agent.';
+    }
+  }
   final acceptance = task['acceptance'] as Map?;
   final acceptanceState = '${acceptance?['state'] ?? ''}';
   if ([

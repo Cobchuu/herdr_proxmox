@@ -177,6 +177,46 @@ class GitHubTests(unittest.TestCase):
                     publication={'owner/repo': dict(mode='fork', publishing_repository='stranger/repo')}))
         self.assertFalse(self.path.exists())
 
+    def test_publication_preflight_refreshes_direct_identity_and_account_access(self):
+        token = 'x' * 40
+        self.path.write_text(json.dumps(dict(token=token, login='owner', repositories=['owner/repo'])))
+        if os.name != 'nt':
+            self.path.chmod(0o600)
+        repo = dict(full_name='owner/repo', permissions=dict(push=True))
+        with patch.object(self.api, 'request', side_effect=[dict(login='owner'), repo]) as request:
+            result = self.api.publication_preflight('owner/repo', 'owner/repo')
+        self.assertEqual(result['token_write'], 'not_exercised')
+        self.assertNotIn(token, json.dumps(result))
+        self.assertTrue(all(call.kwargs.get('token') == token for call in request.call_args_list))
+        with patch.object(self.api, 'request', side_effect=[dict(login='owner'), dict(repo, permissions=dict(push=False))]):
+            with self.assertRaisesRegex(ValueError, 'no longer has push'):
+                self.api.publication_preflight('owner/repo', 'owner/repo')
+        with patch.object(self.api, 'request', return_value=dict(login='changed')):
+            with self.assertRaisesRegex(ValueError, 'account changed'):
+                self.api.publication_preflight('owner/repo', 'owner/repo')
+        with patch.object(self.api, 'request', side_effect=GitHubError(401)):
+            with self.assertRaisesRegex(ValueError, 'invalid or expired'):
+                self.api.publication_preflight('owner/repo', 'owner/repo')
+
+    def test_publication_preflight_checks_fork_network_and_upstream_pr_authentication(self):
+        config = dict(token='x' * 40, login='contributor', repositories=['owner/repo'],
+            publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')})
+        self.path.write_text(json.dumps(config))
+        if os.name != 'nt':
+            self.path.chmod(0o600)
+        target = dict(full_name='owner/repo', permissions=dict(push=False))
+        fork = dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'), permissions=dict(push=True))
+        with patch.object(self.api, 'request', side_effect=[dict(login='contributor'), target, fork]):
+            self.assertEqual(self.api.publication_preflight('owner/repo', 'contributor/repo')['mode'], 'fork')
+        with patch.object(self.api, 'request', side_effect=[dict(login='contributor'), target, dict(fork, source=dict(full_name='wrong/repo'))]):
+            with self.assertRaisesRegex(ValueError, 'no longer a fork'):
+                self.api.publication_preflight('owner/repo', 'contributor/repo')
+        config['token'] = 'github_pat_' + 'x' * 50
+        self.path.write_text(json.dumps(config))
+        with patch.object(self.api, 'request', side_effect=[dict(login='contributor'), target, fork]):
+            with self.assertRaisesRegex(ValueError, 'upstream fork PR'):
+                self.api.publication_preflight('owner/repo', 'contributor/repo')
+
     def test_pull_discovery_uses_the_fork_owner(self):
         calls = []
 
@@ -255,6 +295,7 @@ class ContributionTests(unittest.TestCase):
         self.git('remote', 'add', 'origin', 'https://github.com/owner/repo.git')
         self.git('update-ref', 'refs/remotes/origin/main', self.base)
         self.api = MagicMock()
+        self.api.publication_preflight.return_value = dict(login='owner', account_write='verified', token_write='not_exercised')
         self.api.path = self.root / 'github.json'
         self.api.snapshot.return_value = dict(configured=True)
         self.api.publication_settings.return_value = {}
@@ -282,6 +323,371 @@ class ContributionTests(unittest.TestCase):
         self.service.save(self.task, 'launch', 'admin')
         self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent')]
         return self.service.action('candidate', dict(request_id='candidate-1', task_id=self.task['id']), 'admin', 'admin')
+
+    def _delivery_task(self, publish=True, build_state='complete', verified=True):
+        task = self.candidate()
+        run = self.store.snapshot.return_value['jobs'][0]
+        run.update(profile_id='worker', kind='launch', task_id=task['id'], completion_token='handoff-token', alias='worker-alias')
+        self._receipt(task)
+        self.store.identity.return_value = dict(agent_status='idle')
+        self.store.action.return_value = dict(id='feedback')
+        self.service.validation = MagicMock()
+        self.service.validation.snapshot.return_value = dict(executor='service')
+        task = self.service.action('policy', dict(request_id='delivery-policy', task_id=task['id'],
+                                    auto_validate=True, auto_publish=publish), 'admin', 'admin')
+        task['builds'] = {task['head_sha']: dict(target=task['head_sha'], state=build_state,
+                                                required_checks_verified=verified, checks=[dict(id='tests', status='passed')])}
+        self.service.save(task, 'build_result', 'tests')
+        pull = self.pull_data(task, mergeable=True)
+        self.api.find_pull.return_value = []
+        def response(path, method='GET', body=None):
+            if path.endswith('/pulls') and method == 'POST':
+                return pull
+            if '/pulls/' in path:
+                return pull
+            return dict(check_runs=[], statuses=[])
+        self.api.request.side_effect = response
+        return task, run, pull
+
+    def _delivery_reply(self, task, run, **changes):
+        result = dict(sha=task['head_sha'], outcome='reviewed', summary='Inspected the exact check results and PR metadata.')
+        result.update(changes)
+        self.store.snapshot.return_value['jobs'].append(dict(id='feedback', kind='chat', state='answered',
+            profile_id='worker', runs=[run], result=json.dumps(result), delivery=dict(stage='reply_verified')))
+
+    def test_delivery_automatically_publishes_exact_sha_then_waits_for_agent_inspection(self):
+        import task_delivery
+        task, run, pull = self._delivery_task()
+        remote = [None]
+        def pushed(*args):
+            remote[0] = task['head_sha']
+        with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', side_effect=lambda t: remote[0]), \
+                patch('contributions.push', side_effect=pushed) as push:
+            self.assertFalse(self.service.execution_finished(task, run)[0])
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['state'], 'pr_open')
+            self.assertEqual(waiting['delivery_workflow']['state'], 'waiting_agent')
+            self.assertEqual(waiting['publish']['head_sha'], task['head_sha'])
+            self.assertEqual(waiting['pull']['head_sha'], task['head_sha'])
+            self.assertFalse(self.service.execution_finished(waiting, run)[0])
+            request = self.store.action.call_args.args[1]
+            self.assertEqual(len(self.store.action.call_args.args), 2)
+            self.assertEqual(request['expected_run_id'], run['id'])
+            self.assertIn('read-only inspection', request['prompt'])
+            self.assertLessEqual(len(request['prompt']), 8000)
+            self._delivery_reply(task, run)
+            task_delivery.advance(self.service)
+            done = self.service.get(task['id'])
+            self.assertEqual(done['delivery_workflow']['state'], 'complete')
+            self.assertTrue(self.service.execution_finished(done, run)[0])
+            task_delivery.advance(self.service)
+            push.assert_called_once()
+            self.store.action.assert_called_once()
+            posts = [c for c in self.api.request.call_args_list if len(c.args) > 1 and c.args[1] == 'POST']
+            self.assertEqual(len(posts), 1)
+            self.assertTrue(posts[0].args[2]['draft'])
+
+    def test_delivery_verification_only_waits_for_feedback_without_github_writes(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False)
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'waiting_agent')
+            self._delivery_reply(task, run)
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'complete')
+            push.assert_not_called()
+            self.api.request.assert_not_called()
+
+    def test_delivery_failed_or_stale_build_never_publishes(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(build_state='failed', verified=False)
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['result_kind'], 'validation_failed')
+            self._delivery_reply(task, run, outcome='needs_attention', summary='Required tests failed.')
+            task_delivery.advance(self.service)
+            blocked = self.service.get(task['id'])
+            self.assertEqual(blocked['delivery_workflow']['state'], 'attention')
+            self.assertFalse(self.service.execution_finished(blocked, run)[0])
+            push.assert_not_called()
+        self.store.action.reset_mock()
+        blocked['delivery_workflow'] = dict(sha=task['head_sha'], state='waiting_verification')
+        blocked['builds'][task['head_sha']].update(state='complete', required_checks_verified=True, target=self.base)
+        self.service.save(blocked, 'stale_build', 'tests')
+        task_delivery.advance(self.service)
+        self.store.action.assert_not_called()
+
+    def test_delivery_waits_for_remote_ci_and_checks_again_after_agent_reply(self):
+        import task_delivery
+        task, run, pull = self._delivery_task()
+        checks = [dict(name='CI', status='in_progress', conclusion=None)]
+        original = self.api.request.side_effect
+        self.api.request.side_effect = lambda path, *args: dict(check_runs=checks) if path.endswith('/check-runs') else original(path, *args)
+        with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', return_value=task['head_sha']), \
+                patch('task_delivery.time.time', return_value=100):
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'waiting_remote')
+            self.store.action.assert_not_called()
+            self.api.find_pull.return_value = [pull]
+            checks[0].update(status='completed', conclusion='success')
+            with patch('task_delivery.time.time', return_value=131):
+                task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'waiting_agent')
+            self._delivery_reply(task, run)
+            checks[0]['conclusion'] = 'failure'
+            with patch('task_delivery.time.time', return_value=132):
+                task_delivery.advance(self.service)
+            failure = self.service.get(task['id'])['delivery_workflow']
+            self.assertEqual(failure['state'], 'waiting_agent')
+            self.assertEqual(failure['result_kind'], 'delivery_failed')
+            self.assertIn('CI failed', self.store.action.call_args.args[1]['prompt'])
+
+    def test_delivery_partial_publication_failure_is_reported_to_worker_and_retry_reuses_branch(self):
+        import task_delivery
+        task, run, pull = self._delivery_task()
+        original = self.api.request.side_effect
+        def fail(path, method='GET', body=None):
+            if path.endswith('/pulls') and method == 'POST':
+                raise GitHubError(403)
+            return original(path, method, body)
+        self.api.request.side_effect = fail
+        remote = [None]
+        with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', side_effect=lambda t: remote[0]), \
+                patch('contributions.push', side_effect=lambda *args: remote.__setitem__(0, task['head_sha'])) as push:
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['publish']['head_sha'], task['head_sha'])
+            self.assertEqual(waiting['delivery_workflow']['state'], 'waiting_agent')
+            self.assertIn('branch is already published', waiting['delivery_workflow']['error'])
+            self._delivery_reply(task, run, outcome='needs_attention', summary='PR creation was rejected after branch publication.')
+            task_delivery.advance(self.service)
+            self.service.action('policy', dict(request_id='delivery-retry', task_id=task['id'],
+                auto_validate=True, auto_publish=True, retry_delivery=True), 'admin', 'admin')
+            self.api.request.side_effect = original
+            self.store.action.return_value = dict(id='feedback-retry')
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['chat_id'], 'feedback-retry')
+            push.assert_called_once()
+
+    def test_delivery_rejects_dirty_candidate_and_wrong_agent_acknowledgement(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False)
+        with patch('collaboration.current_run'):
+            task_delivery.advance(self.service)
+            self._delivery_reply(task, run, sha=self.base)
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'attention')
+            self.assertFalse(task_delivery.pending(dict(task, await_verification=False, auto_publish=False)))
+        waiting = self.service.get(task['id'])
+        waiting['delivery_workflow'] = dict(sha=task['head_sha'], state='waiting_verification')
+        self.service.save(waiting, 'reset_for_dirty_test', 'tests')
+        (Path(task['worktree']) / 'untracked').write_text('keep', encoding='utf-8')
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+            self.assertNotEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'complete')
+            push.assert_not_called()
+
+    def test_delivery_recovers_lost_feedback_response_with_same_request_and_no_second_push(self):
+        import task_delivery
+        task, run, pull = self._delivery_task()
+        self.store.action.side_effect = RuntimeError('interrupted after dispatch')
+        with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', return_value=task['head_sha']), \
+                patch('contributions.push') as push:
+            with self.assertRaisesRegex(RuntimeError, 'interrupted'):
+                task_delivery.advance(self.service)
+            first = self.store.action.call_args.args[1]
+            saved = self.service.get(task['id'])
+            self.assertEqual(saved['delivery_workflow']['state'], 'notifying_agent')
+            self.api.find_pull.return_value = [pull]
+            self.store.action.side_effect = None
+            task_delivery.advance(self.service)
+            second = self.store.action.call_args.args[1]
+            self.assertEqual(first, second)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'waiting_agent')
+            push.assert_not_called()
+            posts = [c for c in self.api.request.call_args_list if len(c.args) > 1 and c.args[1] == 'POST']
+            self.assertEqual(len(posts), 1)
+
+    def test_delivery_authorization_destination_change_and_late_build_failure_block_completion(self):
+        import task_delivery
+        task, run, _ = self._delivery_task()
+        task['publishing_repository'] = 'other/repo'
+        self.service.save(task, 'destination_changed', 'tests')
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['result_kind'], 'delivery_failed')
+            push.assert_not_called()
+        # A verification-only inspection cannot release after evidence is revoked.
+        task = self.service.get(task['id'])
+        task.update(auto_publish=False, delivery_workflow=dict(sha=task['head_sha'], state='waiting_verification'))
+        self.service.save(task, 'verification_only', 'tests')
+        with patch('collaboration.current_run'):
+            task_delivery.advance(self.service)
+            self._delivery_reply(task, run)
+            latest = self.service.get(task['id'])
+            latest['builds'][task['head_sha']]['required_checks_verified'] = False
+            self.service.save(latest, 'revoked', 'tests')
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['result_kind'], 'delivery_failed')
+
+    def test_delivery_can_be_stopped_after_terminal_state_and_reenabled_with_new_inspection(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False)
+        task.update(state='closed', delivery_workflow=dict(sha=task['head_sha'], state='waiting_agent', attempt=0))
+        self.service.save(task, 'closed', 'tests')
+        task_delivery.advance(self.service)
+        self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'attention')
+        with patch('contributions.remote_info', side_effect=ValueError('Repository unavailable')):
+            stopped = self.service.action('policy', dict(request_id='stop-delivery', task_id=task['id'],
+                auto_validate=False, auto_publish=False), 'admin', 'admin')
+        self.assertEqual(stopped['delivery_workflow']['state'], 'cancelled')
+        self.assertFalse(task_delivery.pending(stopped))
+        with self.assertRaisesRegex(ValueError, 'terminal task'):
+            self.service.action('policy', dict(request_id='enable-terminal', task_id=task['id'],
+                auto_validate=True, auto_publish=False), 'admin', 'admin')
+        stopped['state'] = 'review_ready'
+        self.service.save(stopped, 'reopened_for_test', 'tests')
+        enabled = self.service.action('policy', dict(request_id='enable-again', task_id=task['id'],
+            auto_validate=True, auto_publish=False), 'admin', 'admin')
+        self.assertEqual(enabled['delivery_workflow']['attempt'], 1)
+        self.assertNotIn('chat_id', enabled['delivery_workflow'])
+
+    def test_delivery_policy_cannot_claim_an_archived_session_will_inspect_results(self):
+        task, run, _ = self._delivery_task(publish=False)
+        run['state'] = 'finished'
+        with self.assertRaisesRegex(ValueError, 'Restore the original task session'):
+            self.service.action('policy', dict(request_id='enable-archived', task_id=task['id'],
+                auto_validate=True, auto_publish=True), 'admin', 'admin')
+
+    def test_delivery_failed_checks_can_repair_then_require_fresh_durable_evidence(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False, build_state='failed', verified=False)
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+            sent = self.store.action.call_args.args[1]['prompt']
+            self.assertIn('repair only this task', sent)
+            tree = Path(task['worktree'])
+            (tree / 'file').write_text('fixed implementation\n')
+            self.git('add', 'file', path=tree)
+            self.git('commit', '-m', 'repair failed tests', path=tree)
+            candidate = self.git('rev-parse', 'HEAD', path=tree).strip()
+            self._receipt(task, commit=candidate)
+            # Capture must await the authenticated repair reply.
+            self.service.advance_automatic()
+            self.assertEqual(self.service.get(task['id'])['head_sha'], task['head_sha'])
+            self._delivery_reply(task, run, outcome='repaired', candidate=candidate)
+            self.service.validation.submit.return_value = dict(id='fresh-build', state='queued')
+            task_delivery.advance(self.service)
+            repaired = self.service.get(task['id'])
+            self.assertEqual(repaired['head_sha'], candidate)
+            self.assertEqual(repaired['delivery_repair_count'], 1)
+            self.assertEqual(repaired['delivery_workflow']['state'], 'waiting_verification')
+            self.assertEqual(repaired['builds'][candidate]['state'], 'queued')
+            self.assertTrue(task_delivery.pending(repaired))
+            push.assert_not_called()
+            # Exhaustion must ask for an operator, not start an unbounded loop.
+            repaired['delivery_repair_count'] = 2
+            repaired['builds'][candidate].update(state='failed', required_checks_verified=False)
+            self.service.save(repaired, 'failed_again', 'tests')
+            task_delivery.advance(self.service)
+            self.assertIn('read-only inspection', self.store.action.call_args.args[1]['prompt'])
+
+    def test_delivery_repair_recovers_interruption_without_spending_budget_twice(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False, build_state='failed', verified=False)
+        with patch('collaboration.current_run'):
+            task_delivery.advance(self.service)
+            tree = Path(task['worktree'])
+            (tree / 'file').write_text('fixed implementation\n')
+            self.git('add', 'file', path=tree)
+            self.git('commit', '-m', 'fix checks', path=tree)
+            candidate = self.git('rev-parse', 'HEAD', path=tree).strip()
+            self._receipt(task, commit=candidate)
+            self._delivery_reply(task, run, outcome='repaired', candidate=candidate)
+            original = self.service.perform
+            def interrupted(action, *args, **kwargs):
+                if action == 'candidate':
+                    raise RuntimeError('restart during capture')
+                return original(action, *args, **kwargs)
+            with patch.object(self.service, 'perform', side_effect=interrupted):
+                with self.assertRaisesRegex(RuntimeError, 'restart'):
+                    task_delivery.advance(self.service)
+            persisted = self.service.get(task['id'])
+            self.assertEqual(persisted['delivery_workflow']['state'], 'accepting_repair')
+            self.assertEqual(persisted['delivery_repair_count'], 1)
+            self.service.validation.submit.return_value = dict(id='new-build', state='queued')
+            task_delivery.advance(self.service)
+            persisted = self.service.get(task['id'])
+            self.assertEqual(persisted['head_sha'], candidate)
+            self.assertEqual(persisted['delivery_repair_count'], 1)
+            self.assertEqual(persisted['builds'][candidate]['state'], 'queued')
+
+    def test_delivery_enable_rejects_invalid_live_publication_preflight_without_saving_policy(self):
+        task, _, _ = self._delivery_task(publish=False)
+        self.api.publication_preflight.side_effect = ValueError('Upstream authentication is incompatible')
+        with self.assertRaisesRegex(ValueError, 'authentication is incompatible'):
+            self.service.action('policy', dict(task_id=task['id'], request_id='deny-live-preflight',
+                auto_validate=True, auto_publish=True), 'admin', 'admin')
+        saved = self.service.get(task['id'])
+        self.assertFalse(saved['auto_publish'])
+        self.assertNotIn('publication_authorization', saved)
+
+    def test_delivery_cannot_repair_an_infrastructure_or_publication_failure(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False, build_state='error', verified=False)
+        with patch('collaboration.current_run'):
+            task_delivery.advance(self.service)
+            self.assertIn('read-only inspection', self.store.action.call_args.args[1]['prompt'])
+            self._delivery_reply(task, run, outcome='repaired', candidate=self.base)
+            task_delivery.advance(self.service)
+            self.assertEqual(self.service.get(task['id'])['delivery_workflow']['state'], 'attention')
+            self.service.validation.submit.assert_not_called()
+
+    def test_delivery_failure_notification_retries_when_original_session_returns(self):
+        import task_delivery
+        task, _, _ = self._delivery_task()
+        self.api.publication_preflight.side_effect = ValueError('Credentials expired')
+        with patch('collaboration.current_run', side_effect=[None, ValueError('Session unavailable'), None]), patch('task_delivery.time.time', return_value=100):
+            task_delivery.advance(self.service)
+            flow = self.service.get(task['id'])['delivery_workflow']
+            self.assertTrue(flow['notification_pending'])
+            self.assertIn('Session unavailable', flow['notification_error'])
+            self.api.publication_preflight.side_effect = None
+            with patch('task_delivery.time.time', return_value=131):
+                task_delivery.advance(self.service)
+            flow = self.service.get(task['id'])['delivery_workflow']
+            self.assertEqual(flow['state'], 'waiting_agent')
+            self.assertNotIn('notification_pending', flow)
+            self.assertIn('Credentials expired', self.store.action.call_args.args[1]['prompt'])
+
+    def test_delivery_preflight_failure_is_sent_to_waiting_worker_without_any_push(self):
+        import task_delivery
+        task, run, _ = self._delivery_task()
+        self.api.publication_preflight.side_effect = ValueError('GitHub credentials expired.')
+        with patch('collaboration.current_run'), patch('contributions.push') as push:
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['delivery_workflow']['state'], 'waiting_agent')
+            self.assertEqual(waiting['delivery_workflow']['failure_stage'], 'credentials')
+            self.assertIn('GitHub credentials expired.', self.store.action.call_args.args[1]['prompt'])
+            self.assertIn('do not retry GitHub yourself', self.store.action.call_args.args[1]['prompt'])
+            push.assert_not_called()
+
+    def test_delivery_policy_requires_service_credentials_and_explicit_admin_authorization(self):
+        self.service.validation = MagicMock()
+        self.service.validation.snapshot.return_value = dict(executor='service')
+        body = dict(request_id='auto-delivery', task_id=self.task['id'], auto_validate=True, auto_publish=True)
+        with self.assertRaisesRegex(ValueError, 'administrator'):
+            self.service.action('policy', body, 'operator', 'operator')
+        self.api.snapshot.return_value = dict(configured=False)
+        with self.assertRaisesRegex(ValueError, 'Configure GitHub'):
+            self.service.action('policy', body, 'admin', 'admin')
+        self.api.snapshot.return_value = dict(configured=True)
+        body.update(request_id='disable-verify', auto_validate=False)
+        with self.assertRaisesRegex(ValueError, 'requires automatic verification'):
+            self.service.action('policy', body, 'admin', 'admin')
 
     def test_automatic_receipt_capture_and_build_are_exact_and_deduplicated(self):
         task = self.candidate()

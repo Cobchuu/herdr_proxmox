@@ -28,6 +28,7 @@ from repository_lock import repository_lock
 from herdr_errors import HerdrError, format_handover, parse_handover
 from session_ownership import reserves as session_reserves
 import pr_repairs
+import task_delivery
 MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
@@ -393,6 +394,7 @@ class Contributions:
                     self.knowledge.sync_jobs()
                     task_ids = {key for topic, key, _ in batch if topic == 'task'} if not safety and all(topic == 'task' for topic, _, _ in batch) else None
                     self.advance_automatic(task_ids)
+                    task_delivery.advance(self, task_ids)
                     pr_repairs.advance(self, task_ids)
                     self.store.advance_discussions()
                     self.dispatch_assignments()
@@ -488,6 +490,9 @@ class Contributions:
             try:
                 with self.operation('task:' + listed['id'], timeout=0):
                     task = self.get(listed['id'])
+                    if (task_delivery.enabled(task) and (task.get('delivery_workflow') or {}).get('state')
+                            in ('notifying_agent', 'waiting_agent', 'accepting_repair', 'attention')):
+                        continue  # Delivery owns any repair commit until the verified chat reply arrives.
                     run = next((j for j in runs if j['id'] == task.get('run_id')), None)
                     if run and run['state'] in ('queued', 'running'):
                         raise ValueError('Preparing workspace and starting the assigned agent.')
@@ -567,7 +572,7 @@ class Contributions:
             try:
                 with self.operation('task:' + task_id, timeout=0):
                     task = self.get(task_id)
-                    if task.get('pull') or task.get('publish'):
+                    if task.get('pull') or task.get('publish') or task_delivery.pending(task):
                         continue
                     head = task.get('head_sha')
                     evidence = task.get('builds', {}).get(head, {})
@@ -1019,6 +1024,8 @@ class Contributions:
 
     def execution_finished(self, task, run):
         """Evidence that an execution finished. An idle pane alone is never evidence."""
+        if task_delivery.pending(task):
+            return False, 'Waiting for durable verification, publication and agent delivery inspection.'
         if not run or run.get('state') != 'persona_sent':
             return False, 'The previous execution is not an active session.'
         if task.get('state') not in HANDOFF_TASK_STATES:
@@ -2088,6 +2095,10 @@ class Contributions:
     def task_instructions(self, task):
         """The standard task prompt; shared by first launches and handovers."""
         prompt = 'Task: ' + task['title'] + '\n' + task['description']
+        if task_delivery.enabled(task):
+            prompt += ('\nYour completion receipt submits the commit for durable verification and optional automatic draft PR publication. '
+                       'Remain in this task session after writing it; the dashboard will send delivery evidence for a final read-only inspection. '
+                       'Do not publish yourself or claim the full workflow complete before that inspection.')
         if task.get('source', {}).get('task_id'):
             try:
                 origin = self.get(task['source']['task_id'])
@@ -2260,6 +2271,8 @@ class Contributions:
                 continue
             try:
                 with self.operation('task:' + str(run.get('task_id') or ''), timeout=0):
+                    if run.get('task_id') and task_delivery.pending(self.get(run['task_id'])):
+                        continue
                     self.store.manage_session(dict(mode='finish', job_id=run['id'],
                                                    organization_id=run['organization_id'],
                                                    inspected=True), 'task_reaper')
@@ -2444,16 +2457,17 @@ class Contributions:
                         publishing_repository=self.publishing_default(remote),
                         base_ref=base, base_sha=sha, branch='herdr/task-' + task_id[:12],
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
-                        created_at=stamp(), checks=[], audit=[], auto_validate=False,
+                        created_at=stamp(), checks=[], audit=[], auto_validate=False, auto_publish=False, await_verification=False,
                         assigned_agent={k: profile.get(k) for k in ('id', 'name', 'role', 'runtime')}, participants=[])
             return self.save(task, 'create', actor)
         task = self.get(task_id)
         had_error = task.pop('error', None) is not None
         # An unchanged background refresh must not rewrite the task or its audit.
         unchanged = self.comparable(task) if action == 'refresh' else None
-        if task['state'] in ('merged', 'closed', 'completed') and action not in ('refresh', 'build', 'discuss', 'review_policy', 'proposal', 'complete', 'assignment'):
+        if task['state'] in ('merged', 'closed', 'completed') and action not in ('refresh', 'build', 'discuss', 'review_policy', 'proposal', 'complete', 'assignment', 'policy'):
             raise ValueError('This task pull request is closed. Create a new task for further changes.')
-        if action != 'assignment':
+        stopping_delivery = action == 'policy' and body.get('auto_validate') is False and body.get('auto_publish') is False
+        if action != 'assignment' and not stopping_delivery:
             repository = self.path_for(task)
             if remote_info(repository) != task['github_repository']:
                 raise ValueError('Repository remote changed; inspect the task before continuing.')
@@ -2668,11 +2682,49 @@ class Contributions:
                 created = self.enqueue_assignment(created, actor)
                 self.save(created, 'assignment_queued', actor)
         elif action == 'policy':
+            if task['state'] in ('merged', 'closed', 'completed') and not stopping_delivery:
+                raise ValueError('A terminal task can stop delivery automation, but cannot enable it.')
+            if body.get('auto_validate') is True and task.get('run_id'):
+                run = next((job for job in self.store.snapshot(live_status=False).get('jobs', [])
+                            if job.get('id') == task['run_id']), None)
+                if not run or run.get('state') not in ('persona_sent', 'queued', 'running'):
+                    raise ValueError('Restore the original task session before enabling verification and inspection.')
             if not isinstance(body.get('auto_validate'), bool):
                 raise ValueError('Choose whether automatic capture and validation is enabled.')
             if body['auto_validate'] and (not self.validation or self.validation.snapshot().get('executor') != 'service'):
                 raise ValueError('Install the durable build service before enabling automatic task validation.')
-            task['auto_validate'] = body['auto_validate']
+            automatic_publication = body.get('auto_publish', task.get('auto_publish', False))
+            if not isinstance(automatic_publication, bool):
+                raise ValueError('Choose whether automatic draft PR publication is enabled.')
+            if automatic_publication and not body['auto_validate']:
+                raise ValueError('Automatic publication requires automatic verification.')
+            if automatic_publication:
+                if not self.github.snapshot().get('configured'):
+                    raise ValueError('Configure GitHub publishing before enabling automatic publication.')
+                # Preflight includes the local upstream/destination allowlist checks.
+                task['publication_preflight'] = dict(
+                    self.github.publication_preflight(task['github_repository'], publishing_repository(task)), at=stamp())
+                task['publication_authorization'] = dict(actor=actor, at=stamp(),
+                    upstream=task['github_repository'], repository=publishing_repository(task), branch=task['branch'])
+            if body.get('retry_delivery') is True:
+                if not body['auto_validate']:
+                    raise ValueError('Enable verification before retrying delivery.')
+                old = task.get('delivery_workflow') or {}
+                if old.get('state') != 'attention':
+                    raise ValueError('Only a delivery needing attention can be retried.')
+                task['delivery_retry_build'] = True
+                task['delivery_workflow'] = dict(sha=task.get('head_sha'), state='waiting_verification',
+                    attempt=old.get('attempt', 0) + 1, previous_error=old.get('error', ''), started_at=stamp())
+            old = task.get('delivery_workflow') or {}
+            if (body['auto_validate'] and old and body.get('retry_delivery') is not True
+                    and (not task.get('await_verification') or automatic_publication != task.get('auto_publish', False)
+                         or old.get('state') == 'cancelled')):
+                task['delivery_workflow'] = dict(sha=task.get('head_sha'), state='waiting_verification',
+                    attempt=old.get('attempt', 0) + 1, previous_state=old.get('state'), started_at=stamp())
+            if stopping_delivery and old:
+                old.update(state='cancelled', cancelled_by=actor, cancelled_at=stamp())
+            task.update(auto_validate=body['auto_validate'], auto_publish=automatic_publication,
+                        await_verification=body['auto_validate'])
         elif action == 'candidate':
             path = self.tree_for(task)
             run = next((j for j in self.store.snapshot(live_status=False)['jobs'] if j['id'] == task.get('run_id')), None)
@@ -2712,6 +2764,8 @@ class Contributions:
                             diff_stat=project_git.git(path, 'diff', '--stat', task['base_sha'], head, '--')[:12000],
                             state='review_ready', candidate_changed=bool(task.get('pull') and task['pull']['head_sha'] != head))
         elif action == 'publication':
+            if task.get('auto_publish'):
+                raise ValueError('Disable automatic publication before changing its destination.')
             upstream = task['github_repository']
             self.github.allow(upstream)
             # The recorded destination freezes once anything is published, so a
@@ -2739,7 +2793,6 @@ class Contributions:
                         or evidence.get('state') != 'complete' or evidence.get('required_checks_verified') is not True):
                     raise ValueError('The repaired candidate needs verified required checks before publication.')
             upstream = task['github_repository']
-            self.github.allow(upstream)
             # The upstream stays the base source and pull request target; only
             # the branch destination may be a fork.
             destination = publishing_repository(task)

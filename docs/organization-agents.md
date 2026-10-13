@@ -290,3 +290,92 @@ viewing proposals does not create work or re-evaluate a discussion.
 Changing a limit affects future evaluation, not discussions already evaluated.
 Older history can be loaded from the proposals tab. Existing drafts remain in
 Tasks, where an operator may review, start or queue them.
+
+
+## Repository-wide review groups
+
+Enable **Review the whole repository by default** in the group editor for a
+refactoring council. All members must have the same configured project. Set the
+group purpose to require a subsystem inventory, divided coverage, cross-cutting
+code evidence, challenge of candidate refactors and a coverage table with gaps.
+The complete Refactoring Council description is in the repository `plan.txt`.
+
+**Start discussion** captures the configured project's committed HEAD at submission
+and supplies that SHA to every member through the facilitator. Retained worktree
+HEADs and historical knowledge do not choose the target. Dirty/uncommitted work
+is outside the baseline. No fetch, checkout or branch update is performed; update
+the configured project explicitly if you intend to review newer upstream code.
+The saved baseline survives monitoring/recovery. Custom messages and task-linked
+reviews use their explicit scope. Existing groups default to topic discussions
+until edited; an upgrade does not broaden their authorization.
+
+This is a coordinated advisory review, not an enforced scanner: the artifact must
+state inspected areas and omissions before concluding that no refactor is needed.
+
+
+## Automatic verification and draft PR delivery
+
+In a task's **Automation settings**, administrators can enable **Automatically
+capture and validate**. This now retains the task session until durable checks
+for the receipt's exact commit settle and the worker reviews the results in a
+separate, verified reply. Existing saved policies retain their legacy behavior
+until updated. The worker waits idle for dashboard feedback rather than polling
+or occupying a long-running gateway worker thread.
+
+**Automatically publish a validated draft PR** additionally authorizes pushing
+the task branch to its recorded upstream/fork destination and publishing generated
+task/check details as a draft PR. It requires the durable build service and GitHub
+setup, and enables verification. Authorization records the operator, destination
+and branch. Disable publication before changing the destination. Merge and
+deployment remain manual; publication does not establish acceptance of the code.
+
+Delivery waits for matching required checks, verifies a clean unchanged task tree
+and completion receipt, uses the normal push/PR recovery paths, and checks the
+remote branch and PR identities. Running GitHub checks or undecided mergeability
+keep the session reserved. Failures are reported to the worker when its original
+session is available. A read-only inspection reply must name the exact commit
+and report reviewed or needs_attention; the gateway rechecks evidence before
+allowing a handoff. Permissions are never approved automatically.
+
+Failed durable checks are returned to the original worker with bounded check
+summaries and the build identity. When the durable result is `failed`, the
+worker may repair task code, test it and commit on its existing branch. A verified
+reply must identify both the failed SHA and its replacement; the replacement
+must descend from the failed commit and have a clean checkout and matching
+completion receipt. It receives fresh durable verification before publication.
+There are at most two automatic validation repairs per task. Infrastructure
+errors, exhausted repairs, and publishing/authentication failures require an
+operator decision; the worker must not weaken checks, change credentials,
+switch destinations or publish independently.
+
+Enabling publication refreshes the authenticated account, repository access,
+write access reported for that account, and fork-network identity when used.
+Known incompatible fine-grained authentication for a cross-owner fork PR is
+rejected. These checks run again before publication writes. Account permission
+does not establish token write permission: the UI labels it unproven until
+actual writes succeed. Configure repository selection and Contents/Pull requests
+write permissions (and Workflows write when needed), or appropriate classic
+token scopes, on GitHub. Setup checks never create disposable public branches/PRs.
+
+The dashboard currently stores one credential for both branch push and PR
+creation. For a cross-owner fork such as `Cobchuu/herdr_proxmox` into
+`Ultarius/herdr_proxmox`, the fork owner's fine-grained token cannot enable
+automatic delivery through this preflight. A suitably scoped classic token is
+the currently supported alternative, subject to account access and repository
+policies. Separate push and upstream PR credentials would require additional
+credential storage, routing and verification support; they are not a current
+configuration option. Automatic verification without publication remains usable.
+
+A publishing failure report includes the failed stage, whether the branch was
+already uploaded, and the required operator action. Late failures after a
+successful inspection produce new feedback. If the original session cannot
+receive feedback, the dashboard retains the reservation, displays the delivery
+error and retries notification every 30 seconds; it does not replay publication.
+
+The task status and Automation settings show the delivery stage and agent report.
+A failure keeps the reservation and offers **Retry verification and delivery
+inspection**; explicit retry can rerun failed durable checks and reconcile an
+already-published branch/PR. Disable capture/verification to disable publication
+and stop requiring this barrier. An active inspection chat must still settle
+before another task can use its session. No-change receipts remain terminal
+without creating a pointless commit or PR.

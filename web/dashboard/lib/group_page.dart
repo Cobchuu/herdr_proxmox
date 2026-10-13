@@ -1012,6 +1012,9 @@ class _GroupPageState extends State<GroupPage> {
                 onPressed: busy || archived ? null : edit,
                 child: const Text('Edit group settings'),
               ),
+              Text(
+                'Default discussion scope: ${group!['review_scope'] == 'repository' ? 'whole repository at configured HEAD' : 'group topic'}.',
+              ),
               const Divider(),
               const Text(
                 'Inherited organization limits apply even when group queueing is off.',

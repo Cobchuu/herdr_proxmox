@@ -572,10 +572,26 @@ class _DiscussionGroupFormState extends State<DiscussionGroupForm> {
     text: widget.group?['description'],
   );
   late final members = List<String>.from(widget.group?['members'] ?? []);
+
+  /// Whether every selected member is assigned to the same configured project.
+  /// The gateway rejects repository-wide review otherwise, so this warns before
+  /// the operator discovers it on submit. The switch stays usable so an
+  /// existing group can be corrected without first reselecting its members.
+  bool get membersShareProject {
+    final projects = <String>{};
+    for (final id in members) {
+      final project =
+          '${widget.profiles.where((p) => p['id'] == id).firstOrNull?['project'] ?? ''}';
+      if (project.isEmpty) return false;
+      projects.add(project);
+    }
+    return projects.length == 1;
+  }
   late bool readOnly = widget.group?['read_only'] ?? true;
   late bool useWorktree = widget.group?['use_worktree'] ?? true;
   late bool notifyOutcomes = widget.group?['notify_outcomes'] ?? true;
   late bool createTasks = widget.group?['create_tasks'] ?? false;
+  late bool repositoryReview = widget.group?['review_scope'] == 'repository';
   late String permissions = widget.group?['permission_mode'] ?? 'default';
   late final accessiblePaths = TextEditingController(
     text: (widget.group?['accessible_paths'] as List? ?? []).join('\n'),
@@ -631,6 +647,16 @@ class _DiscussionGroupFormState extends State<DiscussionGroupForm> {
                     : null,
               ),
               SwitchListTile(
+                title: const Text('Review the whole repository by default'),
+                subtitle: Text(
+                  membersShareProject
+                      ? 'Start discussion scans the configured project at its current committed HEAD. Members must share that project. Custom messages and task reviews keep their requested scope.'
+                      : 'Selected members are not all assigned to one configured project. Choose topic scope, or select members that share a project.',
+                ),
+                value: repositoryReview,
+                onChanged: (v) => setState(() => repositoryReview = v),
+              ),
+              SwitchListTile(
                 title: const Text('Read-only discussion'),
                 subtitle: const Text(
                   'Default: advise and create artifacts. Members are instructed not to change projects. This is a discussion rule, not a sandbox.',
@@ -660,9 +686,7 @@ class _DiscussionGroupFormState extends State<DiscussionGroupForm> {
                 onChanged: (v) => setState(() => notifyOutcomes = v),
               ),
               SwitchListTile(
-                title: const Text(
-                  'Let this group create tasks automatically',
-                ),
+                title: const Text('Let this group create tasks automatically'),
                 subtitle: const Text(
                   'Finalized proposals from this group\u2019s discussions are created and queued under the organization limits, without an operator click.',
                 ),
@@ -712,6 +736,7 @@ class _DiscussionGroupFormState extends State<DiscussionGroupForm> {
             'use_worktree': useWorktree,
             'notify_outcomes': notifyOutcomes,
             'create_tasks': createTasks,
+            'review_scope': repositoryReview ? 'repository' : 'topic',
             'permission_mode': permissions,
             'accessible_paths': PermissionOptions.parsePaths(
               accessiblePaths.text,

@@ -2,18 +2,44 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:herdr_dashboard/task_activity.dart';
 
 void main() {
-  test('implementing distinguishes working from capture being switched off', () {
-    final working = {'state': 'implementing', 'auto_validate': true};
-    expect(
-      taskNextStep(working, executor: 'service'),
-      'Implementation in progress; awaiting a committed candidate.',
-    );
-    // Capture is on but its executor is gone, so nothing will ever arrive.
-    expect(
-      taskNextStep(working, executor: 'gateway'),
-      contains('waiting for the durable build service'),
-    );
-  });
+  test(
+    'delivery states retain the agent and do not claim review readiness',
+    () {
+      final task = {
+        'state': 'pr_open',
+        'head_sha': 'sha',
+        'auto_publish': true,
+        'delivery_workflow': <String, dynamic>{
+          'state': 'waiting_agent',
+          'sha': 'sha',
+        },
+      };
+      expect(taskNextStep(task), contains('task agent to inspect'));
+      (task['delivery_workflow'] as Map)['state'] = 'waiting_remote';
+      expect(taskNextStep(task), contains('GitHub mergeability and CI'));
+      (task['delivery_workflow'] as Map)['state'] = 'complete';
+      expect(taskNextStep(task), contains('checked by the task agent'));
+      (task['delivery_workflow'] as Map)['state'] = 'attention';
+      (task['delivery_workflow'] as Map)['error'] = 'PR permission denied';
+      expect(taskNextStep(task), contains('PR permission denied'));
+    },
+  );
+
+  test(
+    'implementing distinguishes working from capture being switched off',
+    () {
+      final working = {'state': 'implementing', 'auto_validate': true};
+      expect(
+        taskNextStep(working, executor: 'service'),
+        'Implementation in progress; awaiting a committed candidate.',
+      );
+      // Capture is on but its executor is gone, so nothing will ever arrive.
+      expect(
+        taskNextStep(working, executor: 'gateway'),
+        contains('waiting for the durable build service'),
+      );
+    },
+  );
 
   test('a task with capture off never claims the agent is still working', () {
     final idle = {'state': 'implementing', 'auto_validate': false};
@@ -26,9 +52,14 @@ void main() {
   });
 
   test('other states are unaffected by the executor', () {
-    final completed = {'state': 'completed', 'completion': {'outcome': 'complete'}};
-    expect(taskNextStep(completed, executor: 'unavailable'),
-        taskNextStep(completed, executor: 'service'));
+    final completed = {
+      'state': 'completed',
+      'completion': {'outcome': 'complete'},
+    };
+    expect(
+      taskNextStep(completed, executor: 'unavailable'),
+      taskNextStep(completed, executor: 'service'),
+    );
   });
 
   test('a build for another target never validates the current candidate', () {

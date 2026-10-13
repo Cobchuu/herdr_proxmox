@@ -176,6 +176,34 @@ class GitHub:
             raise ValueError(publishing + ' is not a fork of ' + upstream + '.')
         return True
 
+    def publication_preflight(self, upstream, publishing):
+        """Refresh identity/access without claiming that a read proves token write."""
+        self.allow_publishing(upstream, publishing)
+        config = self.configuration()
+        token = config.get('token')
+        user = self.request('/user', token=token)  # Explicit token bypasses cached setup evidence.
+        login = user.get('login') if isinstance(user, dict) else None
+        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,39}', login):
+            raise ValueError('GitHub returned an invalid publishing identity.')
+        if login.lower() != str(config.get('login', '')).lower():
+            raise ValueError('GitHub publishing account changed; configure credentials again.')
+        target = self.repository_info(upstream, token)
+        destination = target if upstream == publishing else self.repository_info(publishing, token)
+        if (str(target.get('full_name', '')).lower() != upstream.lower()
+                or str(destination.get('full_name', '')).lower() != publishing.lower()):
+            raise ValueError('GitHub repository moved or is unavailable; inspect the publishing destination.')
+        permissions = destination.get('permissions')
+        if not isinstance(permissions, dict) or permissions.get('push') is not True:
+            raise ValueError('GitHub account no longer has push access to ' + publishing + '.')
+        if upstream != publishing:
+            if not self.same_fork_network(target, destination):
+                raise ValueError(publishing + ' is no longer a fork of ' + upstream + '.')
+            if self.pr_capability(token, login, upstream) != 'supported':
+                raise ValueError('This fine-grained credential cannot create the upstream fork PR. Configure authentication authorized for ' + upstream + '.')
+        return dict(login=login, repository=publishing, upstream=upstream,
+                    mode='direct' if upstream == publishing else 'fork',
+                    account_write='verified', token_write='not_exercised')
+
     def configure(self, body):
         if not isinstance(body, dict):
             raise ValueError('Expected GitHub configuration fields.')

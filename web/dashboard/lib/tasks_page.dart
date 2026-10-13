@@ -357,7 +357,7 @@ class _TasksPageState extends State<TasksPage> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access.',
+                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access. A fine-grained token for your fork cannot authorize a cross-owner upstream PR. For that workflow, use a classic token with appropriate repository scopes. The dashboard currently stores one credential for both push and PR creation; separate PR credentials are not supported.',
                     ),
                     for (final name in listed()) ...[
                       Row(
@@ -2423,7 +2423,7 @@ class _TasksPageState extends State<TasksPage> {
                   title: const Text('Automatically capture and validate'),
                   subtitle: Text(
                     executor == 'service'
-                        ? 'Requires a matching completion receipt. Publishing and deployment remain separate.'
+                        ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
                         : 'Install the durable build service to enable automation.',
                   ),
                   value: task['auto_validate'] == true,
@@ -2440,9 +2440,73 @@ class _TasksPageState extends State<TasksPage> {
                       ? (value) => act('policy', {
                           'task_id': task['id'],
                           'auto_validate': value,
+                          if (!value) 'auto_publish': false,
                         })
                       : null,
                 ),
+                SwitchListTile(
+                  title: const Text(
+                    'Automatically publish a validated draft PR',
+                  ),
+                  subtitle: const Text(
+                    'Checks current GitHub account access and the direct/fork destination before enabling. Authorizes pushing verified commits and publishing generated task/check details. Token write access is only proven by successful writes. The agent stays reserved until it reviews the results. Merge and deployment remain manual.',
+                  ),
+                  value: task['auto_publish'] == true,
+                  onChanged:
+                      admin &&
+                          !busy &&
+                          executor == 'service' &&
+                          (task['auto_publish'] == true ||
+                              github['configured'] == true) &&
+                          ![
+                            'merged',
+                            'closed',
+                            'completed',
+                          ].contains(task['state'])
+                      ? (value) => act('policy', {
+                          'task_id': task['id'],
+                          'auto_validate':
+                              value || task['auto_validate'] == true,
+                          'auto_publish': value,
+                        })
+                      : null,
+                ),
+                if (task['delivery_workflow'] is Map) ...[
+                  ListTile(
+                    title: Text(
+                      'Delivery: ${task['delivery_workflow']['state']}',
+                    ),
+                    subtitle: Text(
+                      '${task['delivery_workflow']['error'] ?? ''}\n${task['delivery_workflow']['notification_error'] ?? ''}\n${task['delivery_workflow']['agent_report']?['summary'] ?? ''}',
+                    ),
+                  ),
+                  if (task['await_verification'] == true ||
+                      task['auto_publish'] == true)
+                    TextButton(
+                      onPressed: admin && !busy
+                          ? () => act('policy', {
+                              'task_id': task['id'],
+                              'auto_validate': false,
+                              'auto_publish': false,
+                            })
+                          : null,
+                      child: const Text('Stop delivery automation'),
+                    ),
+                  if (task['delivery_workflow']['state'] == 'attention')
+                    TextButton(
+                      onPressed: admin && !busy && task['auto_validate'] == true
+                          ? () => act('policy', {
+                              'task_id': task['id'],
+                              'auto_validate': true,
+                              'auto_publish': task['auto_publish'] == true,
+                              'retry_delivery': true,
+                            })
+                          : null,
+                      child: const Text(
+                        'Retry verification and delivery inspection',
+                      ),
+                    ),
+                ],
                 if (task['organization_id'] != null)
                   ListTile(
                     title: const Text('Organization follow-up automation'),

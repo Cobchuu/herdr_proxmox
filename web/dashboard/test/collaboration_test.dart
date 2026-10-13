@@ -200,6 +200,11 @@ void main() {
       );
       FocusManager.instance.primaryFocus?.unfocus();
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.text('Review the whole repository by default'),
+      );
+      await tester.tap(find.text('Review the whole repository by default'));
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Max · Developer'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Max · Developer'));
@@ -210,6 +215,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(mutations.last['members'], ['max', 'iris']);
       expect(mutations.last['read_only'], isTrue);
+      expect(mutations.last['review_scope'], 'repository');
       expect(mutations.last['notify_outcomes'], isTrue);
       expect(mutations.last['create_tasks'], isFalse);
       expect(mutations.last['permission_mode'], 'default');
@@ -227,7 +233,10 @@ void main() {
         deliveryLabel('command_returned'),
         'CLI returned (acknowledgment only)',
       );
-      expect(deliveryLabel('session_idle_reply_pending'), contains('reply file'));
+      expect(
+        deliveryLabel('session_idle_reply_pending'),
+        contains('reply file'),
+      );
       expect(deliveryLabel('reply_verified'), 'Reply verified');
       expect(deliveryLabel(null), 'No delivery evidence');
       expect(deliveryLabel('future-stage'), 'future-stage');

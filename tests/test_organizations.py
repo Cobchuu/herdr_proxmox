@@ -935,8 +935,9 @@ class OrganizationTests(unittest.TestCase):
         self.drain()
         prompts = [args[3] for args, _ in self.calls if args[:2] == ('agent', 'prompt')]
         self.assertEqual(len(prompts), 2)
-        self.assertIn('Lead with a plan.', prompts[0])
-        self.assertIn('Implement and test.', prompts[1])
+        # Independent launches may deliver their prompts in either order.
+        self.assertEqual(sum('Lead with a plan.' in prompt for prompt in prompts), 1)
+        self.assertEqual(sum('Implement and test.' in prompt for prompt in prompts), 1)
         with self.assertRaisesRegex(ValueError, 'previous run'):
             self.action('launch', organization_id=org, profile_id=maya)
         delegation = self.action('delegate', organization_id=org, sender_id=maya, profile_id=noah, task='Implement the feature')
