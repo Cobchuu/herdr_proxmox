@@ -163,6 +163,26 @@ class OrganizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differently'):
             self.action('resolve_delegation', organization_id=org, job_id=delegation, inspected=True, decision='cancel', reason='Different')
 
+    def test_organization_policy_read_requires_auth_and_checks_scope_without_tasks(self):
+        org = self.organization()
+        service = SimpleNamespace(policy=lambda identity: dict(max_per_meeting=2))
+        server = gateway.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
+        server.token, server.organizations, server.contributions = 'admin-token', self.store, service
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}/api/organizations/automation?organization_id='
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + org)
+            self.assertEqual(error.exception.code, 401)
+            result = json.load(urlopen(Request(base + org, headers={'Authorization': 'Bearer admin-token'})))
+            self.assertEqual(result, dict(organization_id=org, policy=dict(max_per_meeting=2)))
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(base + 'missing', headers={'Authorization': 'Bearer admin-token'}))
+            self.assertEqual(error.exception.code, 400)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
     def test_http_resolution_requires_admin(self):
         server = gateway.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
         server.token = 'admin-token'
@@ -171,7 +191,7 @@ class OrganizationTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            for endpoint in ('resolve_delegation', 'retry_discussion', 'cancel_discussion'):
+            for endpoint in ('resolve_delegation', 'retry_discussion', 'cancel_discussion', 'realign_discussion_session'):
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(f'http://127.0.0.1:{server.server_port}/api/organizations/{endpoint}',
                         headers={'Authorization':'Bearer operator-token','Content-Type':'application/json'}, data=b'{}'))
@@ -915,8 +935,9 @@ class OrganizationTests(unittest.TestCase):
         self.drain()
         prompts = [args[3] for args, _ in self.calls if args[:2] == ('agent', 'prompt')]
         self.assertEqual(len(prompts), 2)
-        self.assertIn('Lead with a plan.', prompts[0])
-        self.assertIn('Implement and test.', prompts[1])
+        # Independent launches may deliver their prompts in either order.
+        self.assertEqual(sum('Lead with a plan.' in prompt for prompt in prompts), 1)
+        self.assertEqual(sum('Implement and test.' in prompt for prompt in prompts), 1)
         with self.assertRaisesRegex(ValueError, 'previous run'):
             self.action('launch', organization_id=org, profile_id=maya)
         delegation = self.action('delegate', organization_id=org, sender_id=maya, profile_id=noah, task='Implement the feature')

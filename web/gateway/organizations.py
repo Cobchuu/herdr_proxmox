@@ -86,6 +86,9 @@ class OrganizationStore:
         from notifications import Notifications
         self.events = Notifications()
         self.worker = ThreadPoolExecutor(max_workers=4, thread_name_prefix='organization')
+        # Permission answers must still run when every discussion worker is
+        # occupied waiting for a member. This lane accepts verified input only.
+        self.control_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='organization-input')
         self.agent_locks = {}
         self.contributions = None
         self.capacity_guard = None
@@ -100,6 +103,7 @@ class OrganizationStore:
                 CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS jobs_by_organization ON jobs(organization_id);
                 CREATE INDEX IF NOT EXISTS discussion_by_group ON jobs(organization_id, json_extract(data, '$.group_id'), json_extract(data, '$.kind'));
+                CREATE INDEX IF NOT EXISTS input_by_decision ON jobs(organization_id, json_extract(data, '$.decision_job_id'), json_extract(data, '$.kind'));
                 CREATE TABLE IF NOT EXISTS requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS session_archives (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL);
             ''')
@@ -109,6 +113,12 @@ class OrganizationStore:
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
                 if job['state'] in ('queued', 'running'):
+                    if (job.get('kind') == 'discussion' and not job.get('discussion_submitted_at')
+                            and any(isinstance(r, dict) and r.get('resume_applied_at')
+                                    for r in (job.get('session_realignments') or {}).values())):
+                        # This continuation was explicitly authorized by realignment,
+                        # and no prompt was sent. Recover only its interrupted admission.
+                        job['realignment_resume_interrupted'] = True
                     job.update(state='uncertain', error='Gateway restarted. Inspect the SSH terminal before creating another run or task.', updated_at=now())
                     self.put(db, 'jobs', job)
             # Refine restart recovery: annotate liveness of bound sessions without
@@ -137,6 +147,7 @@ class OrganizationStore:
         return db
 
     def close(self):
+        self.control_worker.shutdown(wait=True)
         self.worker.shutdown(wait=True)
 
     def put(self, db, table, item):
@@ -370,7 +381,41 @@ class OrganizationStore:
         limit = body.get('limit', 20)
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError('History page size must be between 1 and 50.')
-        return self.snapshot(group_id=text(body, 'group_id', 40), before=before, limit=limit)
+        data = self.snapshot(group_id=text(body, 'group_id', 40), before=before, limit=limit)
+        from contributions import Contributions
+        discussions = [j for j in data['jobs'] if j.get('kind') == 'discussion']
+        task_ids = {j['task_id'] for j in discussions if j.get('task_id')}
+        tasks = {}
+        if self.contributions is not None and task_ids:
+            with closing(self.contributions.connect()) as db:
+                rows = db.execute('SELECT id,data FROM tasks WHERE id IN (' + ','.join('?' for _ in task_ids) + ')', list(task_ids)).fetchall()
+                tasks = {row[0]: json.loads(row[1]) for row in rows}
+        from discussion_recovery import mismatches
+        launches = self.job_records(launches_only=True)
+        for job in discussions:
+            job['project_mismatches'] = mismatches(self, job, launches)
+            task = tasks.get(job.get('task_id')) or {}
+            queue = task.get('auto_queue') if isinstance(task.get('auto_queue'), dict) else {}
+            # `proposals` is preferred when a job carries a recorded summary, but
+            # only a mapping is usable here: a non-dict value would raise on the
+            # lookups below and fail the whole history page.
+            outcome = job.get('proposals') if isinstance(job.get('proposals'), dict) else None
+            outcome = outcome or queue.get(job['id']) or {}
+            if not isinstance(outcome, dict):
+                outcome = {}
+            details = []
+            for proposal in Contributions.discussion_proposals(job):
+                key = proposal['key']
+                state = ('queued' if key in (outcome.get('queued') or []) else
+                         'draft' if key in (outcome.get('drafts') or []) else
+                         'skipped' if key in (outcome.get('skipped') or {}) or outcome.get('unavailable') else 'proposed')
+                details.append(dict(proposal, status=state,
+                                    task_id=(outcome.get('created') or {}).get(key) or
+                                    (task.get('follow_up_tasks') or {}).get(key),
+                                    reason=(outcome.get('skipped') or {}).get(key) or
+                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', '')))
+            job['proposal_details'] = details
+        return data
 
     def project(self, value):
         return str(project_directory(self.projects, value))
@@ -627,7 +672,9 @@ class OrganizationStore:
             db.execute('INSERT INTO requests VALUES (?, ?, ?)', (key, fingerprint, json.dumps(response)))
         if submitted:
             with self.lock:
-                future = self.worker.submit(self.execute, submitted)
+                executor = (self.control_worker if action == 'input' and item.get('decision_job_id')
+                            and item.get('console_token') else self.worker)
+                future = executor.submit(self.execute, submitted)
                 self.futures.add(future)
                 future.add_done_callback(self._finished)
         return response
@@ -654,7 +701,7 @@ class OrganizationStore:
             self.jobs_changed.set()
         return job
 
-    def manage_session(self, body, actor):
+    def manage_session(self, body, actor, allow_busy=False):
         if body.get('mode') in ('archives', 'view_archive'):
             from session_archives import listing, read
             org_id = text(body, 'organization_id', 40)
@@ -679,6 +726,8 @@ class OrganizationStore:
                     results.append(dict(id=job_id, state='skipped', reason=str(error)))
             return {'results': results}
         mode = body.get('mode')
+        if allow_busy and mode != 'close':
+            raise ValueError('Forced stopping is only supported for archive and close.')
         if mode not in ('close', 'restart', 'continue', 'finish', 'resume', 'handover') or body.get('inspected') is not True:
             raise ValueError('Inspect the session and choose close or restart.')
         request_id = body.get('request_id')
@@ -768,13 +817,21 @@ class OrganizationStore:
                         saved = archive(self, run, actor, unavailable='Agent and recorded pane were already absent. Terminal history cannot be recovered from them.')
                         status = 'already_closed'
                 else:
-                    self.close_identity(run, live=live)
-                    output = self.command('agent', 'read', run['alias'], '--source', 'recent-unwrapped', '--lines', '2000', timeout=10)
+                    self.close_identity(run, live=live, ready=not allow_busy)
+                    if allow_busy:
+                        self.update_job(run['id'], forced_stop_requested_at=now(), forced_stop_actor=actor)
+                    output = self.command('agent', 'read', run['alias'], '--source',
+                                          'visible' if allow_busy else 'recent-unwrapped', '--lines',
+                                          '160' if allow_busy else '2000', timeout=10)
                     terminal = output.get('output') if isinstance(output, dict) else None
                     if not isinstance(terminal, str) or not terminal.strip():
                         raise ValueError('Terminal preservation failed or returned empty output; the pane was not closed.')
-                    saved = archive(self, run, actor, terminal=terminal[-40000:])
-                    self.close_identity(run)  # Recheck ownership after capture and immediately before closure.
+                    saved = archive(self, run, actor, terminal=terminal[-40000:], capture=dict(
+                        source='visible' if allow_busy else 'recent-unwrapped',
+                        requested_lines=160 if allow_busy else 2000, character_limit=40000,
+                        character_truncated=len(terminal) > 40000,
+                        history_truncated=True if allow_busy else None, forced_stop=bool(allow_busy)))
+                    self.close_identity(run, ready=not allow_busy)  # Recheck ownership before closure.
                     self.command('pane', 'close', run['pane_id'], timeout=10)
                 terminal = 'finished' if mode == 'finish' else 'released'
                 run = self.update_job(run['id'], state=terminal, session_closed_at=now(),
@@ -1077,7 +1134,7 @@ class OrganizationStore:
         except OSError:
             return False
 
-    def close_identity(self, run, live=None):
+    def close_identity(self, run, live=None, ready=True):
         """Verify pane ownership for closure, including runtimes without session IDs.
 
         The legacy fallback identifies the managed pane and checkout, not a
@@ -1091,7 +1148,7 @@ class OrganizationStore:
         matches = [item for item in live if item.get('name') == run.get('alias')]
         if len(matches) != 1:
             raise ValueError('Original session is absent or ambiguous; refresh its run before closure.')
-        agent = self.identity(run, agent=matches[0])
+        agent = self.identity(run, ready=ready, agent=matches[0])
         if run.get('agent_session'):
             return agent
         pane = run.get('pane_id')
@@ -1186,6 +1243,8 @@ class OrganizationStore:
         raise ValueError('New pane shell did not become available. Inspect its terminal over SSH.')
 
     def advance_discussions(self):
+        from discussion_recovery import advance
+        advance(self)
         # Waiting meetings reserve no busy workers. Recheck on the normal poll loop.
         with self.lock, closing(self.connect()) as db:
             rows = db.execute(
@@ -1216,6 +1275,12 @@ class OrganizationStore:
             if job.get('state') != 'queued':
                 return  # A second worker/retry must never replay an accepted job.
             ids = sorted(set(job.get('participants') or [job.get('profile_id')]) - {None})
+            if job['kind'] == 'input' and job.get('decision_job_id') and job.get('console_token'):
+                # The discussion holds participant locks while awaiting its
+                # facilitator. An inspected answer must unblock that execution,
+                # not wait behind it. Serialize answers separately; _execute
+                # rechecks ownership, blocked state and the exact visible prompt.
+                ids = ['decision-input:' + identity for identity in ids]
             locks = [self.agent_locks.setdefault(profile_id, threading.RLock()) for profile_id in ids]
         acquired = []
         try:
@@ -1417,6 +1482,14 @@ class OrganizationStore:
             code = getattr(exc, 'code', '')
             delivery = delivery_for(exc)
             detail = str(exc)[:500]
+            discussion_not_submitted = False
+            if job['kind'] == 'discussion':
+                try:
+                    with self.lock, closing(self.connect()) as db:
+                        current = self.get(db, 'jobs', job_id)
+                    discussion_not_submitted = not current.get('discussion_submitted_at')
+                except Exception:
+                    pass  # Unavailable evidence must not claim delivery certainty.
             if job['kind'] in ('launch', 'chat', 'delegate') and delivery in ('blocked', 'unknown') and code:
                 self.update_job(job_id, delivery=dict(stage='blocked' if delivery == 'blocked' else 'unknown',
                                                       code=code, at=now()))
@@ -1429,6 +1502,8 @@ class OrganizationStore:
                 except Exception:
                     stage = 'unknown'
                 detail += f' Delivery stage: {stage}. Inspect Org chart → Chat before retrying; terminal input may have been sent.'
+            elif discussion_not_submitted:
+                detail += ' Discussion preparation failed before submission; no discussion prompt was sent. Retry inspected preparation after resolving the cause.'
             elif job['kind'] == 'launch' and job.get('launch_stage') == 'preflight':
                 detail += ' Launch failed during preflight; no workspace or pane was created and no terminal input was sent.'
             elif job['kind'] == 'launch' and job.get('launch_stage') == 'workspace_preparing':

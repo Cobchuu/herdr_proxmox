@@ -28,6 +28,7 @@ from repository_lock import repository_lock
 from herdr_errors import HerdrError, format_handover, parse_handover
 from session_ownership import reserves as session_reserves
 import pr_repairs
+import task_delivery
 MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
@@ -393,6 +394,7 @@ class Contributions:
                     self.knowledge.sync_jobs()
                     task_ids = {key for topic, key, _ in batch if topic == 'task'} if not safety and all(topic == 'task' for topic, _, _ in batch) else None
                     self.advance_automatic(task_ids)
+                    task_delivery.advance(self, task_ids)
                     pr_repairs.advance(self, task_ids)
                     self.store.advance_discussions()
                     self.dispatch_assignments()
@@ -488,6 +490,9 @@ class Contributions:
             try:
                 with self.operation('task:' + listed['id'], timeout=0):
                     task = self.get(listed['id'])
+                    if (task_delivery.enabled(task) and (task.get('delivery_workflow') or {}).get('state')
+                            in ('notifying_agent', 'waiting_agent', 'accepting_repair', 'attention')):
+                        continue  # Delivery owns any repair commit until the verified chat reply arrives.
                     run = next((j for j in runs if j['id'] == task.get('run_id')), None)
                     if run and run['state'] in ('queued', 'running'):
                         raise ValueError('Preparing workspace and starting the assigned agent.')
@@ -567,7 +572,7 @@ class Contributions:
             try:
                 with self.operation('task:' + task_id, timeout=0):
                     task = self.get(task_id)
-                    if task.get('pull') or task.get('publish'):
+                    if task.get('pull') or task.get('publish') or task_delivery.pending(task):
                         continue
                     head = task.get('head_sha')
                     evidence = task.get('builds', {}).get(head, {})
@@ -940,7 +945,7 @@ class Contributions:
         except (ValueError, TypeError):
             return []
         proposals = data.get('task_proposals', []) if isinstance(data, dict) else []
-        if not isinstance(proposals, list) or len(proposals) > 10:
+        if not isinstance(proposals, list):
             return []
         valid = []
         for proposal in proposals:
@@ -1019,6 +1024,8 @@ class Contributions:
 
     def execution_finished(self, task, run):
         """Evidence that an execution finished. An idle pane alone is never evidence."""
+        if task_delivery.pending(task):
+            return False, 'Waiting for durable verification, publication and agent delivery inspection.'
         if not run or run.get('state') != 'persona_sent':
             return False, 'The previous execution is not an active session.'
         if task.get('state') not in HANDOFF_TASK_STATES:
@@ -1356,28 +1363,34 @@ class Contributions:
             except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
                 continue
 
-    def proposal_skip_reason(self, profile, organization_id, policy, wants_queue, count):
-        """Shared eligibility and admission limits for all discussion proposals."""
+    def proposal_skip_reason(self, profile, organization_id):
+        """Reject invalid assignees, independently of automatic queue budgets."""
         if (not profile or profile.get('archived') or profile.get('ephemeral')
                 or profile.get('group_id') or not profile.get('use_worktree', True)):
             return 'assignee is not an eligible worktree agent'
         if profile.get('organization_id') != organization_id:
             return 'assignee belongs to another organization'
-        if count >= policy['max_per_meeting']:
-            return 'meeting limit reached'
-        if wants_queue:
-            if self.open_work_count(profile['id']) >= policy['max_open_per_agent']:
-                return 'assignee queue limit reached'
-            if self.auto_created_today(organization_id) >= policy['daily_cap']:
-                return 'daily automation limit reached'
         return None
 
-    def record_automatic_proposal(self, task, job, policy, wants_queue, actor, proposal_key):
+    def proposal_queue_reason(self, profile, organization_id, policy, count, depth=0):
+        """Capacity limits defer execution; they never discard a valid draft."""
+        if depth > policy['max_follow_up_depth']:
+            return 'follow-up depth limit reached'
+        if count >= policy['max_per_meeting']:
+            return 'meeting limit reached'
+        if self.open_work_count(profile['id']) >= policy['max_open_per_agent']:
+            return 'assignee queue limit reached'
+        if self.auto_created_today(organization_id) >= policy['daily_cap']:
+            return 'daily automation limit reached'
+        return None
+
+    def record_automatic_proposal(self, task, job, policy, wants_queue, actor, proposal_key, queue_reason=None):
         # Both task-linked and taskless proposals must contribute to the same
         # durable daily budget. Preserve the first record when replaying.
         task.setdefault('source', {}).setdefault('auto_queued', dict(
             at=stamp(), meeting_id=job['id'], group_id=job.get('group_id'), proposal_key=proposal_key,
-            queued=wants_queue, policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
+            queued=wants_queue, queue_reason=queue_reason,
+            policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
         self.save(task, 'auto_queued', actor)
 
     def resume_automatic_proposal(self, task_id, job, actor):
@@ -1416,7 +1429,7 @@ class Contributions:
         if job.get('proposals') is not None:
             return
         proposals = self.discussion_proposals(job)
-        queued, drafts, skipped, created = [], [], {}, {}
+        queued, drafts, skipped, created, deferred = [], [], {}, {}, {}
         profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
         for proposal in proposals:
             new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + job_id + ':' + proposal['key']).hex
@@ -1425,12 +1438,14 @@ class Contributions:
                 made, was_queued = resumed
                 (queued if was_queued else drafts).append(proposal['key'])
                 created[proposal['key']] = made['id']
+                reason = (made.get('source', {}).get('auto_queued') or {}).get('queue_reason')
+                if reason:
+                    deferred[proposal['key']] = reason
                 continue
             profile = profiles.get(proposal['profile_id'])
             review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
             wants_queue = queue_allowed and not review
-            reason = self.proposal_skip_reason(profile, job['organization_id'], policy, wants_queue,
-                                               len(queued) + len(drafts))
+            reason = self.proposal_skip_reason(profile, job['organization_id'])
             if reason:
                 skipped[proposal['key']] = reason
                 continue
@@ -1447,7 +1462,12 @@ class Contributions:
             except (ValueError, OSError) as error:
                 skipped[proposal['key']] = str(error)[:300]
                 continue
-            self.record_automatic_proposal(made, job, policy, wants_queue, actor, proposal['key'])
+            queue_reason = (self.proposal_queue_reason(profile, job['organization_id'], policy, len(queued))
+                            if wants_queue else None)
+            wants_queue = wants_queue and queue_reason is None
+            if queue_reason:
+                deferred[proposal['key']] = queue_reason
+            self.record_automatic_proposal(made, job, policy, wants_queue, actor, proposal['key'], queue_reason)
             if wants_queue:
                 made = self.enqueue_assignment(made, actor)
                 self.save(made, 'assignment_queued', actor)
@@ -1456,7 +1476,7 @@ class Contributions:
                 drafts.append(proposal['key'])
             created[proposal['key']] = made['id']
         self.store.update_job(job_id, proposals=dict(
-            at=stamp(), queued=queued, drafts=drafts, skipped=skipped, created=created,
+            at=stamp(), queued=queued, drafts=drafts, skipped=skipped, created=created, deferred=deferred,
             policy={k: policy[k] for k in AUTOMATION_DEFAULTS}))
 
     def materialize_meeting(self, task_id, job_id, policy, actor, queue_allowed=True):
@@ -1471,8 +1491,8 @@ class Contributions:
         follow-up tasks. Whether they start on their own is the policy decision:
         with automatic creation enabled they are queued, otherwise each stays a
         draft that an operator starts explicitly. `needs_review` proposals are
-        always drafts, and limits that bound running work (assignee queue depth,
-        the daily automation cap) only apply to the queued path. A draft does
+        always drafts. Meeting, follow-up depth, assignee queue and daily limits
+        only apply to the queued path. A draft does
         not occupy an agent.
         """
         task = self.get(task_id)
@@ -1489,47 +1509,51 @@ class Contributions:
         if job.get('state') != 'artifact_ready':
             return  # Evaluate only once the discussion has finalized; not marked yet.
         proposals = self.discussion_proposals(job)
-        queued, drafts, skipped = [], [], {}
+        queued, drafts, skipped, deferred = [], [], {}, {}
         depth = ((task.get('source') or {}).get('depth') or 0) + 1
-        if depth > policy['max_follow_up_depth']:
-            skipped = {p['key']: 'follow-up depth limit reached' for p in proposals}
-        else:
-            profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
-            repository = self.path_for(task)
-            for proposal in proposals:
-                new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + job_id + ':' + proposal['key']).hex
-                resumed = self.resume_automatic_proposal(new_id, job, actor)
-                if resumed:
-                    made, was_queued = resumed
-                    task = self.get(task_id)
-                    task.setdefault('follow_up_tasks', {})[proposal['key']] = made['id']
-                    self.save(task, 'proposal_recovered', actor)
-                    (queued if was_queued else drafts).append(proposal['key'])
-                    continue
-                profile = profiles.get(proposal['profile_id'])
-                review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
-                wants_queue = queue_allowed and not review
-                reason = self.proposal_skip_reason(profile, task['organization_id'], policy, wants_queue,
-                                                   len(queued) + len(drafts))
+        profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
+        repository = self.path_for(task)
+        for proposal in proposals:
+            new_id = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr:' + task_id + ':' + job_id + ':' + proposal['key']).hex
+            resumed = self.resume_automatic_proposal(new_id, job, actor)
+            if resumed:
+                made, was_queued = resumed
+                task = self.get(task_id)
+                task.setdefault('follow_up_tasks', {})[proposal['key']] = made['id']
+                self.save(task, 'proposal_recovered', actor)
+                (queued if was_queued else drafts).append(proposal['key'])
+                reason = (made.get('source', {}).get('auto_queued') or {}).get('queue_reason')
                 if reason:
-                    skipped[proposal['key']] = reason
-                    continue
-                if not profile.get('project') or Path(profile['project']).resolve() != repository:
-                    skipped[proposal['key']] = 'assignee is assigned to another repository'
-                    continue
-                try:
-                    self.perform('proposal', dict(meeting_id=job_id, proposal_key=proposal['key'],
-                                                 queue=wants_queue), task_id, actor, automation_policy=policy)
-                except (ValueError, OSError) as error:
-                    skipped[proposal['key']] = str(error)[:300]
-                    continue
-                origin = self.get(task_id)
-                created_id = (origin.get('follow_up_tasks') or {}).get(proposal['key'])
-                if created_id:
-                    (queued if wants_queue else drafts).append(proposal['key'])
+                    deferred[proposal['key']] = reason
+                continue
+            profile = profiles.get(proposal['profile_id'])
+            review = str(proposal.get('needs_review', '')).lower() in ('true', 'yes')
+            wants_queue = queue_allowed and not review
+            reason = self.proposal_skip_reason(profile, task['organization_id'])
+            if reason:
+                skipped[proposal['key']] = reason
+                continue
+            if not profile.get('project') or Path(profile['project']).resolve() != repository:
+                skipped[proposal['key']] = 'assignee is assigned to another repository'
+                continue
+            queue_reason = (self.proposal_queue_reason(profile, task['organization_id'], policy, len(queued), depth)
+                            if wants_queue else None)
+            wants_queue = wants_queue and queue_reason is None
+            try:
+                self.perform('proposal', dict(meeting_id=job_id, proposal_key=proposal['key'],
+                                             queue=wants_queue, queue_reason=queue_reason), task_id, actor, automation_policy=policy)
+            except (ValueError, OSError) as error:
+                skipped[proposal['key']] = str(error)[:300]
+                continue
+            origin = self.get(task_id)
+            created_id = (origin.get('follow_up_tasks') or {}).get(proposal['key'])
+            if created_id:
+                if queue_reason:
+                    deferred[proposal['key']] = queue_reason
+                (queued if wants_queue else drafts).append(proposal['key'])
         task = self.get(task_id)
         task.setdefault('auto_queue', {})[job_id] = dict(
-            at=stamp(), queued=queued, drafts=drafts, skipped=skipped,
+            at=stamp(), queued=queued, drafts=drafts, skipped=skipped, deferred=deferred,
             policy={k: policy[k] for k in AUTOMATION_DEFAULTS})
         self.save(task, 'auto_queue_checked', actor)
 
@@ -2071,6 +2095,10 @@ class Contributions:
     def task_instructions(self, task):
         """The standard task prompt; shared by first launches and handovers."""
         prompt = 'Task: ' + task['title'] + '\n' + task['description']
+        if task_delivery.enabled(task):
+            prompt += ('\nYour completion receipt submits the commit for durable verification and optional automatic draft PR publication. '
+                       'Remain in this task session after writing it; the dashboard will send delivery evidence for a final read-only inspection. '
+                       'Do not publish yourself or claim the full workflow complete before that inspection.')
         if task.get('source', {}).get('task_id'):
             try:
                 origin = self.get(task['source']['task_id'])
@@ -2243,6 +2271,8 @@ class Contributions:
                 continue
             try:
                 with self.operation('task:' + str(run.get('task_id') or ''), timeout=0):
+                    if run.get('task_id') and task_delivery.pending(self.get(run['task_id'])):
+                        continue
                     self.store.manage_session(dict(mode='finish', job_id=run['id'],
                                                    organization_id=run['organization_id'],
                                                    inspected=True), 'task_reaper')
@@ -2427,16 +2457,17 @@ class Contributions:
                         publishing_repository=self.publishing_default(remote),
                         base_ref=base, base_sha=sha, branch='herdr/task-' + task_id[:12],
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
-                        created_at=stamp(), checks=[], audit=[], auto_validate=False,
+                        created_at=stamp(), checks=[], audit=[], auto_validate=False, auto_publish=False, await_verification=False,
                         assigned_agent={k: profile.get(k) for k in ('id', 'name', 'role', 'runtime')}, participants=[])
             return self.save(task, 'create', actor)
         task = self.get(task_id)
         had_error = task.pop('error', None) is not None
         # An unchanged background refresh must not rewrite the task or its audit.
         unchanged = self.comparable(task) if action == 'refresh' else None
-        if task['state'] in ('merged', 'closed', 'completed') and action not in ('refresh', 'build', 'discuss', 'review_policy', 'proposal', 'complete', 'assignment'):
+        if task['state'] in ('merged', 'closed', 'completed') and action not in ('refresh', 'build', 'discuss', 'review_policy', 'proposal', 'complete', 'assignment', 'policy'):
             raise ValueError('This task pull request is closed. Create a new task for further changes.')
-        if action != 'assignment':
+        stopping_delivery = action == 'policy' and body.get('auto_validate') is False and body.get('auto_publish') is False
+        if action != 'assignment' and not stopping_delivery:
             repository = self.path_for(task)
             if remote_info(repository) != task['github_repository']:
                 raise ValueError('Repository remote changed; inspect the task before continuing.')
@@ -2646,16 +2677,54 @@ class Contributions:
             self.save(created, 'proposal_accepted', actor)
             task.setdefault('follow_up_tasks', {})[proposal['key']] = new_id
             if automation_policy is not None:
-                self.record_automatic_proposal(created, job, automation_policy, body.get('queue') is True, actor, proposal['key'])
+                self.record_automatic_proposal(created, job, automation_policy, body.get('queue') is True, actor, proposal['key'], body.get('queue_reason'))
             if body.get('queue') is True:
                 created = self.enqueue_assignment(created, actor)
                 self.save(created, 'assignment_queued', actor)
         elif action == 'policy':
+            if task['state'] in ('merged', 'closed', 'completed') and not stopping_delivery:
+                raise ValueError('A terminal task can stop delivery automation, but cannot enable it.')
+            if body.get('auto_validate') is True and task.get('run_id'):
+                run = next((job for job in self.store.snapshot(live_status=False).get('jobs', [])
+                            if job.get('id') == task['run_id']), None)
+                if not run or run.get('state') not in ('persona_sent', 'queued', 'running'):
+                    raise ValueError('Restore the original task session before enabling verification and inspection.')
             if not isinstance(body.get('auto_validate'), bool):
                 raise ValueError('Choose whether automatic capture and validation is enabled.')
             if body['auto_validate'] and (not self.validation or self.validation.snapshot().get('executor') != 'service'):
                 raise ValueError('Install the durable build service before enabling automatic task validation.')
-            task['auto_validate'] = body['auto_validate']
+            automatic_publication = body.get('auto_publish', task.get('auto_publish', False))
+            if not isinstance(automatic_publication, bool):
+                raise ValueError('Choose whether automatic draft PR publication is enabled.')
+            if automatic_publication and not body['auto_validate']:
+                raise ValueError('Automatic publication requires automatic verification.')
+            if automatic_publication:
+                if not self.github.snapshot().get('configured'):
+                    raise ValueError('Configure GitHub publishing before enabling automatic publication.')
+                # Preflight includes the local upstream/destination allowlist checks.
+                task['publication_preflight'] = dict(
+                    self.github.publication_preflight(task['github_repository'], publishing_repository(task)), at=stamp())
+                task['publication_authorization'] = dict(actor=actor, at=stamp(),
+                    upstream=task['github_repository'], repository=publishing_repository(task), branch=task['branch'])
+            if body.get('retry_delivery') is True:
+                if not body['auto_validate']:
+                    raise ValueError('Enable verification before retrying delivery.')
+                old = task.get('delivery_workflow') or {}
+                if old.get('state') != 'attention':
+                    raise ValueError('Only a delivery needing attention can be retried.')
+                task['delivery_retry_build'] = True
+                task['delivery_workflow'] = dict(sha=task.get('head_sha'), state='waiting_verification',
+                    attempt=old.get('attempt', 0) + 1, previous_error=old.get('error', ''), started_at=stamp())
+            old = task.get('delivery_workflow') or {}
+            if (body['auto_validate'] and old and body.get('retry_delivery') is not True
+                    and (not task.get('await_verification') or automatic_publication != task.get('auto_publish', False)
+                         or old.get('state') == 'cancelled')):
+                task['delivery_workflow'] = dict(sha=task.get('head_sha'), state='waiting_verification',
+                    attempt=old.get('attempt', 0) + 1, previous_state=old.get('state'), started_at=stamp())
+            if stopping_delivery and old:
+                old.update(state='cancelled', cancelled_by=actor, cancelled_at=stamp())
+            task.update(auto_validate=body['auto_validate'], auto_publish=automatic_publication,
+                        await_verification=body['auto_validate'])
         elif action == 'candidate':
             path = self.tree_for(task)
             run = next((j for j in self.store.snapshot(live_status=False)['jobs'] if j['id'] == task.get('run_id')), None)
@@ -2695,6 +2764,8 @@ class Contributions:
                             diff_stat=project_git.git(path, 'diff', '--stat', task['base_sha'], head, '--')[:12000],
                             state='review_ready', candidate_changed=bool(task.get('pull') and task['pull']['head_sha'] != head))
         elif action == 'publication':
+            if task.get('auto_publish'):
+                raise ValueError('Disable automatic publication before changing its destination.')
             upstream = task['github_repository']
             self.github.allow(upstream)
             # The recorded destination freezes once anything is published, so a
@@ -2722,7 +2793,6 @@ class Contributions:
                         or evidence.get('state') != 'complete' or evidence.get('required_checks_verified') is not True):
                     raise ValueError('The repaired candidate needs verified required checks before publication.')
             upstream = task['github_repository']
-            self.github.allow(upstream)
             # The upstream stays the base source and pull request target; only
             # the branch destination may be a fork.
             destination = publishing_repository(task)

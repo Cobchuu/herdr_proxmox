@@ -1,3 +1,4 @@
+import 'organization_automation.dart';
 import 'artifact_export.dart';
 import 'dart:convert';
 import 'package:juice/juice.dart';
@@ -13,6 +14,7 @@ import 'remove_entry_dialog.dart';
 const _activeJobStates = [
   'queued',
   'running',
+  'waiting_for_members',
   'needs_attention',
   'waiting_for_input',
 ];
@@ -265,6 +267,48 @@ class _GroupPageState extends State<GroupPage> {
     if (values != null && mounted) await submit('group', values);
   }
 
+  Future<void> realignSession(Map job, Map mismatch, bool force) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          force
+              ? 'Force realign ${mismatch['name']}?'
+              : 'Realign ${mismatch['name']}?',
+        ),
+        content: Text(
+          'Session project: ${mismatch['session_project']}\n'
+          'Current project: ${mismatch['configured_project']}\n\n'
+          '${force ? 'Stop this stale session even if it is working or blocked, after preserving its visible terminal output.' : 'Archive and close this stale session only when it is idle.'} '
+          'Launch a fresh session from the current profile. Checkout files are preserved. '
+          'Other jobs and ambiguous session identities still prevent closure. '
+          'The gateway will resume this unsubmitted discussion automatically when all project mismatches are resolved and members are ready.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(
+              force ? 'Force stop and realign' : 'Archive and relaunch',
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await submit('realign_discussion_session', {
+      'job_id': job['id'],
+      'run_id': mismatch['run_id'],
+      'expected_project': mismatch['configured_project'],
+      'expected_alias': mismatch['alias'],
+      'inspected': true,
+      'force': force,
+    });
+  }
+
   void viewArtifact(Map<String, dynamic> job) => setState(() {
     tab = 'artifacts';
     artifact = job['id'] as String;
@@ -343,6 +387,47 @@ class _GroupPageState extends State<GroupPage> {
         ),
       ),
     );
+  }
+
+  Future<void> respondToBlock(Map stream) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Respond to ${stream['name']}'),
+        content: SizedBox(
+          width: 700,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Review the terminal request and its selected option below. Confirm sends Enter to that option. For a dashboard artifact request, select Allow once using the terminal controls first. This does not update the saved permission policy.',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(stream['output'] as String? ?? ''),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirm selected option'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await submit('input', {
+      'profile_id': stream['profile_id'],
+      'key': 'enter',
+      'console_token': stream['console_token'],
+    });
   }
 
   Widget liveDiscussion(Map<String, dynamic> job) {
@@ -424,6 +509,10 @@ class _GroupPageState extends State<GroupPage> {
                 // visible, avoids sending the operator to another page to
                 // resolve it. The gateway re-verifies the original
                 // conversation is still blocked before sending anything.
+                if (stream['input_result'] is Map)
+                  Text(
+                    'Terminal response: ${stream['input_result']['state']}${(stream['input_result']['error'] as String? ?? '').isEmpty ? '' : ' · ${stream['input_result']['error']}'}',
+                  ),
                 if (stream['status'] == 'blocked')
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
@@ -431,6 +520,16 @@ class _GroupPageState extends State<GroupPage> {
                       spacing: 8,
                       runSpacing: 8,
                       children: [
+                        if (stream['console_token'] != null)
+                          FilledButton.icon(
+                            onPressed: busy
+                                ? null
+                                : () => respondToBlock(stream),
+                            icon: const Icon(Icons.lock_open_outlined),
+                            label: const Text(
+                              'Respond to permission or question',
+                            ),
+                          ),
                         for (final entry in const {
                           'up': 'Up',
                           'down': 'Down',
@@ -445,6 +544,8 @@ class _GroupPageState extends State<GroupPage> {
                                 : () => submit('input', {
                                     'profile_id': stream['profile_id'],
                                     'key': entry.key,
+                                    if (stream['console_token'] != null)
+                                      'console_token': stream['console_token'],
                                   }),
                             child: Text(entry.value),
                           ),
@@ -504,7 +605,7 @@ class _GroupPageState extends State<GroupPage> {
         .toList();
     final occupied = allJobs.any(
       (j) =>
-            ['queued', 'running', 'waiting_for_input'].contains(j['state']) &&
+          ['queued', 'running', 'waiting_for_input'].contains(j['state']) &&
           (j['participants'] as List? ?? [j['profile_id']]).any(
             members.contains,
           ),
@@ -637,6 +738,8 @@ class _GroupPageState extends State<GroupPage> {
                 for (final item in const {
                   'posts': 'Posts',
                   'artifacts': 'Artifacts',
+                  'proposals': 'Proposals',
+                  'settings': 'Settings',
                   'members': 'Members',
                   'about': 'About',
                 }.entries)
@@ -799,6 +902,67 @@ class _GroupPageState extends State<GroupPage> {
                           Text(job['progress'] as String),
                         if ((job['error'] as String? ?? '').isNotEmpty)
                           Text(job['error'] as String),
+                        for (final mismatch
+                            in job['project_mismatches'] as List? ?? [])
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '${mismatch['name']}: session project mismatch',
+                                  ),
+                                  if (mismatch['recovery_pending'] == true)
+                                    Text(
+                                      'Archived session awaits relaunch: ${mismatch['recovery_error'] ?? ''}',
+                                    ),
+                                  SelectableText(
+                                    'Session: ${mismatch['session_project']}\nConfigured: ${mismatch['configured_project']}\nGroup target: ${mismatch['expected_project']}',
+                                  ),
+                                  if (mismatch['repairable'] != true)
+                                    const Text(
+                                      'Update the agent/group project settings first. Task-owned or starting sessions require inspection.',
+                                    ),
+                                  if (connection.operator.value['role'] ==
+                                          'admin' &&
+                                      mismatch['repairable'] == true &&
+                                      [
+                                        'needs_attention',
+                                        'uncertain',
+                                      ].contains(job['state']))
+                                    Wrap(
+                                      children: [
+                                        TextButton(
+                                          onPressed: busy
+                                              ? null
+                                              : () => realignSession(
+                                                  job,
+                                                  mismatch,
+                                                  false,
+                                                ),
+                                          child: const Text(
+                                            'Archive and relaunch in current project',
+                                          ),
+                                        ),
+                                        TextButton(
+                                          onPressed: busy
+                                              ? null
+                                              : () => realignSession(
+                                                  job,
+                                                  mismatch,
+                                                  true,
+                                                ),
+                                          child: const Text(
+                                            'Force realign session',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
                         if (connection.operator.value['role'] == 'admin' &&
                             job['preparation_version'] == 1 &&
                             job['discussion_submitted_at'] == null &&
@@ -853,12 +1017,12 @@ class _GroupPageState extends State<GroupPage> {
                           ),
                         ],
                         if (job == jobs.firstOrNull &&
-                          [
-                            'queued',
-                            'running',
-                            'needs_attention',
-                            'waiting_for_input',
-                          ].contains(job['state']))
+                            [
+                              'queued',
+                              'running',
+                              'needs_attention',
+                              'waiting_for_input',
+                            ].contains(job['state']))
                           liveDiscussion(job),
                         for (final round
                             in ((job['contributions'] as List? ?? [])
@@ -993,6 +1157,111 @@ class _GroupPageState extends State<GroupPage> {
                     ),
                   ),
                 ),
+            ],
+            if (tab == 'settings') ...[
+              Text(
+                'Group settings',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              Text(
+                'Automatic queueing for this group: ${group!['create_tasks'] == true ? 'on' : 'off'}. Outcome reviews: ${group!['notify_outcomes'] != false ? 'on' : 'off'}.',
+              ),
+              Text(
+                'Read-only discussion: ${group!['read_only'] != false ? 'on' : 'off'}. Member permissions keep their individual settings.',
+              ),
+              TextButton(
+                onPressed: busy || archived ? null : edit,
+                child: const Text('Edit group settings'),
+              ),
+              Text(
+                'Default discussion scope: ${group!['review_scope'] == 'repository' ? 'whole repository at configured HEAD' : 'group topic'}.',
+              ),
+              const Divider(),
+              const Text(
+                'Inherited organization limits apply even when group queueing is off.',
+              ),
+              OrganizationAutomation(
+                key: ValueKey('group-policy-${group!['organization_id']}'),
+                organizationId: group!['organization_id'] as String,
+              ),
+            ],
+            if (tab == 'proposals') ...[
+              Text(
+                'Discussion proposals',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const Text(
+                'Creation and queueing outcomes are recorded per discussion. Skipped proposals have not become tasks.',
+              ),
+              if (!jobs.any(
+                (j) => (j['proposal_details'] as List? ?? []).isNotEmpty,
+              ))
+                const Text(
+                  'No finalized proposals in this loaded history. See the artifact for discussion findings.',
+                ),
+              for (final job in jobs)
+                for (final proposal in List<Map<String, dynamic>>.from(
+                  job['proposal_details'] ?? [],
+                ))
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${proposal['title']}',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          Text('Discussion: ${job['id']}'),
+                          Text(
+                            'Assignee: ${profiles.where((p) => p['id'] == proposal['profile_id']).firstOrNull?['name'] ?? proposal['profile_id']}',
+                          ),
+                          Text(
+                            proposal['status'] == 'draft'
+                                ? 'Draft created'
+                                : proposal['status'] == 'queued'
+                                ? 'Created and queued'
+                                : proposal['status'] == 'skipped'
+                                ? 'Skipped'
+                                : 'Awaiting proposal evaluation',
+                          ),
+                          if ('${proposal['reason'] ?? ''}'.isNotEmpty)
+                            SelectableText('${proposal['reason']}'),
+                          if (['true', 'yes'].contains(
+                            '${proposal['needs_review']}'.toLowerCase(),
+                          ))
+                            const Text(
+                              'Operator review required before execution.',
+                            ),
+                          ExpansionTile(
+                            title: const Text(
+                              'Acceptance criteria and required checks',
+                            ),
+                            children: [
+                              SelectableText('${proposal['description']}'),
+                            ],
+                          ),
+                          if (proposal['task_id'] != null)
+                            TextButton(
+                              onPressed: () => widget.coordinator.navigate(
+                                TaskDetailRoute(proposal['task_id'] as String),
+                              ),
+                              child: const Text('Open created task'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+              if (nextBefore != null)
+                TextButton(
+                  onPressed: loading ? null : loadOlder,
+                  child: const Text('Load older proposals'),
+                ),
+              TextButton(
+                onPressed: () => setState(() => tab = 'settings'),
+                child: const Text('View group and organization limits'),
+              ),
             ],
             if (tab == 'about') ...[
               Text(

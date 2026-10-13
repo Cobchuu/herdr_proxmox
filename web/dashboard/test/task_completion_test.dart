@@ -701,7 +701,7 @@ void main() {
     await connection.disconnect();
     await BlocScope.reset();
   });
-  testWidgets('the organization follow-up policy is editable per task', (
+  testWidgets('task automation links to organization settings instead of editing shared policy', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(500, 1400);
@@ -764,18 +764,9 @@ void main() {
     await tester.ensureVisible(find.text('Automation settings'));
     await tester.tap(find.text('Automation settings'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('On: 1/meeting'), findsOneWidget);
-    await tester.tap(find.text('Edit policy'));
-    await tester.pumpAndSettle();
-    expect(find.text('Follow-up automation policy'), findsOneWidget);
-    await tester.tap(find.text('Close finished sessions automatically'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Save policy'));
-    await tester.pumpAndSettle();
-    expect(posts.single['organization_id'], 'org');
-    expect(posts.single['auto_queue_proposals'], true);
-    expect(posts.single['daily_cap'], 5);
-    expect(posts.single['reap_finished_sessions'], true);
+    expect(find.text('Organization settings'), findsOneWidget);
+    expect(find.text('Edit policy'), findsNothing);
+    expect(posts, isEmpty);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await connection.disconnect();
@@ -816,6 +807,8 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(home: Scaffold(body: TasksPage(taskId: 'task'))),
     );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.textContaining('Instance of'));
     await tester.pumpAndSettle();
     await tester.tap(find.textContaining('Instance of'));
     await tester.pumpAndSettle();

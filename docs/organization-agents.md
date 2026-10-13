@@ -267,3 +267,152 @@ Inspect the conversation, recover a saved result if it exists, or explicitly
 choose validation-only continuation when Git incorporation is verified. Recovery
 preserves the previous error and marks the reply verified without terminal input.
 Older jobs retain their existing evidence; an update cannot prove past delivery.
+
+## Organization limits and group proposals
+
+Select an organization under **Org chart**, then open **Automation & limits**.
+The same validated policy editor is available in **Group -> Settings**. Limits
+are scoped to the organization, including standalone group discussions; no task
+needs to exist to read or change them. Only administrators can save policies.
+Task automation retains its task-specific controls and a shortcut to organization
+settings.
+
+**Max per meeting** limits automatic queueing, not draft creation. Every valid
+proposal becomes a task; excess proposals stay unstarted drafts with the queue
+limit reason recorded. Follow-up depth, assignee queue and daily limits likewise
+defer automatic execution rather than discard proposals. Group opt-in and
+organization-wide queueing are separate; `needs_review` proposals remain drafts.
+A rejected proposal shows its recorded reason in **Group -> Proposals**, alongside
+its assignee and a link if a task was created. Task-linked reviews use the parent
+task's recorded materialization outcomes. Only finalized artifacts are parsed;
+viewing proposals does not create work or re-evaluate a discussion.
+
+Changing a limit affects future evaluation, not discussions already evaluated.
+Older history can be loaded from the proposals tab. Existing drafts remain in
+Tasks, where an operator may review, start or queue them.
+
+
+## Repository-wide review groups
+
+Enable **Review the whole repository by default** in the group editor for a
+refactoring council. All members must have the same configured project. Set the
+group purpose to require a subsystem inventory, divided coverage, cross-cutting
+code evidence, challenge of candidate refactors and a coverage table with gaps.
+The complete Refactoring Council description is in the repository `plan.txt`.
+
+**Start discussion** captures the configured project's committed HEAD at submission
+and supplies that SHA to every member through the facilitator. Retained worktree
+HEADs and historical knowledge do not choose the target. Dirty/uncommitted work
+is outside the baseline. No fetch, checkout or branch update is performed; update
+the configured project explicitly if you intend to review newer upstream code.
+The saved baseline survives monitoring/recovery. Custom messages and task-linked
+reviews use their explicit scope. Existing groups default to topic discussions
+until edited; an upgrade does not broaden their authorization.
+
+This is a coordinated advisory review, not an enforced scanner: the artifact must
+state inspected areas and omissions before concluding that no refactor is needed.
+
+
+## Automatic verification and draft PR delivery
+
+In a task's **Automation settings**, administrators can enable **Automatically
+capture and validate**. This now retains the task session until durable checks
+for the receipt's exact commit settle and the worker reviews the results in a
+separate, verified reply. Existing saved policies retain their legacy behavior
+until updated. The worker waits idle for dashboard feedback rather than polling
+or occupying a long-running gateway worker thread.
+
+**Automatically publish a validated draft PR** additionally authorizes pushing
+the task branch to its recorded upstream/fork destination and publishing generated
+task/check details as a draft PR. It requires the durable build service and GitHub
+setup, and enables verification. Authorization records the operator, destination
+and branch. Disable publication before changing the destination. Merge and
+deployment remain manual; publication does not establish acceptance of the code.
+
+Delivery waits for matching required checks, verifies a clean unchanged task tree
+and completion receipt, uses the normal push/PR recovery paths, and checks the
+remote branch and PR identities. Running GitHub checks or undecided mergeability
+keep the session reserved. Failures are reported to the worker when its original
+session is available. A read-only inspection reply must name the exact commit
+and report reviewed or needs_attention; the gateway rechecks evidence before
+allowing a handoff. Permissions are never approved automatically.
+
+Failed durable checks are returned to the original worker with bounded check
+summaries and the build identity. When the durable result is `failed`, the
+worker may repair task code, test it and commit on its existing branch. A verified
+reply must identify both the failed SHA and its replacement; the replacement
+must descend from the failed commit and have a clean checkout and matching
+completion receipt. It receives fresh durable verification before publication.
+There are at most two automatic validation repairs per task. Infrastructure
+errors, exhausted repairs, and publishing/authentication failures require an
+operator decision; the worker must not weaken checks, change credentials,
+switch destinations or publish independently.
+
+Enabling publication refreshes the authenticated account, repository access,
+write access reported for that account, and fork-network identity when used.
+Known incompatible fine-grained authentication for a cross-owner fork PR is
+rejected. These checks run again before publication writes. Account permission
+does not establish token write permission: the UI labels it unproven until
+actual writes succeed. Configure repository selection and Contents/Pull requests
+write permissions (and Workflows write when needed), or appropriate classic
+token scopes, on GitHub. Setup checks never create disposable public branches/PRs.
+
+The dashboard currently stores one credential for both branch push and PR
+creation. For a cross-owner fork such as `Cobchuu/herdr_proxmox` into
+`Ultarius/herdr_proxmox`, the fork owner's fine-grained token cannot enable
+automatic delivery through this preflight. A suitably scoped classic token is
+the currently supported alternative, subject to account access and repository
+policies. Separate push and upstream PR credentials would require additional
+credential storage, routing and verification support; they are not a current
+configuration option. Automatic verification without publication remains usable.
+
+A publishing failure report includes the failed stage, whether the branch was
+already uploaded, and the required operator action. Late failures after a
+successful inspection produce new feedback. If the original session cannot
+receive feedback, the dashboard retains the reservation, displays the delivery
+error and retries notification every 30 seconds; it does not replay publication.
+
+The task status and Automation settings show the delivery stage and agent report.
+A failure keeps the reservation and offers **Retry verification and delivery
+inspection**; explicit retry can rerun failed durable checks and reconcile an
+already-published branch/PR. Disable capture/verification to disable publication
+and stop requiring this barrier. An active inspection chat must still settle
+before another task can use its session. No-change receipts remain terminal
+without creating a pointless commit or PR.
+
+## Fixing stale projects from a discussion
+
+To answer a blocked member's permission prompt, expand **Live discussion**, then
+the member's terminal, and choose **Respond to permission or question**. Review
+the selected OpenCode option before confirming. For a dashboard output directory,
+select **Allow once** with the terminal controls if needed. Confirmation sends
+Enter only if the original conversation is still blocked on the exact inspected
+prompt. A changed prompt requires a fresh inspection. This can unblock a member
+while the facilitator is still running; it does not restart the discussion or
+change the saved permission policy. Saved permission changes apply on the next
+launch.
+
+An unsubmitted repository review shows each session project mismatch directly
+in the group post: agent name, saved session project, current configured project
+and group target. Administrators can choose **Archive and relaunch in current
+project** to preserve and close an idle stale session and launch a fresh one from
+its current profile. The gateway immediately binds the replacement to the group
+and durably schedules continuation when all mismatches are resolved. It waits for
+member startup, idle sessions and admission capacity; no manual retry or open
+browser is needed. Saved launch records also recover continuation after a gateway
+restart. Group notifications refresh progress. A failed startup or preparation
+remains visible for inspection instead of repeatedly replaying prompts. Cancelled
+or already-submitted discussions never resume through this recovery path. It does
+not restart in the retained, outdated checkout.
+
+**Force realign session** confirms an explicit stop of that stale session even
+when it is working or blocked. It preserves visible terminal output and checkout
+files before closure and records the operator and stop request.
+The archive and its viewer explicitly label this as a partial visible-screen
+capture (up to 160 lines), omitting earlier history and possibly ending mid-reply.
+The character limit and any additional truncation are recorded too. It still
+refuses task-owned sessions, other job reservations, ambiguous identities and failed
+archives. Submitted discussions cannot use either action. Partial recovery stays
+visible and retries reuse the recorded launch request instead of duplicating a
+session. If current profile projects themselves disagree, update group/agent
+settings first; these controls do not silently redirect agents to another project.

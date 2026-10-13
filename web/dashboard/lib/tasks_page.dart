@@ -120,7 +120,6 @@ class _TasksPageState extends State<TasksPage> {
   DashboardBloc get connection => BlocScope.get<DashboardBloc>();
   List<Map<String, dynamic>> tasks = [];
   Map<String, dynamic> github = {};
-  Map<String, dynamic> automation = {};
   String executor = 'unavailable';
   String section = 'Overview';
   final Set<String> expandedMeetings = {};
@@ -255,7 +254,6 @@ class _TasksPageState extends State<TasksPage> {
           }
           github = Map<String, dynamic>.from(data['github'] ?? {});
           executor = '${data['executor'] ?? 'unavailable'}';
-          automation = Map<String, dynamic>.from(data['automation'] ?? {});
         });
       }
     } catch (e) {
@@ -359,7 +357,7 @@ class _TasksPageState extends State<TasksPage> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access.',
+                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access. A fine-grained token for your fork cannot authorize a cross-owner upstream PR. For that workflow, use a classic token with appropriate repository scopes. The dashboard currently stores one credential for both push and PR creation; separate PR credentials are not supported.',
                     ),
                     for (final name in listed()) ...[
                       Row(
@@ -1432,10 +1430,6 @@ class _TasksPageState extends State<TasksPage> {
       });
   }
 
-  Map<String, dynamic> _orgPolicy(Map task) => Map<String, dynamic>.from(
-    (automation['${task['organization_id']}'] as Map?) ?? const {},
-  );
-
   Widget _outcomeNotice(Map notice) {
     final state = '${notice['state'] ?? ''}';
     if (state == 'scheduled')
@@ -1470,29 +1464,6 @@ class _TasksPageState extends State<TasksPage> {
     };
   }
 
-  String _automationSummary(Map task) {
-    final policy = _orgPolicy(task);
-    final budget = <String>[
-      if ((policy['max_active_sessions'] ?? 0) > 0)
-        '${policy['max_active_sessions']} active sessions',
-      if ((policy['max_active_meetings'] ?? 0) > 0)
-        '${policy['max_active_meetings']} meetings',
-      if ((policy['daily_session_cap'] ?? 0) > 0)
-        '${policy['daily_session_cap']} starts/day',
-    ].join(', ');
-    final budgetText = budget.isEmpty ? '' : 'Shared budget: $budget. ';
-    final reapText = policy['reap_finished_sessions'] == true
-        ? 'Finished sessions are closed automatically. '
-        : '';
-    if (policy['auto_queue_proposals'] != true)
-      return '${budgetText}${reapText}Organization-wide follow-up is off. Individual groups may opt into queueing; every other finalized proposal stays a draft.';
-    final paused = policy['paused'] == true ? 'Paused. ' : '';
-    return '$budgetText${reapText}${paused}On: ${policy['max_per_meeting'] ?? 1}/meeting, '
-        '${policy['max_open_per_agent'] ?? 2} open per agent, '
-        'depth ${policy['max_follow_up_depth'] ?? 1}, '
-        '${policy['daily_cap'] ?? 5}/day.';
-  }
-
   String _automationOutcome(Map result) {
     final unavailable = '${result['unavailable'] ?? ''}';
     if (unavailable.isNotEmpty) return unavailable;
@@ -1514,188 +1485,12 @@ class _TasksPageState extends State<TasksPage> {
     // Every proposal was rejected before creation; without a prefix this
     // would render as a dangling separator followed by the reasons.
     if (made.isEmpty) return 'Automation: nothing created · $reasons';
-    return 'Automation: $made${reasons.isEmpty ? '' : ' · not created: $reasons'}';
+    final deferred = ((result['deferred'] as Map? ?? const {}).values)
+        .map((value) => '$value')
+        .toSet()
+        .join('; ');
+    return 'Automation: $made${deferred.isEmpty ? '' : ' · kept as drafts: $deferred'}${reasons.isEmpty ? '' : ' · not created: $reasons'}';
   }
-
-  Future<void> editAutomation(Map<String, dynamic> task) async {
-    final epoch = connection.generation;
-    final policy = _orgPolicy(task);
-    var enabled = policy['auto_queue_proposals'] == true;
-    var paused = policy['paused'] == true;
-    var reap = policy['reap_finished_sessions'] == true;
-    var reapOrphaned = policy['reap_orphaned_panes'] == true;
-    final perMeeting = TextEditingController(
-      text: '${policy['max_per_meeting'] ?? 1}',
-    );
-    final perAgent = TextEditingController(
-      text: '${policy['max_open_per_agent'] ?? 2}',
-    );
-    final depth = TextEditingController(
-      text: '${policy['max_follow_up_depth'] ?? 1}',
-    );
-    final daily = TextEditingController(text: '${policy['daily_cap'] ?? 5}');
-    final sessions = TextEditingController(
-      text: '${policy['max_active_sessions'] ?? 0}',
-    );
-    final meetings = TextEditingController(
-      text: '${policy['max_active_meetings'] ?? 0}',
-    );
-    final starts = TextEditingController(
-      text: '${policy['daily_session_cap'] ?? 0}',
-    );
-    final form = GlobalKey<FormState>();
-    Future<dynamic>? dialogClosed;
-    final selected = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (context) {
-        dialogClosed = ModalRoute.of(context)?.completed;
-        return StatefulBuilder(
-          builder: (context, update) => AlertDialog(
-            title: const Text('Follow-up automation policy'),
-            content: SizedBox(
-              width: 480,
-              child: SingleChildScrollView(
-                child: Form(
-                  key: form,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Applies to all group reviews in this organization. Qualifying proposals are created and queued; everything else stays a draft. Publishing, merging and deployment are never automatic.',
-                      ),
-                      SwitchListTile(
-                        value: enabled,
-                        onChanged: (value) =>
-                            update(() => enabled = value == true),
-                        title: const Text(
-                          'Automatically queue qualifying follow-up proposals',
-                        ),
-                      ),
-                      SwitchListTile(
-                        value: paused,
-                        onChanged: (value) =>
-                            update(() => paused = value == true),
-                        title: const Text('Pause automatic follow-up'),
-                        subtitle: const Text(
-                          'Queued work stays queued; nothing new starts automatically.',
-                        ),
-                      ),
-                      _limitField(perMeeting, 'Max per meeting', 10),
-                      _limitField(
-                        perAgent,
-                        'Max open per agent (queued + active)',
-                        50,
-                      ),
-                      _limitField(depth, 'Max follow-up depth', 10),
-                      _limitField(daily, 'Daily limit (organization)', 100),
-                      const Text(
-                        'Shared session budget: one limit over task executions, meetings, discovery and helpers. 0 turns a limit off.',
-                      ),
-                      _limitField(
-                        sessions,
-                        'Max active sessions (organization)',
-                        50,
-                      ),
-                      _limitField(
-                        meetings,
-                        'Max active meetings (organization)',
-                        10,
-                      ),
-                      _limitField(
-                        starts,
-                        'Daily session starts (organization)',
-                        500,
-                      ),
-                      SwitchListTile(
-                        value: reap,
-                        onChanged: (value) =>
-                            update(() => reap = value == true),
-                        title: const Text(
-                          'Close finished sessions automatically',
-                        ),
-                        subtitle: const Text(
-                          'Reclaims memory by archiving and closing sessions whose task already finished. They stay resumable from session archives; an agent that is still working is never closed.',
-                        ),
-                      ),
-                      SwitchListTile(
-                        value: reapOrphaned,
-                        onChanged: (value) =>
-                            update(() => reapOrphaned = value == true),
-                        title: const Text(
-                          'Reclaim panes orphaned by a restart',
-                        ),
-                        subtitle: const Text(
-                          'After a Herdr restart, panes can return as plain shells that no agent holds. This closes them once the pane is proven to run nothing and to sit in the recorded checkout. Ambiguous panes are left for you.',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  if (form.currentState?.validate() != true) return;
-                  Navigator.pop(context, {
-                    'auto_queue_proposals': enabled,
-                    'paused': paused,
-                    'reap_finished_sessions': reap,
-                    'reap_orphaned_panes': reapOrphaned,
-                    'max_per_meeting': int.tryParse(perMeeting.text.trim()),
-                    'max_open_per_agent': int.tryParse(perAgent.text.trim()),
-                    'max_follow_up_depth': int.tryParse(depth.text.trim()),
-                    'daily_cap': int.tryParse(daily.text.trim()),
-                    'max_active_sessions': int.tryParse(sessions.text.trim()),
-                    'max_active_meetings': int.tryParse(meetings.text.trim()),
-                    'daily_session_cap': int.tryParse(starts.text.trim()),
-                  });
-                },
-                child: const Text('Save policy'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-    await dialogClosed;
-    perMeeting.dispose();
-    perAgent.dispose();
-    depth.dispose();
-    daily.dispose();
-    sessions.dispose();
-    meetings.dispose();
-    starts.dispose();
-    if (selected == null || !mounted || epoch != connection.generation) return;
-    await act('automation', {
-      'organization_id': task['organization_id'],
-      ...selected,
-    });
-  }
-
-  Widget _limitField(
-    TextEditingController controller,
-    String label,
-    int maximum,
-  ) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 4),
-    child: TextFormField(
-      controller: controller,
-      validator: (value) {
-        final number = int.tryParse(value?.trim() ?? '');
-        return number == null || number < 0 || number > maximum
-            ? 'Enter a whole number from 0 to $maximum.'
-            : null;
-      },
-      keyboardType: TextInputType.number,
-      decoration: InputDecoration(labelText: label, isDense: true),
-    ),
-  );
 
   Future<void> sendKey(Map<String, dynamic> task, String key) async {
     if (busy || !admin) return;
@@ -2138,9 +1933,7 @@ class _TasksPageState extends State<TasksPage> {
               ),
             if (result.isNotEmpty)
               SelectableText(
-                result.length > 1200
-                    ? '${result.substring(0, 1200)}…'
-                    : result,
+                result.length > 1200 ? '${result.substring(0, 1200)}…' : result,
               ),
             if (ready)
               const Text(
@@ -2630,7 +2423,7 @@ class _TasksPageState extends State<TasksPage> {
                   title: const Text('Automatically capture and validate'),
                   subtitle: Text(
                     executor == 'service'
-                        ? 'Requires a matching completion receipt. Publishing and deployment remain separate.'
+                        ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
                         : 'Install the durable build service to enable automation.',
                   ),
                   value: task['auto_validate'] == true,
@@ -2647,18 +2440,90 @@ class _TasksPageState extends State<TasksPage> {
                       ? (value) => act('policy', {
                           'task_id': task['id'],
                           'auto_validate': value,
+                          if (!value) 'auto_publish': false,
                         })
                       : null,
                 ),
+                SwitchListTile(
+                  title: const Text(
+                    'Automatically publish a validated draft PR',
+                  ),
+                  subtitle: const Text(
+                    'Checks current GitHub account access and the direct/fork destination before enabling. Authorizes pushing verified commits and publishing generated task/check details. Token write access is only proven by successful writes. The agent stays reserved until it reviews the results. Merge and deployment remain manual.',
+                  ),
+                  value: task['auto_publish'] == true,
+                  onChanged:
+                      admin &&
+                          !busy &&
+                          executor == 'service' &&
+                          (task['auto_publish'] == true ||
+                              github['configured'] == true) &&
+                          ![
+                            'merged',
+                            'closed',
+                            'completed',
+                          ].contains(task['state'])
+                      ? (value) => act('policy', {
+                          'task_id': task['id'],
+                          'auto_validate':
+                              value || task['auto_validate'] == true,
+                          'auto_publish': value,
+                        })
+                      : null,
+                ),
+                if (task['delivery_workflow'] is Map) ...[
+                  ListTile(
+                    title: Text(
+                      'Delivery: ${task['delivery_workflow']['state']}',
+                    ),
+                    subtitle: Text(
+                      '${task['delivery_workflow']['error'] ?? ''}\n${task['delivery_workflow']['notification_error'] ?? ''}\n${task['delivery_workflow']['agent_report']?['summary'] ?? ''}',
+                    ),
+                  ),
+                  if (task['await_verification'] == true ||
+                      task['auto_publish'] == true)
+                    TextButton(
+                      onPressed: admin && !busy
+                          ? () => act('policy', {
+                              'task_id': task['id'],
+                              'auto_validate': false,
+                              'auto_publish': false,
+                            })
+                          : null,
+                      child: const Text('Stop delivery automation'),
+                    ),
+                  if (task['delivery_workflow']['state'] == 'attention')
+                    TextButton(
+                      onPressed: admin && !busy && task['auto_validate'] == true
+                          ? () => act('policy', {
+                              'task_id': task['id'],
+                              'auto_validate': true,
+                              'auto_publish': task['auto_publish'] == true,
+                              'retry_delivery': true,
+                            })
+                          : null,
+                      child: const Text(
+                        'Retry verification and delivery inspection',
+                      ),
+                    ),
+                ],
                 if (task['organization_id'] != null)
                   ListTile(
                     title: const Text('Organization follow-up automation'),
-                    subtitle: Text(_automationSummary(task)),
+                    subtitle: const Text(
+                      'Shared limits and queueing are managed by the organization.',
+                    ),
                     trailing: TextButton(
-                      onPressed: admin && !busy
-                          ? () => editAutomation(task)
+                      onPressed: admin && !busy && widget.coordinator != null
+                          ? () {
+                              connection.selectedOrganization.value =
+                                  task['organization_id'] as String;
+                              widget.coordinator?.navigate(
+                                OrganizationRoute('automation'),
+                              );
+                            }
                           : null,
-                      child: const Text('Edit policy'),
+                      child: const Text('Organization settings'),
                     ),
                   ),
                 if (admin)

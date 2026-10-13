@@ -1,3 +1,4 @@
+import 'package:herdr_dashboard/organization_automation.dart';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -7,7 +8,11 @@ import 'package:herdr_dashboard/dashboard_bloc.dart';
 import 'package:herdr_dashboard/tasks_page.dart';
 
 void main() {
-  Future<DashboardBloc> mountTask(WidgetTester tester, List<Map> posts) async {
+  Future<DashboardBloc> mountTask(
+    WidgetTester tester,
+    List<Map> posts, {
+    bool losePolicyResponse = false,
+  }) async {
     tester.view.physicalSize = const Size(1280, 1800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -28,7 +33,19 @@ void main() {
             ...jsonDecode(request.body) as Map,
           });
         }
-        final data = request.url.path.endsWith('/tasks')
+        if (losePolicyResponse &&
+            request.url.path.endsWith('/tasks/automation')) {
+          losePolicyResponse = false;
+          return http.Response('{"error":"response lost"}', 503);
+        }
+        final data =
+            request.url.path.endsWith('/organizations/automation') ||
+                request.url.path.endsWith('/tasks/automation')
+            ? {
+                'policy': {'max_per_meeting': 1},
+                'organization_id': 'org',
+              }
+            : request.url.path.endsWith('/tasks')
             ? {
                 'tasks': [task],
                 'github': {'configured': true},
@@ -74,6 +91,12 @@ void main() {
     (tester) async {
       final posts = <Map>[];
       final connection = await mountTask(tester, posts);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: OrganizationAutomation(organizationId: 'org')),
+        ),
+      );
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Edit policy'));
       await tester.tap(find.text('Edit policy'));
       await tester.pumpAndSettle();
@@ -91,6 +114,39 @@ void main() {
       expect(posts.single['path'], '/api/tasks/automation');
       expect(posts.single['max_per_meeting'], 2);
       expect(posts.single.values, isNot(contains(null)));
+      await finish(tester, connection);
+    },
+  );
+
+  testWidgets(
+    'an uncertain organization policy save reuses its request identity',
+    (tester) async {
+      final posts = <Map>[];
+      final connection = await mountTask(
+        tester,
+        posts,
+        losePolicyResponse: true,
+      );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: OrganizationAutomation(organizationId: 'org')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit policy'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Max per meeting'),
+        '2',
+      );
+      await tester.tap(find.text('Save policy'));
+      await tester.pumpAndSettle();
+      expect(posts, hasLength(1));
+      await tester.tap(find.text('Retry same policy save'));
+      await tester.pumpAndSettle();
+      expect(posts, hasLength(2));
+      expect(posts.first, posts.last);
+      expect(posts.last['organization_id'], 'org');
       await finish(tester, connection);
     },
   );

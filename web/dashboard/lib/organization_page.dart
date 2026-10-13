@@ -1,3 +1,4 @@
+import 'organization_automation.dart';
 import 'dart:convert';
 import 'artifact_download.dart';
 import 'permission_options.dart';
@@ -332,6 +333,14 @@ class _OrganizationPageState extends State<OrganizationPage> {
                   SelectableText(
                     'Checkout: ${data['worktree_path'] ?? data['source_project']}\nBranch: ${data['worktree_branch']}\nTask: ${data['task_id']}',
                   ),
+                  if (data['terminal_capture']?['forced_stop'] == true)
+                    const Text(
+                      'Forced stop: visible screen only (up to 160 lines). Earlier history is omitted; the reply may be incomplete.',
+                    ),
+                  if (data['terminal_capture']?['character_truncated'] == true)
+                    const Text(
+                      'Terminal output also exceeded the archive character limit.',
+                    ),
                   SelectableText(
                     '${data['terminal'] ?? data['terminal_unavailable'] ?? 'Terminal unavailable.'}',
                   ),
@@ -728,25 +737,37 @@ class _OrganizationPageState extends State<OrganizationPage> {
                         ],
                       ),
                       const SizedBox(height: 12),
-                      SegmentedButton<String>(
-                        segments: const [
-                          ButtonSegment(
-                            value: 'chart',
-                            label: Text('Chart'),
-                            icon: Icon(Icons.account_tree_outlined),
-                          ),
-                          ButtonSegment(value: 'team', label: Text('Team')),
-                          ButtonSegment(value: 'runs', label: Text('Runs')),
-                          ButtonSegment(
-                            value: 'collaborate',
-                            label: Text('Chat'),
-                          ),
-                        ],
-                        selected: {view},
-                        onSelectionChanged: (values) =>
-                            setState(() => view = values.single),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(
+                              value: 'chart',
+                              label: Text('Chart'),
+                              icon: Icon(Icons.account_tree_outlined),
+                            ),
+                            ButtonSegment(value: 'team', label: Text('Team')),
+                            ButtonSegment(value: 'runs', label: Text('Runs')),
+                            ButtonSegment(
+                              value: 'automation',
+                              label: Text('Automation & limits'),
+                            ),
+                            ButtonSegment(
+                              value: 'collaborate',
+                              label: Text('Chat'),
+                            ),
+                          ],
+                          selected: {view},
+                          onSelectionChanged: (values) =>
+                              setState(() => view = values.single),
+                        ),
                       ),
                       const SizedBox(height: 18),
+                      if (view == 'automation')
+                        OrganizationAutomation(
+                          key: ValueKey('automation-${org['id']}'),
+                          organizationId: org['id'] as String,
+                        ),
                       if (view == 'collaborate')
                         CollaborationPanel(
                           key: ValueKey(org['id']),
