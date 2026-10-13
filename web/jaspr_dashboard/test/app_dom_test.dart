@@ -368,7 +368,7 @@ void main() {
       );
       try {
         final topAction = nodes(
-          '.page-heading button',
+          '.page-header button',
         ).firstWhere((node) => node.textContent == 'Create workspace');
         topAction.click();
         await settle();

@@ -1,0 +1,129 @@
+/* Overview page header, runtime banner and stat strip.
+   Taken from the Phase 2 design package: css/base.css, dashboard.css,
+   components.css and composites.css.
+
+   This lives in its own file instead of being merged into styles.css because the
+   reference and the dashboard both define some of the same names, and they are
+   not equivalent: `.field` is a stacked form field here but an input wrapper
+   there, and `.card__header` and `.btn` also differ. Only selectors the
+   dashboard does not already define are copied, so nothing existing changes.
+   The `.btn--*` variants layer on the existing `.btn` base rather than replacing
+   it. Colour, spacing and type come from css/tokens.css, which is byte-identical
+   to the reference. */
+
+/* ---- Page header (base.css) ---------------------------------------------- */
+.page-header {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  gap: var(--space-4) var(--space-6); margin-bottom: var(--space-6);
+}
+.page-header__text { min-width: 0; }
+.page-header__overline { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-tertiary); }
+.page-header__title {
+  margin-top: var(--space-1); font-size: var(--text-2xl-size); line-height: var(--text-2xl-leading);
+  font-weight: var(--weight-semibold); letter-spacing: var(--tracking-tight);
+}
+.page-header__subtitle { margin-top: var(--space-1); color: var(--color-text-secondary); }
+.page-header__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+@media (max-width: 639.98px) {
+  .page-header__actions { width: 100%; }
+  .page-header__actions > .btn { flex: 1; }
+}
+
+/* ---- "Updated" timestamp (composites.css) --------------------------------- */
+.updated {
+  display: inline-flex; align-items: center; gap: var(--space-1); margin-right: var(--space-2);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* ---- Runtime banner (dashboard.css) --------------------------------------- */
+.runtime {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4); margin-bottom: var(--space-4);
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  background: linear-gradient(100deg, var(--color-success-bg), var(--color-surface) 32%);
+  box-shadow: var(--shadow-xs);
+}
+.runtime[data-state="stopped"] { background: linear-gradient(100deg, var(--color-neutral-bg), var(--color-surface) 32%); }
+.runtime .runtime__tile[data-tone] {
+  position: relative; background: var(--color-surface); border-color: var(--color-border);
+  box-shadow: var(--shadow-xs); color: var(--tone-fg);
+}
+.runtime__tile::after {
+  content: ""; position: absolute; top: -3px; right: -3px; width: 10px; height: 10px;
+  border-radius: var(--radius-full); background: var(--tone-solid); box-shadow: 0 0 0 2px var(--color-surface);
+}
+.runtime[data-state="running"] .runtime__tile::after { animation: runtime-pulse var(--duration-pulse) var(--ease-standard) infinite; }
+@keyframes runtime-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 2px var(--tone-solid); }
+  60% { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 7px transparent; }
+}
+.runtime__text { flex: 1 1 220px; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); }
+.runtime__title { font-size: var(--text-base-size); line-height: var(--text-base-leading); font-weight: var(--weight-semibold); }
+.runtime__meta { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+@media (max-width: 639.98px) {
+  .runtime { padding: var(--space-3) var(--space-4) var(--space-4); }
+  .runtime .btn { width: 100%; }
+}
+
+/* ---- Button variants (components.css), on top of the existing .btn -------- */
+.btn--ghost { background: transparent; color: var(--color-text-secondary); }
+.btn--ghost:hover { background: var(--color-hover); color: var(--color-text); }
+.btn--danger { color: var(--color-danger-fg); }
+.btn--danger:hover { background: var(--color-danger-bg); color: var(--color-danger-fg); }
+
+/* ---- Icon tile (components.css) ------------------------------------------- */
+.icon-tile {
+  display: inline-grid; place-items: center; flex: none; width: var(--control-md); height: var(--control-md);
+  border-radius: var(--radius-md); border: 1px solid var(--color-border);
+  background: var(--color-surface-sunken); color: var(--color-text-secondary);
+}
+.icon-tile[data-tone] { background: var(--tone-bg); color: var(--tone-fg); border-color: transparent; }
+.icon-tile--lg { width: 44px; height: 44px; border-radius: var(--radius-lg); }
+.icon-tile--lg .icon { width: var(--icon-lg); height: var(--icon-lg); }
+
+/* ---- Count pill (components.css) ------------------------------------------ */
+.count {
+  display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 var(--space-1-5);
+  border-radius: var(--radius-full); background: var(--color-neutral-bg); color: var(--color-neutral-fg);
+  font-size: var(--text-xs-size); font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums;
+}
+.count--accent { background: var(--color-accent-subtle); color: var(--color-accent-text); }
+
+/* ---- Stat strip (composites.css + dashboard.css) -------------------------- */
+.overview-stats { container: overview-stats / inline-size; margin-bottom: var(--space-6); }
+.stat-strip {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; overflow: hidden;
+  background: var(--color-border); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs);
+}
+@media (min-width: 768px) { .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { .stat-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.stat-strip > li { display: flex; min-width: 0; }
+.stat-strip__item {
+  display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0; min-height: 64px;
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5); background: var(--color-surface); color: var(--color-text);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+a.stat-strip__item:hover { background: var(--color-hover); }
+.stat-strip__item:focus-visible { outline-offset: -2px; }
+.stat-strip__icon { color: var(--color-text-tertiary); }
+.stat-strip__text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-1-5); flex: 1; min-width: 0; }
+.stat-strip__value {
+  font-size: var(--text-lg-size); line-height: var(--text-lg-leading); font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.stat-strip__label { color: var(--color-text-secondary); }
+.stat-strip__meta {
+  display: inline-flex; align-items: center; gap: var(--space-1-5); flex-basis: 100%;
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary);
+}
+.stat-strip__meta[data-tone] { color: var(--tone-fg); }
+.stat-strip__chevron { color: var(--color-text-tertiary); transition: transform var(--duration-fast) var(--ease-standard); }
+a.stat-strip__item:hover .stat-strip__chevron { transform: translateX(2px); color: var(--color-text); }
+@container overview-stats (max-width: 999.98px) {
+  .stat-strip__item { padding-inline: var(--space-4) var(--space-3); }
+  .stat-strip__chevron { display: none; }
+}
+@container overview-stats (max-width: 799.98px) {
+  .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

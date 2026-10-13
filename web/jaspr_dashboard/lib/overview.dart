@@ -193,47 +193,114 @@ class _OverviewPageState extends State<OverviewPage> {
     );
   }
 
+  /// One linked segment of the overview stat strip.
+  Component _stat(String label, String value, String meta) => el('li', [
+    el('div', [
+      el('span', [text(value)], classes: 'stat-strip__value'),
+      el('span', [text(label)], classes: 'stat-strip__label'),
+      el('span', [text(meta)], classes: 'stat-strip__meta'),
+    ], classes: 'stat-strip__item'),
+  ]);
+
+  /// "Tuesday, 13 October" without pulling in a date-formatting package.
+  String today() {
+    const weekdays = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    const months = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+    final now = DateTime.now();
+    return '${weekdays[now.weekday - 1]}, ${now.day} ${months[now.month - 1]}';
+  }
+
   @override
   Component build(BuildContext context) {
     final state = dashboardConnection.state;
     final admin = dashboardConnection.operator.value['role'] == 'admin';
+    final working = state.agents
+        .where((a) => activityFor(a) == 'working')
+        .length;
+    final attention = state.agents
+        .where((a) => agentStatus(a) == 'blocked')
+        .length;
     return el('div', [
-      el('div', [
+      el('header', [
         el('div', [
+          el('p', [
+            text(today()),
+          ], classes: 'page-header__overline'),
           el('h1', [
             text(component.agentsOnly ? 'Agent activity' : 'Overview'),
-          ]),
+          ], classes: 'page-header__title'),
           el('p', [
             text(
               '${state.agents.length} agents across ${state.workspaces.length} workspaces',
             ),
-          ], classes: 'muted'),
-        ]),
-        if (!component.agentsOnly && admin)
+          ], classes: 'page-header__subtitle'),
+        ], classes: 'page-header__text'),
+        if (!component.agentsOnly)
           el('div', [
-            button('Add project', openProject),
-            button('Create workspace', openProject, primary: true),
-          ], classes: 'actions'),
-      ], classes: 'page-heading'),
+            if (state.refreshed != null)
+              el('span', [
+                text(
+                  'Updated ${state.refreshed!.toLocal().toString().substring(11, 19)}',
+                ),
+              ], classes: 'updated'),
+            button(
+              'Refresh',
+              () => action('refresh', {}),
+              disabled: state.busy,
+            ),
+            if (admin) ...[
+              button('Add project', openProject),
+              button('Create workspace', openProject, primary: true),
+            ],
+          ], classes: 'page-header__actions'),
+      ], classes: 'page-header'),
       if (!component.agentsOnly)
         el(
           'section',
           [
-            icon('activity'),
+            el('span', [
+              icon('activity'),
+            ], classes: 'icon-tile icon-tile--lg runtime__tile', attributes: {
+              'data-tone': state.serverStatus == 'running'
+                  ? 'success'
+                  : 'neutral',
+            }),
             el('div', [
-              el('strong', [
+              el('h2', [
                 text(
                   state.serverStatus == 'running'
                       ? 'Herdr is running'
                       : 'Herdr: ${state.serverStatus}',
                 ),
-              ]),
+              ], classes: 'runtime__title'),
               el('p', [
                 text(
-                  '${state.agents.where((a) => activityFor(a) == 'working').length} agents working',
+                  '${state.agents.where((a) => activityFor(a) == 'working').length} of '
+                  '${state.agents.length} agents working',
                 ),
-              ], classes: 'muted'),
-            ]),
+              ], classes: 'runtime__meta'),
+            ], classes: 'runtime__text'),
             if (state.serverStatus == 'stopped' && admin)
               button(
                 'Start Herdr',
@@ -241,60 +308,48 @@ class _OverviewPageState extends State<OverviewPage> {
                     dashboardConnection.send(DashboardCommand('start-server')),
                 disabled: state.busy,
                 primary: true,
+              )
+            else if (admin)
+              button(
+                'Stop',
+                () =>
+                    dashboardConnection.send(DashboardCommand('stop-server')),
+                disabled: state.busy,
+                classes: 'btn--danger',
               ),
           ],
-          classes: 'runtime-banner',
+          classes: 'runtime',
           attributes: {
-            'data-tone': state.serverStatus == 'running'
-                ? 'success'
-                : 'neutral',
+            'data-state': state.serverStatus == 'running' ? 'running' : 'stopped',
           },
         ),
       if (!component.agentsOnly)
         el('div', [
-          card('Agents', [
-            el(
-              'a',
-              [text(state.agents.length)],
-              classes: 'metric',
-              attributes: {'href': '#/agents'},
+          el('ul', [
+            _stat(
+              'Agents working',
+              '$working/${state.agents.length}',
+              '${state.agents.length - working} idle',
             ),
-            text(
-              '${state.agents.where((a) => activityFor(a) == 'working').length} working',
+            _stat(
+              'Needs attention',
+              '$attention',
+              attention == 1 ? 'agent blocked or failed' : 'agents blocked or failed',
             ),
-          ]),
-          card('Workspaces', [
-            el(
-              'a',
-              [text(state.workspaces.length)],
-              classes: 'metric',
-              attributes: {'href': '#/explorer'},
+            _stat(
+              'Workspaces',
+              '${state.workspaces.length}',
+              '${state.agents.length} agents assigned',
             ),
-          ]),
-          card(
-            'Connection',
-            [
-              badge(
-                state.serverStatus == 'running'
-                    ? 'Running'
-                    : state.serverStatus,
-                tone: state.serverStatus == 'running' ? 'success' : 'neutral',
-              ),
-              text(
-                state.refreshed == null
-                    ? 'Waiting for first update'
-                    : 'Updated ${state.refreshed!.toLocal().toString().substring(11, 19)}',
-              ),
-            ],
-            actions: [
-              button(
-                'Refresh',
-                () => action('refresh', {}),
-                disabled: state.busy,
-              ),
-            ],
-          ),
-        ], classes: 'summary-grid'),
+            _stat(
+              'Connection',
+              state.connected ? 'Online' : 'Offline',
+              state.refreshed == null
+                  ? 'Waiting for first update'
+                  : 'Updated ${state.refreshed!.toLocal().toString().substring(11, 19)}',
+            ),
+          ], classes: 'stat-strip', attributes: {'role': 'list'}),
+        ], classes: 'overview-stats'),
       _agents(),
       if (!component.agentsOnly)
         el('div', [
