@@ -333,6 +333,14 @@ class _OrganizationPageState extends State<OrganizationPage> {
                   SelectableText(
                     'Checkout: ${data['worktree_path'] ?? data['source_project']}\nBranch: ${data['worktree_branch']}\nTask: ${data['task_id']}',
                   ),
+                  if (data['terminal_capture']?['forced_stop'] == true)
+                    const Text(
+                      'Forced stop: visible screen only (up to 160 lines). Earlier history is omitted; the reply may be incomplete.',
+                    ),
+                  if (data['terminal_capture']?['character_truncated'] == true)
+                    const Text(
+                      'Terminal output also exceeded the archive character limit.',
+                    ),
                   SelectableText(
                     '${data['terminal'] ?? data['terminal_unavailable'] ?? 'Terminal unavailable.'}',
                   ),

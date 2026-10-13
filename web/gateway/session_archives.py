@@ -6,7 +6,7 @@ import uuid
 from organizations import now
 
 
-def archive(store, run, actor, terminal=None, unavailable=None):
+def archive(store, run, actor, terminal=None, unavailable=None, capture=None):
     messages = []
     for job in store.job_records():
         linked = any(r.get('id') == run['id'] and r.get('alias') == run.get('alias') for r in job.get('runs', []))
@@ -18,7 +18,10 @@ def archive(store, run, actor, terminal=None, unavailable=None):
     # registration once the pane returns to an idle shell.
     probe = getattr(store, 'probe_resume', None)
     resume = probe(run) if probe else dict(state='unavailable', reason='Resume capability was not probed.')
-    key = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr-session:' + run['id'] + ':' + str(run.get('alias')) + ':' + hashlib.sha256(json.dumps([terminal, unavailable, messages], sort_keys=True).encode()).hexdigest()).hex
+    evidence_key = [terminal, unavailable, messages]
+    if capture is not None:
+        evidence_key.append(capture)
+    key = uuid.uuid5(uuid.NAMESPACE_URL, 'herdr-session:' + run['id'] + ':' + str(run.get('alias')) + ':' + hashlib.sha256(json.dumps(evidence_key, sort_keys=True).encode()).hexdigest()).hex
     with store.lock, closing(store.connect()) as db:
         existing = db.execute('SELECT data FROM session_archives WHERE id=?', (key,)).fetchone()
     if existing:
@@ -31,6 +34,8 @@ def archive(store, run, actor, terminal=None, unavailable=None):
         terminal_is_complete_transcript=False, messages=messages, handover=run.get('handover'), resume=resume,
         native_resume_available=resume.get('state') == 'verified', native_resume_state=resume.get('state', 'unavailable'),
         native_resume_reference=resume.get('reference'), native_resume_reason=resume.get('reason'))
+    if capture is not None:
+        data['terminal_capture'] = capture
     try:
         from project_files import project_directory
         from repository_lock import repository_lock
@@ -87,7 +92,10 @@ def context(data):
     if isinstance(handover, dict) and handover:
         from herdr_errors import format_handover
         parts.append('Recorded handover note:\n' + format_handover(handover))
-    parts.append('Recent terminal evidence (bounded; may omit earlier conversation):\n'
+    label = ('Visible screen only, captured before a forced stop; earlier history is omitted'
+             if (data.get('terminal_capture') or {}).get('forced_stop') else
+             'Recent terminal evidence (bounded; may omit earlier conversation)')
+    parts.append(label + ':\n'
                  + (data.get('terminal') or data.get('terminal_unavailable') or 'Unavailable')[-12000:])
     body = '\n\n'.join(parts)
     if len(body) > 22000:

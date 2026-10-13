@@ -244,6 +244,11 @@ def action(store, db, name, body, org):
             # exception a blocked discussion could never be resolved through
             # the dashboard. Interrupting an agent that is actually working is
             # still refused.
+            if (job.get('kind') == 'discussion' and job.get('state') == 'running'
+                    and job.get('discussion_submitted_at') and body.get('console_token')):
+                verify_decision_input(store, job, runs[0])
+                decision_job = job['id']
+                continue
             if job.get('state') in ('queued', 'running'):
                 raise ValueError('An agent already has queued or running task work. Wait for it to finish.')
             if job.get('state') == 'waiting_for_input':
@@ -452,7 +457,9 @@ def discussion_directory(store, job):
 
 def verify_decision_input(store, owner, run):
     """Decision keys apply only to the original, currently blocked conversation."""
-    if owner.get('state') != 'waiting_for_input':
+    if (owner.get('state') != 'waiting_for_input' and not
+            (owner.get('kind') == 'discussion' and owner.get('state') == 'running'
+             and owner.get('discussion_submitted_at'))):
         raise ValueError('The discussion is no longer waiting for a decision.')
     saved = next((r for r in [owner.get('group_run', {}), *owner.get('runs', [])]
                   if r.get('id') == run['id']), None)
@@ -697,11 +704,19 @@ def inspect_discussion(store, db, body, org_id):
     job = store.get(db, 'jobs', text(body, 'job_id', 40), org_id)
     if job['kind'] != 'discussion':
         raise ValueError('Select a discussion job.')
+    responses = {}
+    for row in db.execute("SELECT data FROM jobs WHERE organization_id=? "
+                          "AND json_extract(data, '$.kind')='input' "
+                          "AND json_extract(data, '$.decision_job_id')=? ORDER BY rowid DESC LIMIT 20",
+                          (org_id, job['id'])).fetchall():
+        response = json.loads(row['data'])
+        responses.setdefault(response.get('profile_id'),
+                             {key: response.get(key) for key in ('id', 'state', 'key', 'error')})
     runs = []
     for saved in [job['group_run'], *job['runs']]:
         try:
             run = store.get(db, 'jobs', saved['id'], org_id)
-            if run['state'] != 'persona_sent':
+            if run['state'] not in ('persona_sent', 'queued', 'running'):
                 raise ValueError('Agent conversation is not launched or was released.')
             runs.append((saved, run, None))
         except ValueError as error:
@@ -713,16 +728,20 @@ def inspect_discussion(store, db, body, org_id):
                       status='unavailable', output='', error=error or '')
         if run is None:
             return stream
+        if run['state'] in ('queued', 'running'):
+            stream.update(status='starting', error='Session is starting; waiting for readiness.')
+            return stream
         try:
             response = store.command('agent', 'get', run['alias'], timeout=2)
             agent = store.identity(run, ready=False, agent=response.get('agent'))
             status = agent.get('agent_status', agent.get('state', 'unknown'))
             output = store.command('agent', 'read', run['alias'], '--source',
                                    'visible' if status not in ('idle', 'done') else 'recent-unwrapped',
-                                   '--lines', '80', timeout=2)['output']
+                                   '--lines', '160', timeout=2)['output']
             # Do not publish output if a binding changed during the CLI read.
             store.identity(run, ready=False, agent=store.command('agent', 'get', run['alias'], timeout=1).get('agent'))
-            stream.update(status=status, output=output[:20000])
+            stream.update(status=status, output=output[:20000],
+                          console_token=console_token(run, output) if status == 'blocked' else None)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             stream['error'] = str(error)
         return stream
@@ -730,6 +749,9 @@ def inspect_discussion(store, db, body, org_id):
     # Seven bindings maximum, two bounded batches; no SQLite handles in workers.
     with ThreadPoolExecutor(max_workers=4) as reader:
         streams = list(reader.map(inspect, runs))
+    for stream in streams:
+        if stream['profile_id'] in responses:
+            stream['input_result'] = responses[stream['profile_id']]
     directory = store.path.parent / 'discussion-artifacts' / job['id']
     draft = ''
     contributions = []

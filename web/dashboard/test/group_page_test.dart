@@ -9,6 +9,108 @@ import 'package:herdr_dashboard/group_page.dart';
 import 'package:herdr_dashboard/routes.dart';
 
 void main() {
+  testWidgets(
+    'blocked member response requires review and carries the inspected prompt token',
+    (tester) async {
+      tester.view.physicalSize = const Size(1400, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final data = {
+        'organizations': [
+          {'id': 'org'},
+        ],
+        'profiles': [],
+        'groups': [
+          {
+            'id': 'group',
+            'organization_id': 'org',
+            'name': 'Review',
+            'description': 'Review',
+            'members': ['nora'],
+          },
+        ],
+        'jobs': [
+          {
+            'id': 'meeting',
+            'kind': 'discussion',
+            'organization_id': 'org',
+            'group_id': 'group',
+            'state': 'running',
+            'group': {'description': 'Review'},
+            'prompt': 'Review repository',
+          },
+        ],
+      };
+      final posted = <Map<String, dynamic>>[];
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/input')) {
+            posted.add(jsonDecode(request.body) as Map<String, dynamic>);
+            return http.Response('{"id":"input"}', 200);
+          }
+          if (request.url.path.endsWith('/inspect')) {
+            return http.Response(
+              jsonEncode({
+                'streams': [
+                  {
+                    'profile_id': 'nora',
+                    'name': 'Nora',
+                    'status': 'blocked',
+                    'output':
+                        'Permission required: discussion-artifacts. Selected: Allow once',
+                    'console_token': 'reviewed-prompt-token',
+                  },
+                ],
+              }),
+              200,
+            );
+          }
+          return http.Response(
+            jsonEncode(
+              request.url.path.contains('/organizations')
+                  ? data
+                  : {'authenticated': true, 'workspaces': [], 'agents': []},
+            ),
+            200,
+          );
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      final connected = connection.stream.firstWhere(
+        (_) => connection.state.connected,
+      );
+      connection.connect('token');
+      await connected;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: GroupPage(id: 'group', coordinator: AppCoordinator()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Live discussion · 0 replies'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Nora · blocked'));
+      await tester.pumpAndSettle();
+      final respond = find.text('Respond to permission or question');
+      await tester.ensureVisible(respond);
+      await tester.tap(respond);
+      await tester.pumpAndSettle();
+      expect(posted, isEmpty);
+      expect(find.text('Respond to Nora'), findsOneWidget);
+      await tester.tap(find.text('Confirm selected option'));
+      await tester.pumpAndSettle();
+      expect(posted.single['profile_id'], 'nora');
+      expect(posted.single['key'], 'enter');
+      expect(posted.single['console_token'], 'reviewed-prompt-token');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      BlocScope.endAll();
+    },
+  );
   for (final force in [false, true]) {
     testWidgets(
       'project mismatch realignment uses explicit confirmation (force=$force)',
@@ -63,6 +165,10 @@ void main() {
               posted['realign'] =
                   jsonDecode(request.body) as Map<String, dynamic>;
               job['project_mismatches'] = [];
+              job['state'] = 'waiting_for_members';
+              job['error'] = '';
+              job['progress'] =
+                  'Sessions realigned; discussion will resume automatically when members are ready.';
               return http.Response(
                 '{"id":"meeting","new_run_id":"new-felix"}',
                 200,
@@ -116,7 +222,13 @@ void main() {
         expect(posted['realign']?['force'], force);
         expect(posted['realign']?['run_id'], 'old-felix');
         expect(posted['realign']?['expected_project'], '/projects/repo');
-        expect(posted['retry']?['inspected'], true);
+        expect(posted['retry'], isNull);
+        expect(
+          find.text(
+            'Sessions realigned; discussion will resume automatically when members are ready.',
+          ),
+          findsOneWidget,
+        );
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
         await connection.disconnect();

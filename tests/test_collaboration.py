@@ -381,9 +381,15 @@ class CollaborationTests(unittest.TestCase):
         self.assertEqual(realign(self.store, body, 'admin')['new_run_id'], new['id'])
         self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('agent', 'start')]), launches)
         with patch('project_git.git', side_effect=['a' * 40, '']):
-            self.action('retry_discussion', organization_id=self.org, job_id=meeting, inspected=True)
+            self.store.advance_discussions()
             self.drain()
         self.assertEqual(self.job(meeting)['state'], 'artifact_ready', self.job(meeting).get('error'))
+        prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
+        self.assertEqual(len(prompts), 1)
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(len([a for a, _ in self.calls if a[:2] == ('agent', 'prompt')
+                              and 'Discussion directory:' in a[3]]), 1)
 
     def test_force_realign_stops_busy_stale_session_but_normal_action_refuses(self):
         from discussion_recovery import realign
@@ -403,6 +409,125 @@ class CollaborationTests(unittest.TestCase):
         self.assertTrue(old['forced_stop_requested_at'])
         self.assertTrue(old['session_archive_id'])
         self.assertTrue(any(a[:2] == ('agent', 'read') and '--source' in a and a[a.index('--source') + 1] == 'visible' for a, _ in self.calls))
+        from session_archives import read, context
+        saved = read(self.store, self.org, old['session_archive_id'])
+        self.assertEqual(saved['terminal_capture']['source'], 'visible')
+        self.assertEqual(saved['terminal_capture']['requested_lines'], 160)
+        self.assertTrue(saved['terminal_capture']['history_truncated'])
+        self.assertTrue(saved['terminal_capture']['forced_stop'])
+        self.assertFalse(saved['terminal_is_complete_transcript'])
+        self.assertIn('earlier history is omitted', context(saved))
+
+    def test_realign_continuation_survives_interruption_and_waits_for_startup(self):
+        from discussion_recovery import realign
+        meeting, old = self._project_mismatch()
+        body = dict(organization_id=self.org, job_id=meeting, run_id=old['id'],
+                    expected_project=str(self.projects), expected_alias=old['alias'], inspected=True)
+        # Simulate a restart between durable launch bookkeeping and continuation.
+        with patch('discussion_recovery.resume'):
+            new_id = realign(self.store, body, 'admin')['new_run_id']
+        self.drain()
+        self.store.update_job(new_id, state='running')
+        self.store.update_job(meeting, runs=[])  # A manual retry may have cleared old bindings.
+        self.store.advance_discussions()
+        self.drain()
+        waiting = self.job(meeting)
+        self.assertEqual(waiting['state'], 'waiting_for_members', waiting.get('error'))
+        self.assertIn('finish starting', waiting['progress'])
+        self.assertEqual(next(r['id'] for r in waiting['runs'] if r['profile_id'] == self.max), new_id)
+        self.assertTrue(waiting['session_realignments'][old['id']]['resume_applied_at'])
+        inspected = self.store.action('inspect', dict(organization_id=self.org, job_id=meeting,
+                                                     request_id='inspect-replacement-starting'))
+        member = next(s for s in inspected['streams'] if s['profile_id'] == self.max)
+        self.assertEqual(member['status'], 'starting')
+        self.store.update_job(new_id, state='persona_sent')
+        with patch('project_git.git', side_effect=['a' * 40, '']):
+            self.store.advance_discussions()
+            self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready', self.job(meeting).get('error'))
+
+    def test_realign_continuation_recovers_gateway_restart_before_submission(self):
+        from discussion_recovery import realign
+        meeting, old = self._project_mismatch()
+        body = dict(organization_id=self.org, job_id=meeting, run_id=old['id'],
+                    expected_project=str(self.projects), expected_alias=old['alias'], inspected=True)
+        realign(self.store, body, 'admin')
+        self.drain()
+        self.store.update_job(meeting, state='queued')  # Interrupted admission, no prompt sent.
+        self.store.close()
+        self.store = fixtures.gateway.OrganizationStore(self.root / 'data/org.sqlite3', self.projects, self.simulate)
+        recovered = self.job(meeting)
+        self.assertEqual(recovered['state'], 'uncertain')
+        self.assertTrue(recovered['realignment_resume_interrupted'])
+        self.store.jobs_changed.clear()
+        with patch('project_git.git', side_effect=['a' * 40, '']):
+            self.store.advance_discussions()
+            self.drain()
+        self.assertTrue(self.store.jobs_changed.is_set())
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready', self.job(meeting).get('error'))
+        self.assertNotIn('realignment_resume_interrupted', self.job(meeting))
+
+    def test_realign_waits_until_every_project_mismatch_is_resolved(self):
+        from discussion_recovery import realign
+        meeting, first = self._project_mismatch()
+        second = next(j for j in self.store.job_records() if j.get('profile_id') == self.iris and j['kind'] == 'launch')
+        self.store.update_job(second['id'], profile=dict(second['profile'], project=str(self.projects.parent)))
+        def fix(run):
+            return realign(self.store, dict(organization_id=self.org, job_id=meeting, run_id=run['id'],
+                expected_project=str(self.projects), expected_alias=run['alias'], inspected=True), 'admin')['new_run_id']
+        first_id = fix(first)
+        self.drain()
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+        self.assertIn(first_id, [r['id'] for r in self.job(meeting)['runs']])
+        # No repeated writes/notifications while the other mismatch needs inspection.
+        before = self.job(meeting)['updated_at']
+        self.store.advance_discussions()
+        self.assertEqual(self.job(meeting)['updated_at'], before)
+        second_id = fix(second)
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+        with patch('project_git.git', side_effect=['a' * 40, '']):
+            self.store.advance_discussions()
+            self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready', self.job(meeting).get('error'))
+        self.assertEqual({r['id'] for r in self.job(meeting)['runs']}, {first_id, second_id})
+
+    def test_realign_continuation_does_not_retry_failed_start_or_cancelled_discussion(self):
+        from discussion_recovery import realign
+        meeting, old = self._project_mismatch()
+        body = dict(organization_id=self.org, job_id=meeting, run_id=old['id'],
+                    expected_project=str(self.projects), expected_alias=old['alias'], inspected=True)
+        new_id = realign(self.store, body, 'admin')['new_run_id']
+        self.drain()
+        self.store.update_job(new_id, state='needs_attention', error='Startup failed')
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+        self.assertIn('inspect the existing session', self.job(meeting)['error'])
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'needs_attention')
+        self.store.update_job(meeting, state='cancelled')
+        records = self.job(meeting)['session_realignments']
+        records[old['id']].pop('resume_applied_at')
+        self.store.update_job(meeting, session_realignments=records)
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'cancelled')
+
+    def test_malformed_realign_target_is_not_trusted(self):
+        from discussion_recovery import realign, mismatches
+        meeting, old = self._project_mismatch()
+        self.store.manage_session(dict(organization_id=self.org, job_id=old['id'], mode='close', inspected=True), 'admin')
+        body = dict(organization_id=self.org, job_id=meeting, run_id=old['id'],
+                    expected_project=str(self.projects), expected_alias=old['alias'], inspected=True)
+        for target in (None, [], 'invalid', {}):
+            self.store.update_job(meeting, session_realignments={old['id']: dict(target=target, state='failed')})
+            self.assertEqual(mismatches(self.store, self.job(meeting)), [])
+            with self.assertRaisesRegex(ValueError, 'selection changed'):
+                realign(self.store, body, 'admin')
 
     def test_force_realign_retains_binding_on_archive_failure_and_rejects_changed_identity(self):
         from discussion_recovery import realign
@@ -830,6 +955,66 @@ class CollaborationTests(unittest.TestCase):
         self.store.update_job(meeting, state='running')
         with self.assertRaisesRegex(ValueError, 'queued or running task work'):
             self.action('input', organization_id=self.org, profile_id=facilitator['profile_id'], key='enter')
+
+    def test_inspected_member_decision_unblocks_a_running_discussion_without_waiting_for_its_lock(self):
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        job = self.job(meeting)
+        self.store.update_job(meeting, state='running')
+        run = self.job(job['runs'][0]['id'])
+        self.agents[run['alias']]['agent_status'] = 'blocked'
+        inspected = self.store.action('inspect', dict(organization_id=self.org, job_id=meeting,
+                                                     request_id='inspect-blocked-member'))
+        stream = next(s for s in inspected['streams'] if s['profile_id'] == run['profile_id'])
+        self.assertTrue(stream['console_token'])
+        # The facilitator worker holds this lock while it waits for the member.
+        lock = self.store.agent_locks[run['profile_id']]
+        started, release = threading.Barrier(5), threading.Event()
+        def occupy_worker():
+            started.wait(timeout=5)
+            release.wait(10)
+        for _ in range(4):
+            self.store.worker.submit(occupy_worker)
+        started.wait(timeout=5)
+        try:
+            with lock:
+                input_id = self.action('input', organization_id=self.org, profile_id=run['profile_id'],
+                                       key='enter', console_token=stream['console_token'])
+                self.drain()
+        finally:
+            release.set()
+        self.assertEqual(self.job(input_id)['state'], 'input_sent', self.job(input_id).get('error'))
+        self.assertIn(('agent', 'send-keys', run['alias'], 'enter'), [a for a, _ in self.calls])
+        self.assertEqual(self.job(meeting)['state'], 'running')
+
+    def test_inspected_running_discussion_decision_rejects_a_changed_prompt(self):
+        from concurrent.futures import Future
+        meeting = self.action('discuss', organization_id=self.org, group_id=self.group())
+        self.drain()
+        self.store.update_job(meeting, state='running')
+        run = self.job(self.job(meeting)['runs'][0]['id'])
+        self.agents[run['alias']]['agent_status'] = 'blocked'
+        inspected = self.store.action('inspect', dict(organization_id=self.org, job_id=meeting,
+                                                     request_id='inspect-changing-member'))
+        stream = next(s for s in inspected['streams'] if s['profile_id'] == run['profile_id'])
+        completed = Future()
+        completed.set_result(None)
+        with patch.object(self.store.control_worker, 'submit', return_value=completed):
+            input_id = self.action('input', organization_id=self.org, profile_id=run['profile_id'],
+                                   key='enter', console_token=stream['console_token'])
+        original = self.store.command
+        def changed(*args, **kwargs):
+            return {'output': 'A different permission request'} if args[:2] == ('agent', 'read') else original(*args, **kwargs)
+        with patch.object(self.store, 'command', side_effect=changed):
+            self.store.execute(input_id)
+        self.assertEqual(self.job(input_id)['state'], 'needs_attention')
+        self.assertIn('Console prompt changed', self.job(input_id)['error'])
+        self.assertFalse(any(a[:2] == ('agent', 'send-keys') for a, _ in self.calls))
+        inspected = self.store.action('inspect', dict(organization_id=self.org, job_id=meeting,
+                                                     request_id='inspect-refused-response'))
+        response = next(s for s in inspected['streams'] if s['profile_id'] == run['profile_id'])['input_result']
+        self.assertEqual(response['state'], 'needs_attention')
+        self.assertIn('Console prompt changed', response['error'])
 
     def test_a_blocked_discussion_blocks_a_new_meeting_with_the_same_members(self):
         group = self.group()

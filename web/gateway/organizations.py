@@ -86,6 +86,9 @@ class OrganizationStore:
         from notifications import Notifications
         self.events = Notifications()
         self.worker = ThreadPoolExecutor(max_workers=4, thread_name_prefix='organization')
+        # Permission answers must still run when every discussion worker is
+        # occupied waiting for a member. This lane accepts verified input only.
+        self.control_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='organization-input')
         self.agent_locks = {}
         self.contributions = None
         self.capacity_guard = None
@@ -100,6 +103,7 @@ class OrganizationStore:
                 CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS jobs_by_organization ON jobs(organization_id);
                 CREATE INDEX IF NOT EXISTS discussion_by_group ON jobs(organization_id, json_extract(data, '$.group_id'), json_extract(data, '$.kind'));
+                CREATE INDEX IF NOT EXISTS input_by_decision ON jobs(organization_id, json_extract(data, '$.decision_job_id'), json_extract(data, '$.kind'));
                 CREATE TABLE IF NOT EXISTS requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS session_archives (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL);
             ''')
@@ -109,6 +113,12 @@ class OrganizationStore:
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
                 if job['state'] in ('queued', 'running'):
+                    if (job.get('kind') == 'discussion' and not job.get('discussion_submitted_at')
+                            and any(isinstance(r, dict) and r.get('resume_applied_at')
+                                    for r in (job.get('session_realignments') or {}).values())):
+                        # This continuation was explicitly authorized by realignment,
+                        # and no prompt was sent. Recover only its interrupted admission.
+                        job['realignment_resume_interrupted'] = True
                     job.update(state='uncertain', error='Gateway restarted. Inspect the SSH terminal before creating another run or task.', updated_at=now())
                     self.put(db, 'jobs', job)
             # Refine restart recovery: annotate liveness of bound sessions without
@@ -137,6 +147,7 @@ class OrganizationStore:
         return db
 
     def close(self):
+        self.control_worker.shutdown(wait=True)
         self.worker.shutdown(wait=True)
 
     def put(self, db, table, item):
@@ -661,7 +672,9 @@ class OrganizationStore:
             db.execute('INSERT INTO requests VALUES (?, ?, ?)', (key, fingerprint, json.dumps(response)))
         if submitted:
             with self.lock:
-                future = self.worker.submit(self.execute, submitted)
+                executor = (self.control_worker if action == 'input' and item.get('decision_job_id')
+                            and item.get('console_token') else self.worker)
+                future = executor.submit(self.execute, submitted)
                 self.futures.add(future)
                 future.add_done_callback(self._finished)
         return response
@@ -813,7 +826,11 @@ class OrganizationStore:
                     terminal = output.get('output') if isinstance(output, dict) else None
                     if not isinstance(terminal, str) or not terminal.strip():
                         raise ValueError('Terminal preservation failed or returned empty output; the pane was not closed.')
-                    saved = archive(self, run, actor, terminal=terminal[-40000:])
+                    saved = archive(self, run, actor, terminal=terminal[-40000:], capture=dict(
+                        source='visible' if allow_busy else 'recent-unwrapped',
+                        requested_lines=160 if allow_busy else 2000, character_limit=40000,
+                        character_truncated=len(terminal) > 40000,
+                        history_truncated=True if allow_busy else None, forced_stop=bool(allow_busy)))
                     self.close_identity(run, ready=not allow_busy)  # Recheck ownership before closure.
                     self.command('pane', 'close', run['pane_id'], timeout=10)
                 terminal = 'finished' if mode == 'finish' else 'released'
@@ -1226,6 +1243,8 @@ class OrganizationStore:
         raise ValueError('New pane shell did not become available. Inspect its terminal over SSH.')
 
     def advance_discussions(self):
+        from discussion_recovery import advance
+        advance(self)
         # Waiting meetings reserve no busy workers. Recheck on the normal poll loop.
         with self.lock, closing(self.connect()) as db:
             rows = db.execute(
@@ -1256,6 +1275,12 @@ class OrganizationStore:
             if job.get('state') != 'queued':
                 return  # A second worker/retry must never replay an accepted job.
             ids = sorted(set(job.get('participants') or [job.get('profile_id')]) - {None})
+            if job['kind'] == 'input' and job.get('decision_job_id') and job.get('console_token'):
+                # The discussion holds participant locks while awaiting its
+                # facilitator. An inspected answer must unblock that execution,
+                # not wait behind it. Serialize answers separately; _execute
+                # rechecks ownership, blocked state and the exact visible prompt.
+                ids = ['decision-input:' + identity for identity in ids]
             locks = [self.agent_locks.setdefault(profile_id, threading.RLock()) for profile_id in ids]
         acquired = []
         try:

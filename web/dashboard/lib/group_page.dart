@@ -14,6 +14,7 @@ import 'remove_entry_dialog.dart';
 const _activeJobStates = [
   'queued',
   'running',
+  'waiting_for_members',
   'needs_attention',
   'waiting_for_input',
 ];
@@ -281,7 +282,7 @@ class _GroupPageState extends State<GroupPage> {
           '${force ? 'Stop this stale session even if it is working or blocked, after preserving its visible terminal output.' : 'Archive and close this stale session only when it is idle.'} '
           'Launch a fresh session from the current profile. Checkout files are preserved. '
           'Other jobs and ambiguous session identities still prevent closure. '
-          'When all project mismatches are resolved, retry this unsubmitted discussion.',
+          'The gateway will resume this unsubmitted discussion automatically when all project mismatches are resolved and members are ready.',
         ),
         actions: [
           TextButton(
@@ -306,17 +307,6 @@ class _GroupPageState extends State<GroupPage> {
       'inspected': true,
       'force': force,
     });
-    final current = jobs.where((j) => j['id'] == job['id']).firstOrNull;
-    if (mounted &&
-        error == null &&
-        pending == null &&
-        current != null &&
-        (current['project_mismatches'] as List? ?? []).isEmpty) {
-      await submit('retry_discussion', {
-        'job_id': job['id'],
-        'inspected': true,
-      });
-    }
   }
 
   void viewArtifact(Map<String, dynamic> job) => setState(() {
@@ -399,6 +389,47 @@ class _GroupPageState extends State<GroupPage> {
     );
   }
 
+  Future<void> respondToBlock(Map stream) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Respond to ${stream['name']}'),
+        content: SizedBox(
+          width: 700,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Review the terminal request and its selected option below. Confirm sends Enter to that option. For a dashboard artifact request, select Allow once using the terminal controls first. This does not update the saved permission policy.',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(stream['output'] as String? ?? ''),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirm selected option'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await submit('input', {
+      'profile_id': stream['profile_id'],
+      'key': 'enter',
+      'console_token': stream['console_token'],
+    });
+  }
+
   Widget liveDiscussion(Map<String, dynamic> job) {
     final data = live[job['id']] ?? const <String, dynamic>{};
     final streams = data['streams'] as List? ?? [];
@@ -478,6 +509,10 @@ class _GroupPageState extends State<GroupPage> {
                 // visible, avoids sending the operator to another page to
                 // resolve it. The gateway re-verifies the original
                 // conversation is still blocked before sending anything.
+                if (stream['input_result'] is Map)
+                  Text(
+                    'Terminal response: ${stream['input_result']['state']}${(stream['input_result']['error'] as String? ?? '').isEmpty ? '' : ' · ${stream['input_result']['error']}'}',
+                  ),
                 if (stream['status'] == 'blocked')
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
@@ -485,6 +520,16 @@ class _GroupPageState extends State<GroupPage> {
                       spacing: 8,
                       runSpacing: 8,
                       children: [
+                        if (stream['console_token'] != null)
+                          FilledButton.icon(
+                            onPressed: busy
+                                ? null
+                                : () => respondToBlock(stream),
+                            icon: const Icon(Icons.lock_open_outlined),
+                            label: const Text(
+                              'Respond to permission or question',
+                            ),
+                          ),
                         for (final entry in const {
                           'up': 'Up',
                           'down': 'Down',
@@ -499,6 +544,8 @@ class _GroupPageState extends State<GroupPage> {
                                 : () => submit('input', {
                                     'profile_id': stream['profile_id'],
                                     'key': entry.key,
+                                    if (stream['console_token'] != null)
+                                      'console_token': stream['console_token'],
                                   }),
                             child: Text(entry.value),
                           ),

@@ -382,17 +382,36 @@ without creating a pointless commit or PR.
 
 ## Fixing stale projects from a discussion
 
+To answer a blocked member's permission prompt, expand **Live discussion**, then
+the member's terminal, and choose **Respond to permission or question**. Review
+the selected OpenCode option before confirming. For a dashboard output directory,
+select **Allow once** with the terminal controls if needed. Confirmation sends
+Enter only if the original conversation is still blocked on the exact inspected
+prompt. A changed prompt requires a fresh inspection. This can unblock a member
+while the facilitator is still running; it does not restart the discussion or
+change the saved permission policy. Saved permission changes apply on the next
+launch.
+
 An unsubmitted repository review shows each session project mismatch directly
 in the group post: agent name, saved session project, current configured project
 and group target. Administrators can choose **Archive and relaunch in current
 project** to preserve and close an idle stale session and launch a fresh one from
-its current profile. The group retries inspected preparation when all mismatches
-are resolved. It does not restart in the retained, outdated checkout.
+its current profile. The gateway immediately binds the replacement to the group
+and durably schedules continuation when all mismatches are resolved. It waits for
+member startup, idle sessions and admission capacity; no manual retry or open
+browser is needed. Saved launch records also recover continuation after a gateway
+restart. Group notifications refresh progress. A failed startup or preparation
+remains visible for inspection instead of repeatedly replaying prompts. Cancelled
+or already-submitted discussions never resume through this recovery path. It does
+not restart in the retained, outdated checkout.
 
 **Force realign session** confirms an explicit stop of that stale session even
 when it is working or blocked. It preserves visible terminal output and checkout
-files before closure and records the operator and stop request. It still refuses
-task-owned sessions, other job reservations, ambiguous identities and failed
+files before closure and records the operator and stop request.
+The archive and its viewer explicitly label this as a partial visible-screen
+capture (up to 160 lines), omitting earlier history and possibly ending mid-reply.
+The character limit and any additional truncation are recorded too. It still
+refuses task-owned sessions, other job reservations, ambiguous identities and failed
 archives. Submitted discussions cannot use either action. Partial recovery stays
 visible and retries reuse the recorded launch request instead of duplicating a
 session. If current profile projects themselves disagree, update group/agent
