@@ -323,6 +323,11 @@ class OrganizationStore:
         with self.lock, closing(self.connect()) as db:
             return [json.loads(row['data']) for row in db.execute('SELECT data FROM profiles ORDER BY rowid')]
 
+    def organization_records(self):
+        """Saved organization defaults, without runtime queries."""
+        with self.lock, closing(self.connect()) as db:
+            return [json.loads(row['data']) for row in db.execute('SELECT data FROM organizations ORDER BY rowid')]
+
     def frozen_policy(self, job, profile):
         """The approved toolchain policy as it stood when this session started.
 
@@ -574,6 +579,11 @@ class OrganizationStore:
             model_settings(member, member['runtime'])
             if self.model_validator is not None:
                 self.model_validator(member)
+        import template_workflows
+        result['workflow_plan'], notes = template_workflows.preview(project, self.projects, result['members'])
+        result['warnings'] = [*result['warnings'], *notes]
+        result['template_plan'] = hashlib.sha256(json.dumps(
+            [policy, result['members'], result['workflow_plan']], sort_keys=True).encode()).hexdigest()
         return result
 
     def _action(self, action, body):
@@ -629,7 +639,7 @@ class OrganizationStore:
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
                 if previous_org:
-                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy') if k in previous_org})
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'team_workflows') if k in previous_org})
                 if planned:
                     item.update(template_roles=body['template_roles'], model_policy=planned['model_policy'])
                 self.put(db, 'organizations', item)
@@ -640,6 +650,11 @@ class OrganizationStore:
                         profile.update(id=ids[member['template_role']], organization_id=item_id,
                                        manager_id=ids.get(member['manager_role'], ''), version=1)
                         self.put(db, 'profiles', profile)
+                    workflow = planned['workflow_plan']
+                    item['team_workflows'] = dict(repository=workflow['repository'],
+                                                 coordinator_id=ids.get(workflow['coordinator_role'], ''),
+                                                 reviewer_ids=[ids[r] for r in workflow['reviewer_roles']])
+                    self.put(db, 'organizations', item)
             else:
                 org_id = text(body, 'organization_id', 40)
                 org = self.get(db, 'organizations', org_id)

@@ -47,6 +47,14 @@ They are immediately available for task assignment; their sessions start through
 the existing task/Launch workflow. Creating an organization sends no billable
 agent prompt and creates no idle sessions.
 
+For a Git repository root, the Integration Engineer is also saved as the default
+repository coordinator; an existing manual coordinator setting takes precedence.
+These defaults recover after restart or configuration import. Newly created tasks
+automatically use the independent Reviewer for acceptance, with QA as the fallback
+when the reviewer is the assignee or unavailable. Per-task review settings remain
+editable. Template creation does not enable publishing, automatic builds or SDK
+installation. Non-Git or nested directories show a workflow setup note in preview.
+
 Model selection uses installed CLIs with current Herdr integrations. Codex and
 Claude require a signed-in account and use the maintained model catalog;
 individual subscription entitlements cannot be enumerated, so these are

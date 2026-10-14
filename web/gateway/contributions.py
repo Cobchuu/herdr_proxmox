@@ -2522,6 +2522,10 @@ class Contributions:
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
                         created_at=stamp(), checks=[], audit=[], auto_validate=False, auto_publish=False, await_verification=False,
                         assigned_agent={k: profile.get(k) for k in ('id', 'name', 'role', 'runtime')}, participants=[])
+            import template_workflows
+            review = template_workflows.acceptance(self.store, profile['organization_id'], repository, profile['id'], profiles)
+            if review:
+                task['acceptance'] = dict(review, at=stamp())
             return self.save(task, 'create', actor)
         task = self.get(task_id)
         had_error = task.pop('error', None) is not None

@@ -205,7 +205,26 @@ class IntegrationCoordinator:
                                 actor=actor or 'dashboard_operator'))
         return config
 
+    def sync_template_workflows(self):
+        """Materialize saved defaults once, preserving every explicit setting.
+
+        The organization transaction is the source of truth. This can recover
+        after a restart or import without making organization creation depend
+        on a second database transaction or starting an idle coordinator.
+        """
+        import template_workflows
+        defaults = template_workflows.coordinator_configurations(self.store)
+        if not defaults:
+            return
+        with self.lock, closing(self.connect()) as db, db:
+            for config in defaults:
+                inserted = db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)',
+                                      (config['repository'], json.dumps(config)))
+                if inserted.rowcount:
+                    self.audit(db, dict(action='template_configuration', **config))
+
     def observe(self, notices):
+        self.sync_template_workflows()
         with self.lock, closing(self.connect()) as db, db:
             settings = {r[0]: json.loads(r[1]) for r in db.execute('SELECT * FROM settings')}
             for notice in notices:
@@ -548,6 +567,7 @@ class IntegrationCoordinator:
 
     def tick(self):
         """Advance durable events once; returns True when another tick can progress."""
+        self.sync_template_workflows()
         with self.lock, closing(self.connect()) as db, db:
             advance_pending = False
             settings = {r[0]: json.loads(r[1]) for r in db.execute('SELECT * FROM settings')}
@@ -758,6 +778,7 @@ class IntegrationCoordinator:
 
     def configuration_records(self):
         """Small binding read for organization polls; no jobs, events or audit."""
+        self.sync_template_workflows()
         with closing(self.connect()) as db:
             return [json.loads(row[0]) for row in db.execute('SELECT data FROM settings')]
 
@@ -800,6 +821,7 @@ class IntegrationCoordinator:
                                     repository=event['repository'], **result))
 
     def snapshot(self):
+        self.sync_template_workflows()
         # A reader must not wait for dispatch/network work holding the writer lock.
         jobs = self.store.job_records()
         with closing(self.connect()) as db, db:
