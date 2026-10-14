@@ -4,7 +4,7 @@ This is the outbound contribution lifecycle, not upstream worktree integration.
 Network operations never hold SQLite transactions; pending requests can be
 reconciled after restart by repeating the same administrator request ID.
 """
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext, ExitStack
 from datetime import datetime, timedelta, timezone
 import hashlib
 import threading
@@ -1461,7 +1461,7 @@ class Contributions:
         if task.get('organization_id') != job['organization_id']:
             return None
         source = task.get('source') or {}
-        record = source.get('auto_queued') or source.get('discussion') or {}
+        record = source.get('proposal') or source.get('auto_queued') or source.get('discussion') or {}
         if record.get('meeting_id', record.get('job_id')) != job['id']:
             return None
         if record.get('queued') and task['state'] == 'draft' and not task.get('assignment'):
@@ -1910,11 +1910,13 @@ class Contributions:
             raise ValueError('Only an administrator can manage contribution tasks.')
         if not isinstance(body, dict) or not REQUEST.fullmatch(str(body.get('request_id', ''))):
             raise ValueError('A stable request ID is required.')
-        if action not in ('create', 'automation') and (not isinstance(body.get('task_id'), str)
+        if action not in ('create', 'automation', 'start_proposal') and (not isinstance(body.get('task_id'), str)
                                   or not re.fullmatch(r'[a-f0-9]{32}', body['task_id'])):
             raise ValueError('Select a valid task.')
         fingerprint = hashlib.sha256(json.dumps([action, body, actor], sort_keys=True).encode()).hexdigest()
-        with self.operation('request:' + body['request_id']), self.operation('task:' + str(body.get('task_id', body['request_id']))):
+        task_guard = (nullcontext() if action == 'start_proposal' else
+                      self.operation('task:' + str(body.get('task_id', body['request_id']))))
+        with self.operation('request:' + body['request_id']), task_guard:
             with closing(self.connect()) as db:
                 saved = db.execute('SELECT fingerprint,data FROM requests WHERE id=?', (body['request_id'],)).fetchone()
             if saved:
@@ -1933,7 +1935,7 @@ class Contributions:
             except (ValueError, OSError) as error:
                 # Keep the request pending: explicit retry rechecks reality,
                 # especially a push/PR whose HTTP response was lost.
-                if action not in ('create', 'automation'):
+                if action not in ('create', 'automation', 'start_proposal'):
                     task = self.get(record['task_id'])
                     task['error'] = str(error)[:500]
                     self.save(task, action + '_error', actor)
@@ -2483,9 +2485,88 @@ class Contributions:
             task.pop('assignment_error', None)
             return self.save(task, 'launch', actor)
 
+    def start_proposal(self, body, actor):
+        """Start one proposal with the automatic path's ID, without policy limits.
+
+        Preserve frozen automatic verdicts and recover existing tasks on retry.
+        """
+        job_id, key = body.get('job_id'), body.get('proposal_key')
+        if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+            raise ValueError('Select a discussion.')
+        if not isinstance(key, str) or not key or len(key) > 200:
+            raise ValueError('Select a proposal.')
+        with closing(self.store.connect()) as db:
+            job = self.store.get(db, 'jobs', job_id)
+        parent_id = job.get('task_id')
+        identity = 'herdr:' + (parent_id + ':' if parent_id else '') + job_id + ':' + key
+        new_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+        # Match task-linked materialization's parent -> budget lock order. The
+        # child guard precedes the budget guard to avoid reversing task -> budget
+        # ordering, and prevents a scheduler launch racing our queue update.
+        with ExitStack() as guards:
+            if parent_id:
+                guards.enter_context(self.operation('task:' + parent_id))
+            guards.enter_context(self.operation('task:' + new_id))
+            guards.enter_context(self.operation('proposal-budget:' + job['organization_id']))
+            with closing(self.store.connect()) as db:
+                job = self.store.get(db, 'jobs', job_id)
+            if (job.get('kind') != 'discussion' or job.get('state') != 'artifact_ready'
+                    or job.get('task_id') != parent_id):
+                raise ValueError('Only a finalized discussion has proposals to start.')
+            proposal = next((p for p in self.discussion_proposals(job) if p.get('key') == key), None)
+            if proposal is None:
+                raise ValueError('That proposal is not part of this discussion.')
+            profiles = {p['id']: p for p in self.store.snapshot(live_status=False).get('profiles', [])}
+            profile = profiles.get(proposal.get('profile_id'))
+            reason = self.proposal_skip_reason(profile, job['organization_id'])
+            if reason:
+                raise ValueError('Cannot start proposal: ' + reason + '.')
+            try:
+                repository = Path(profile.get('project')).resolve().relative_to(self.projects).as_posix()
+            except (ValueError, OSError, TypeError):
+                raise ValueError('The assigned agent is not in a managed repository.')
+            parent = self.get(parent_id) if parent_id else None
+            base_ref = ''
+            if parent:
+                if (parent['organization_id'] != job['organization_id'] or
+                        not any(m.get('job_id') == job_id for m in parent.get('meetings', []))):
+                    raise ValueError('Select a discussion linked to this task.')
+                if self.path_for(parent) != Path(profile['project']).resolve():
+                    raise ValueError('The assigned agent is assigned to another repository.')
+                repository, base_ref = parent['repository'], parent['base_ref']
+            # create() also recovers a crash between task creation and recording
+            # provenance. Never reset an existing task's execution or assignment.
+            made = self.perform('create', dict(
+                title=proposal['title'], description=proposal['description'],
+                repository=repository, base_ref=base_ref, profile_id=proposal['profile_id']), new_id, actor)
+            if made['organization_id'] != job['organization_id']:
+                raise ValueError('Proposal task belongs to another organization.')
+            if made['state'] == 'draft' and not made.get('run_id'):
+                made.setdefault('source', {}).setdefault('proposal', dict(
+                    at=stamp(), meeting_id=job_id, group_id=job.get('group_id'),
+                    proposal_key=key, started_by=actor, queued=True))
+                if parent:
+                    made['source'].update(task_id=parent_id, meeting_id=job_id,
+                                          group_id=job.get('group_id'), proposal_key=key,
+                                          depth=(parent.get('source', {}).get('depth') or 0) + 1)
+                if (made.get('assignment') or {}).get('state') != 'queued':
+                    made = self.enqueue_assignment(made, actor)
+                made = self.save(made, 'proposal_started', actor)
+            if parent:
+                parent.setdefault('follow_up_tasks', {})[key] = new_id
+                self.save(parent, 'proposal_started', actor)
+            # Keep manual outcomes separate: setting proposals here would freeze
+            # materialization of every other proposal in the discussion.
+            starts = dict(job.get('manual_proposal_starts') or {})
+            starts[key] = new_id
+            self.store.update_job(job_id, manual_proposal_starts=starts)
+            return made
+
     def perform(self, action, body, task_id, actor, automation_policy=None):
         if action == 'automation':
             return self.set_automation_policy(body, actor)
+        if action == 'start_proposal':
+            return self.start_proposal(body, actor)
         if action == 'create':
             try:
                 return self.get(task_id)

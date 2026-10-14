@@ -80,6 +80,7 @@ class _GroupPageState extends State<GroupPage> {
   String? error;
 
   OrganizationCommand? pending;
+  final proposalRequests = <String, String>{};
   StreamSubscription? connectionSubscription;
   int generation = -1;
 
@@ -101,6 +102,8 @@ class _GroupPageState extends State<GroupPage> {
           loaded = false;
           snapshotSignature = null;
           pending = null;
+          proposalRequests.clear();
+          busy = false;
           error = null;
           nextBefore = null;
           message = '';
@@ -353,6 +356,63 @@ class _GroupPageState extends State<GroupPage> {
     final v = await groupForm(profiles, group);
     if (v != null && mounted && epoch == connection.generation)
       await submit('group', v);
+  }
+
+  /// Create and queue a task from a recorded proposal.
+  ///
+  /// The automatic path decides for a whole discussion at once and records its
+  /// verdict once, so a proposal it left as a draft, skipped, or marked
+  /// unavailable could never be started afterwards. This is the operator's path
+  /// for those — including every proposal from a discussion finalized before
+  /// automatic follow-up was enabled. The gateway derives the task id from the
+  /// discussion and the proposal, so pressing twice cannot duplicate the task.
+  Future<void> startProposal(Json job, Json proposal) async {
+    if (busy || pending != null || connection.operator.value['role'] != 'admin')
+      return;
+    final epoch = connection.generation;
+    final assignee =
+        profileOf(proposal['profile_id'])?['name'] ?? proposal['profile_id'];
+    if (!await confirm(
+          'Start this proposal as a task?',
+          'Creates and queues a task assigned to $assignee. Automatic limits do '
+              'not apply to an explicit start, and the assignee must still exist.',
+        ) ||
+        !mounted ||
+        epoch != connection.generation ||
+        busy ||
+        pending != null ||
+        connection.operator.value['role'] != 'admin')
+      return;
+    final key = '${job['id']}:${proposal['key']}';
+    final idempotencyKey = proposalRequests.putIfAbsent(key, requestId);
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final result = await connection.request('tasks/start_proposal', {
+        'job_id': job['id'],
+        'proposal_key': proposal['key'],
+        'request_id': idempotencyKey,
+      });
+      if (mounted && epoch == connection.generation) {
+        final id = result['id'];
+        if (id is String && id.isNotEmpty) {
+          proposalRequests.remove(key);
+          navigate('/tasks/$id');
+        } else {
+          throw StateError(
+            'The gateway did not return the created task. Retry to recover it.',
+          );
+        }
+      }
+    } catch (error) {
+      if (mounted && epoch == connection.generation)
+        setState(() => this.error = '$error');
+    } finally {
+      if (mounted && epoch == connection.generation)
+        setState(() => busy = false);
+    }
   }
 
   Future<void> managePreparation(Json job, bool retry) async {
@@ -689,9 +749,11 @@ class _GroupPageState extends State<GroupPage> {
             ),
           ]),
 
-        if (['needs_attention', 'uncertain', 'waiting_for_input'].contains(
-              job['state'],
-            ) &&
+        if ([
+              'needs_attention',
+              'uncertain',
+              'waiting_for_input',
+            ].contains(job['state']) &&
             (job['discussion_submitted_at'] != null ||
                 job['preparation_version'] == null))
           row([
@@ -1036,6 +1098,16 @@ class _GroupPageState extends State<GroupPage> {
                         () => navigate('/tasks/${p['task_id']}'),
                         small: true,
                         iconName: 'arrow-right',
+                      ),
+                    ])
+                  else if (connection.operator.value['role'] == 'admin')
+                    row([
+                      button(
+                        'Start as task',
+                        () => startProposal(job, p),
+                        disabled: busy || pending != null,
+                        small: true,
+                        iconName: 'play',
                       ),
                     ]),
                 ], classes: 'group-proposal'),

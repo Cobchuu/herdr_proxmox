@@ -127,6 +127,24 @@ class CollaborationTests(unittest.TestCase):
         detail = next(j for j in history['jobs'] if j['id'] == job['id'])['proposal_details'][0]
         self.assertEqual((detail['status'], detail['task_id']), ('draft', 'child'))
 
+    def test_history_shows_manual_start_without_rewriting_automatic_verdict(self):
+        from contributions import Contributions
+        group_id = self.group()
+        job = dict(id=uuid.uuid4().hex, kind='discussion', state='artifact_ready',
+                   organization_id=self.org, group_id=group_id,
+                   result='```json\n' + json.dumps(dict(task_proposals=[dict(
+                       title='Manual follow-up', description='Acceptance checks', profile_id=self.max)])) + '\n```')
+        key = Contributions.discussion_proposals(job)[0]['key']
+        verdict = dict(unavailable='Before automatic follow-up was enabled.',
+                       skipped={key: 'Policy declined'}, deferred={key: 'Daily limit'})
+        job.update(proposals=verdict, manual_proposal_starts={key: 'manual-task'})
+        with closing(self.store.connect()) as db, db:
+            self.store.put(db, 'jobs', job)
+        history = self.store.history(dict(group_id=group_id))
+        detail = next(j for j in history['jobs'] if j['id'] == job['id'])['proposal_details'][0]
+        self.assertEqual((detail['status'], detail['task_id'], detail['reason']), ('queued', 'manual-task', ''))
+        self.assertEqual(self.job(job['id'])['proposals'], verdict)
+
     def test_mixed_runtime_group_checks_every_members_permission_policy(self):
         with closing(self.store.connect()) as db, db:
             member = self.store.get(db, 'profiles', self.max)

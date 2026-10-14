@@ -457,14 +457,15 @@ class OrganizationStore:
             details = []
             for proposal in Contributions.discussion_proposals(job):
                 key = proposal['key']
-                state = ('queued' if key in (outcome.get('queued') or []) else
+                manual_task = (job.get('manual_proposal_starts') or {}).get(key)
+                state = ('queued' if manual_task or key in (outcome.get('queued') or []) else
                          'draft' if key in (outcome.get('drafts') or []) else
                          'skipped' if key in (outcome.get('skipped') or {}) or outcome.get('unavailable') else 'proposed')
                 details.append(dict(proposal, status=state,
-                                    task_id=(outcome.get('created') or {}).get(key) or
+                                    task_id=manual_task or (outcome.get('created') or {}).get(key) or
                                     (task.get('follow_up_tasks') or {}).get(key),
-                                    reason=(outcome.get('skipped') or {}).get(key) or
-                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', '')))
+                                    reason='' if manual_task else ((outcome.get('skipped') or {}).get(key) or
+                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', ''))))
             job['proposal_details'] = details
         return data
 
