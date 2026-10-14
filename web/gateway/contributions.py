@@ -73,7 +73,13 @@ MAX_ACTIVE_EXECUTIONS = 4
 AUTOMATION_DEFAULTS = dict(auto_queue_proposals=False, max_per_meeting=1, max_open_per_agent=2,
                            max_follow_up_depth=1, daily_cap=5, paused=False,
                            max_active_sessions=0, max_active_meetings=0, daily_session_cap=0,
-                           reap_finished_sessions=False, reap_orphaned_panes=False)
+                           reap_finished_sessions=False, reap_orphaned_panes=False,
+                           # Delivery automation for new tasks. Per task these
+                           # are overrides; without a default here every task —
+                           # including every proposal-created one — started
+                           # manual, so capture, validation and publication were
+                           # clicked through one task at a time.
+                           auto_validate=False, auto_publish=False)
 AUTOMATION_LIMITS = (('max_per_meeting', 0, 10), ('max_open_per_agent', 0, 50),
                      ('max_follow_up_depth', 0, 10), ('daily_cap', 0, 100),
                      ('max_active_sessions', 0, 50), ('max_active_meetings', 0, 10),
@@ -1240,11 +1246,21 @@ class Contributions:
         with self.operation('policy:' + organization_id):
             policy = self.policy(organization_id)
             was_enabled = policy['auto_queue_proposals']
-            for key in ('auto_queue_proposals', 'paused', 'reap_finished_sessions', 'reap_orphaned_panes'):
+            for key in ('auto_queue_proposals', 'paused', 'reap_finished_sessions', 'reap_orphaned_panes',
+                        'auto_validate', 'auto_publish'):
                 if key in body:
                     if not isinstance(body[key], bool):
                         raise ValueError('Invalid automation policy value.')
                     policy[key] = body[key]
+            # The same gates the per-task settings apply. Accepting a delivery
+            # default nothing can honour would promise work that never happens,
+            # which is worse than leaving the task manual and saying so.
+            if policy['auto_validate'] and (self.validation is None
+                                            or self.validation.snapshot().get('executor') != 'service'):
+                raise ValueError('Automatic capture and validation needs the durable build service; '
+                                 'install it under Builds & deployments first.')
+            if policy['auto_publish'] and not policy['auto_validate']:
+                raise ValueError('Automatic publication requires automatic capture and validation.')
             for key, low, high in AUTOMATION_LIMITS:
                 if key in body:
                     if type(body[key]) is not int or not low <= body[key] <= high:
@@ -2635,12 +2651,22 @@ class Contributions:
             if profile.get('group_id'):
                 raise ValueError('Assign an individual worker, not a discussion group.')
             project_git.configured_base(repository, base)
+            # Delivery automation comes from the organisation policy, so a task
+            # created from a discussion is not silently manual. Seeded only when
+            # the durable build service can honour it: a task claiming automatic
+            # validation that cannot run would be a lie the operator only
+            # discovers by watching nothing happen.
+            delivery = self.policy(profile['organization_id'])
+            automatic = (bool(delivery.get('auto_validate')) and self.validation is not None
+                         and self.validation.snapshot().get('executor') == 'service')
             task = dict(id=task_id, title=body['title'].strip(), description=body['description'],
                         repository=repository.relative_to(self.projects).as_posix(), github_repository=remote,
                         publishing_repository=self.publishing_default(remote),
                         base_ref=base, base_sha=sha, branch='herdr/task-' + task_id[:12],
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
-                        created_at=stamp(), checks=[], audit=[], auto_validate=False, auto_publish=False, await_verification=False,
+                           created_at=stamp(), checks=[], audit=[], auto_validate=automatic,
+                           auto_publish=automatic and bool(delivery.get('auto_publish')),
+                           await_verification=False,
                         assigned_agent={k: profile.get(k) for k in ('id', 'name', 'role', 'runtime')}, participants=[])
             return self.save(task, 'create', actor)
         task = self.get(task_id)

@@ -254,6 +254,8 @@ const automationLabels = <String, String>{
   'reap_finished_sessions':
       'Archive and close finished idle sessions automatically',
   'reap_orphaned_panes': 'Reclaim proven empty orphaned panes',
+  'auto_validate': 'Capture and validate new tasks automatically',
+  'auto_publish': 'Publish validated tasks automatically',
   'max_per_meeting': 'Max automatic tasks per meeting',
   'max_open_per_agent': 'Max open tasks per agent',
   'max_follow_up_depth': 'Max follow-up depth',
@@ -267,6 +269,8 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
   final defaults = <String, dynamic>{
     'auto_queue_proposals': false,
     'paused': false,
+    'auto_validate': false,
+    'auto_publish': false,
     'reap_finished_sessions': false,
     'reap_orphaned_panes': false,
     'max_per_meeting': 1,
@@ -300,10 +304,12 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
       'paused',
       'reap_finished_sessions',
       'reap_orphaned_panes',
+      'auto_validate',
+      'auto_publish',
     },
     extra: (v) => [
       note(
-        'Valid proposals remain drafts when queueing is disabled or limits are reached. Publishing, merging and deployment remain manual. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes.',
+        'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Automatic capture and validation needs the durable build service, and publication needs it enabled first.',
       ),
     ],
     validate: (v) {
