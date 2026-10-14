@@ -324,6 +324,8 @@ class _TasksPageState extends State<TasksPage> {
 
   Future<void> configure() async {
     final token = TextEditingController();
+    final prToken = TextEditingController();
+    var clearPrCredential = false;
     final repos = TextEditingController(
       text: (github['repositories'] as List? ?? []).join('\n'),
     );
@@ -359,7 +361,7 @@ class _TasksPageState extends State<TasksPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
+                      'The push token needs Contents write on the branch destination. Workflow changes may require Workflows write. If this token also handles upstream PRs, it needs Pull requests write there. Setup verifies identity and account access; actual publishing verifies token permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; credentials are not isolated from same-user agents. Use only trusted agents and repositories.',
                     ),
                     TextField(
                       controller: token,
@@ -371,6 +373,36 @@ class _TasksPageState extends State<TasksPage> {
                       ),
                       maxLength: 255,
                     ),
+                    const Text(
+                      'An optional separate token handles upstream PR operations while the token above pushes the branch. '
+                      'For a split between personal accounts, the upstream account needs write access to the fork, '
+                      'and its token needs Pull requests write on the upstream. GitHub verifies the account name. '
+                      'Leave blank to preserve an existing PR credential; without one, the push token is used.',
+                    ),
+                    if (github['pr_configured'] == true)
+                      Text(
+                        'Separate PR credential configured for ${github['pr_login'] ?? 'a verified account'}.',
+                      ),
+                    TextField(
+                      controller: prToken,
+                      obscureText: true,
+                      enableSuggestions: false,
+                      autocorrect: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Pull request token (optional)',
+                      ),
+                      maxLength: 255,
+                    ),
+                    if (github['pr_configured'] == true)
+                      CheckboxListTile(
+                        value: clearPrCredential,
+                        onChanged: (value) => setDialogState(
+                          () => clearPrCredential = value == true,
+                        ),
+                        title: const Text(
+                          'Remove separate PR credential and use the push token',
+                        ),
+                      ),
                     TextField(
                       controller: repos,
                       minLines: 2,
@@ -382,7 +414,7 @@ class _TasksPageState extends State<TasksPage> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access. A fine-grained token for your fork cannot authorize a cross-owner upstream PR. For that workflow, use a classic token with appropriate repository scopes. The dashboard currently stores one credential for both push and PR creation; separate PR credentials are not supported.',
+                      'Direct publishes the branch and PR in the same repository. Through a fork publishes the branch to the fork and opens the PR upstream. Separate credentials narrow GitHub permissions; both are stored under the same gateway user. Setup verifies identity and account access; actual PR creation verifies token permission.',
                     ),
                     for (final name in listed()) ...[
                       Row(
@@ -459,6 +491,8 @@ class _TasksPageState extends State<TasksPage> {
         'token': token.text.trim(),
         'repositories': listed(),
         'publication': publication,
+        if (prToken.text.trim().isNotEmpty) 'pr_token': prToken.text.trim(),
+        if (clearPrCredential) 'clear_pr_credential': true,
       });
       await refresh();
     } catch (e) {
@@ -467,6 +501,8 @@ class _TasksPageState extends State<TasksPage> {
     } finally {
       token.clear();
       token.dispose();
+      prToken.clear();
+      prToken.dispose();
       repos.dispose();
       for (final controller in forks.values) {
         controller.dispose();

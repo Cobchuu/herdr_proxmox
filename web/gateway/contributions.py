@@ -3060,7 +3060,10 @@ class Contributions:
                     # only PR creation fails.
                     payload['head_repo'] = destination.split('/')[1]
                 try:
-                    pull = self.github.request('/repos/' + upstream + '/pulls', 'POST', payload)
+                    # The optional PR credential is separate from the credential
+                    # used to push the branch. Existing single-token setups fall back.
+                    pull = self.github.request('/repos/' + upstream + '/pulls', 'POST', payload,
+                                               token=self.github.pr_credential().token)
                 except GitHubError as error:
                     if error.status != 422:
                         raise ValueError('The branch is already published, but PR creation failed. ' + str(error)) from None

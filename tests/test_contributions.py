@@ -21,7 +21,7 @@ from organizations import OrganizationStore
 import contributions
 import toolchain_policy
 from contributions import Contributions, remote_info
-from github_api import GitHub, GitHubError
+from github_api import GitHub, GitHubError, GitHubCredential
 import project_git
 import server
 
@@ -99,6 +99,125 @@ class GitHubTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / 'github.json'
         self.api = GitHub(self.path)
+
+    def split_body(self):
+        return dict(token='p' * 40, pr_token='github_pat_' + 'r' * 40,
+                    repositories=['owner/repo'], publication={
+                        'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')})
+
+    def split_response(self, path, *args, token=None, **kwargs):
+        if path == '/user':
+            return dict(login='owner' if token == self.split_body()['pr_token'] else 'contributor')
+        if path == '/repos/owner/repo':
+            return dict(full_name='owner/repo', permissions=dict(push=False))
+        if path == '/repos/contributor/repo':
+            return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                        permissions=dict(push=True))
+        raise AssertionError(path)
+
+    def test_split_credential_verifies_identity_and_never_exposes_secrets(self):
+        body = self.split_body()
+        with patch.object(self.api, 'request', side_effect=self.split_response) as request:
+            snapshot = self.api.configure(body)
+        self.assertEqual(snapshot['pr_login'], 'owner')
+        self.assertTrue(snapshot['pr_configured'])
+        self.assertEqual(self.api.pr_credential(), GitHubCredential(body['pr_token'], 'owner'))
+        self.assertEqual(self.api.configuration()['pr_login'], 'owner')
+        request.assert_any_call('/user', token=body['pr_token'])
+        self.assertEqual(snapshot['publication']['owner/repo']['verification']['upstream_pr_creation'], 'not_exercised')
+        for secret in (body['token'], body['pr_token']):
+            self.assertNotIn(secret, json.dumps(snapshot))
+            self.assertNotIn(secret, repr(self.api.pr_credential()))
+        if os.name != 'nt':
+            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_split_credential_is_preserved_until_explicitly_removed(self):
+        body = self.split_body()
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(body)
+            for value in (None, '', '   '):
+                updated = dict(body, pr_token=value)
+                self.assertTrue(self.api.configure(updated)['pr_configured'])
+            updated = {k: v for k, v in body.items() if k != 'pr_token'}
+            self.assertTrue(self.api.configure(updated)['pr_configured'])
+            removed = self.api.configure(dict(updated, clear_pr_credential=True))
+        self.assertFalse(removed['pr_configured'])
+        self.assertNotIn('pr_token', self.api.configuration())
+        self.assertNotIn('pr_login', self.api.configuration())
+        self.assertEqual(self.api.pr_credential(), GitHubCredential(body['token'], 'contributor'))
+
+    def test_split_credential_rejects_malformed_fields_before_network_calls(self):
+        for changes in (dict(pr_token=0), dict(pr_token=False), dict(pr_token=[]), dict(pr_token={}),
+                        dict(pr_token='short'), dict(pr_login=[]), dict(pr_login='bad/account'),
+                        dict(clear_pr_credential='yes'), dict(clear_pr_credential=True)):
+            with self.subTest(changes=changes), patch.object(self.api, 'request') as request:
+                with self.assertRaises(ValueError):
+                    self.api.configure(dict(self.split_body(), **changes))
+                request.assert_not_called()
+
+    def test_split_credential_rejects_false_identity_and_preserves_saved_configuration(self):
+        body = self.split_body()
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(body)
+            saved = self.path.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'account changed'):
+                self.api.configure(dict(body, pr_login='somebody-else'))
+        self.assertEqual(self.path.read_bytes(), saved)
+        with patch.object(self.api, 'request', side_effect=GitHubError(401)):
+            with self.assertRaises(GitHubError) as error:
+                self.api.configure(body)
+        self.assertNotIn(body['pr_token'], str(error.exception))
+        self.assertEqual(self.path.read_bytes(), saved)
+
+    def test_split_pr_reads_use_the_pr_token_without_reusing_push_cache(self):
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(self.split_body())
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.read.return_value = b'[]'
+        response.headers = {'ETag': 'pr-result'}
+        with patch('github_api.build_opener', return_value=opener):
+            self.api.find_pull('owner/repo', 'task-branch', 'contributor', 'main')
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'), 'Bearer ' + self.split_body()['pr_token'])
+            for path in ('/repos/owner/repo/pulls/7', '/repos/owner/repo/pulls/7/reviews?per_page=100'):
+                self.api.cache[path] = ('push-cache', dict(stale=True))
+                self.api.request(path)
+                request = opener.open.call_args.args[0]
+                self.assertEqual(request.get_header('Authorization'), 'Bearer ' + self.split_body()['pr_token'])
+                self.assertIsNone(request.get_header('If-none-match'))
+            self.api.request('/repos/contributor/repo/git/ref/heads/task-branch')
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer ' + self.split_body()['token'])
+            self.api.request('/repos/owner/repo/pulls/7', token='override-token')
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer override-token')
+
+    def test_preflight_rechecks_split_identity_without_changing_push_identity(self):
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(self.split_body())
+            result = self.api.publication_preflight('owner/repo', 'contributor/repo')
+        self.assertEqual(result['login'], 'contributor')
+        def changed(path, *args, token=None, **kwargs):
+            if path == '/user' and token == self.split_body()['pr_token']:
+                return dict(login='changed')
+            return self.split_response(path, *args, token=token, **kwargs)
+        with patch.object(self.api, 'request', side_effect=changed):
+            with self.assertRaisesRegex(ValueError, 'account changed'):
+                self.api.publication_preflight('owner/repo', 'contributor/repo')
+
+    def test_single_credential_pr_transport_keeps_using_the_push_token(self):
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            body = {k: v for k, v in self.split_body().items() if k != 'pr_token'}
+            self.api.configure(body)
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.read.return_value = b'{}'
+        response.headers = {}
+        with patch('github_api.build_opener', return_value=opener):
+            self.api.request('/repos/owner/repo/pulls', 'POST', dict(head='contributor:branch'),
+                             token=self.api.pr_credential().token)
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer ' + body['token'])
+            self.api.find_pull('owner/repo', 'branch', 'contributor')
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer ' + body['token'])
 
     def test_configuration_never_returns_token_and_is_private(self):
         token = 'github_pat_' + 'x' * 50
@@ -323,6 +442,7 @@ class ContributionTests(unittest.TestCase):
         self.git('update-ref', 'refs/remotes/origin/main', self.base)
         self.api = MagicMock()
         self.api.publication_preflight.return_value = dict(login='owner', account_write='verified', token_write='not_exercised')
+        self.api.pr_credential.return_value = GitHubCredential('pr-token', 'upstream-owner')
         self.api.path = self.root / 'github.json'
         self.api.snapshot.return_value = dict(configured=True)
         self.api.publication_settings.return_value = {}
@@ -371,7 +491,7 @@ class ContributionTests(unittest.TestCase):
         self.service.save(task, 'build_result', 'tests')
         pull = self.pull_data(task, mergeable=True)
         self.api.find_pull.return_value = []
-        def response(path, method='GET', body=None):
+        def response(path, method='GET', body=None, token=None):
             if path.endswith('/pulls') and method == 'POST':
                 return pull
             if '/pulls/' in path:
@@ -455,7 +575,7 @@ class ContributionTests(unittest.TestCase):
         task, run, pull = self._delivery_task()
         checks = [dict(name='CI', status='in_progress', conclusion=None)]
         original = self.api.request.side_effect
-        self.api.request.side_effect = lambda path, *args: dict(check_runs=checks) if path.endswith('/check-runs') else original(path, *args)
+        self.api.request.side_effect = lambda path, *args, **kwargs: dict(check_runs=checks) if path.endswith('/check-runs') else original(path, *args)
         with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', return_value=task['head_sha']), \
                 patch('task_delivery.time.time', return_value=100):
             task_delivery.advance(self.service)
@@ -479,7 +599,7 @@ class ContributionTests(unittest.TestCase):
         import task_delivery
         task, run, pull = self._delivery_task()
         original = self.api.request.side_effect
-        def fail(path, method='GET', body=None):
+        def fail(path, method='GET', body=None, token=None):
             if path.endswith('/pulls') and method == 'POST':
                 raise GitHubError(403)
             return original(path, method, body)
@@ -1452,6 +1572,7 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(self.api.find_pull.call_args.args,
                          (task['github_repository'], task['branch'], 'contributor', 'main'))
         self.assertEqual(self.api.request.call_args.args[0], '/repos/owner/repo/pulls')
+        self.assertEqual(self.api.request.call_args.kwargs['token'], 'pr-token')
         payload = self.api.request.call_args.args[2]
         self.assertEqual(payload['head'], 'contributor:' + task['branch'])
         self.assertEqual(payload['base'], 'main')
@@ -1500,6 +1621,7 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(result['pull']['number'], 7)
         self.assertIn('existing PR was reused', result['pull_notice'])
         self.assertEqual(self.api.find_pull.call_args.args[2], 'contributor')
+        self.assertEqual(next(c for c in self.api.request.call_args_list if len(c.args) > 1 and c.args[1] == 'POST').kwargs['token'], 'pr-token')
 
     def test_publication_destination_is_frozen_once_published(self):
         task = self.fork(self.candidate())
