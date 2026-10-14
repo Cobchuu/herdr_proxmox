@@ -133,7 +133,11 @@ def action(store, db, name, body, org):
         return dict(content=json.dumps(data, ensure_ascii=False, indent=2) + '\n', filename='discussion.json')
     if name == 'recover':
         job = store.get(db, 'jobs', text(body, 'job_id', 40), org_id)
-        if job['kind'] != 'discussion' or job['state'] not in ('needs_attention', 'uncertain', 'artifact_ready'):
+        # 'waiting_for_input' belongs here: the discussion was submitted and a
+        # participant stopped on a decision, which is exactly the interrupted
+        # state the operator needs to recover from. Without it the automatic
+        # recovery ran every pass while the manual button refused the same job.
+        if job['kind'] != 'discussion' or job['state'] not in ('needs_attention', 'uncertain', 'artifact_ready', 'waiting_for_input'):
             raise ValueError('Only interrupted discussions can recover saved output.')
         if job['state'] == 'artifact_ready' and (job.get('completion') or {}).get('state'):
             return job
@@ -690,7 +694,18 @@ def recover_interrupted(store, offset=0, limit=20):
     for saved in rows:
         try:
             finalized = finalize_discussion(store, saved['id'], 'discussion_recovery')
-        except (ValueError, OSError, sqlite3.Error, HerdrError):
+        except (ValueError, OSError, sqlite3.Error, HerdrError) as error:
+            # Recovery runs every pass, so a discussion that keeps failing looks
+            # monitored while nothing is happening. Record the reason on the job
+            # so the operator sees what is blocking it instead of waiting out the
+            # deadline; only when it changes, to avoid churn on every poll.
+            reason = ('Recovery could not finalize this discussion: '
+                      + (str(error) or error.__class__.__name__))[:500]
+            if saved.get('error') != reason:
+                try:
+                    store.update_job(saved['id'], error=reason)
+                except (ValueError, OSError, sqlite3.Error):
+                    pass
             continue
         recovered.append(finalized['id'])
     # Advance past the window actually scanned, minus the rows recovery removed,

@@ -689,7 +689,9 @@ class _GroupPageState extends State<GroupPage> {
             ),
           ]),
 
-        if (['needs_attention', 'uncertain'].contains(job['state']) &&
+        if (['needs_attention', 'uncertain', 'waiting_for_input'].contains(
+              job['state'],
+            ) &&
             (job['discussion_submitted_at'] != null ||
                 job['preparation_version'] == null))
           row([
