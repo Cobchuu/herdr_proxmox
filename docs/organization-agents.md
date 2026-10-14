@@ -26,6 +26,59 @@ Python/SQLite. No plugin source or Node UI has been vendored or installed.
 
 ## Implemented first version
 
+### Team role presets
+
+When creating an organization, select any combination of Lead Developer,
+Frontend Developer, Backend Developer, Full-stack Developer, Reviewer,
+Integration Engineer, QA Engineer and DevOps Engineer. Select an existing
+project directory and a model policy, then use **Preview team** to inspect
+personas, CLI/model/effort choices and reporting relationships before saving.
+Organization creation saves all selected profiles in the same SQLite transaction;
+a failed save creates no partial team, and retrying the same request cannot
+duplicate hires. Existing organizations and manually hired profiles retain their
+normal editing workflow. Preset profiles can be renamed and customized afterward.
+
+The lead reports to the organization owner. Developers, integration and DevOps
+report to the selected lead, or to the owner if no lead was selected. Reviewer
+and QA report directly to the owner for independent assessment. Every role has
+distinct responsibilities, evidence/reporting expectations and publication
+boundaries. Profiles use separate Git worktrees and CLI default permissions.
+They are immediately available for task assignment; their sessions start through
+the existing task/Launch workflow. Creating an organization sends no billable
+agent prompt and creates no idle sessions.
+
+Model selection uses installed CLIs with current Herdr integrations. Codex and
+Claude require a signed-in account and use the maintained model catalog;
+individual subscription entitlements cannot be enumerated, so these are
+recommendations that can be changed in the member editor. OpenCode uses its
+project/account catalog, including providers configured through the environment,
+and preserves reported costs and reasoning variants. Models explicitly lacking
+tool calling are excluded. The CLI's
+[model enumeration](https://opencode.ai/docs/cli/#models) reports available models
+from configured providers and supports verbose cost metadata.
+
+- **Balanced:** general models (Sonnet/Sol families) for coordination, review and
+  integration; lighter models (Haiku/Luna families) or available free OpenCode
+  models for bounded implementation and QA.
+- **Lowest cost:** prefer models reported free by cost metadata or a free model
+  ID, then lighter model families. Explicit positive pricing overrides a free ID.
+- **Higher capability:** prefer Opus/Astra and other stronger model families.
+
+These policies are deterministic recommendations, not billing guarantees or
+benchmarks. They compare reported input/output costs when available; account
+subscriptions, quotas and unknown prices cannot be compared reliably. Free
+models and limits can change. Antigravity falls back to CLI-managed model and
+reasoning settings and shows an account-verification reminder. Unsupported
+reasoning variants fall back to the model default. Account/model changes after
+preview require another preview before the organization can be created.
+
+Authenticated `GET /api/organizations/templates` returns the role/policy catalog.
+`POST` to the same endpoint previews `template_roles`, `project` and
+`model_policy` without creating records. `POST /api/organizations/save` accepts
+those fields on new organizations and the preview's `template_plan` digest.
+Model discovery runs outside the database write transaction; saved request
+replays do not need the CLI accounts to remain available.
+
 Open **Organization** in the connected dashboard (`/organization` in ZenRouter).
 The page supports multiple organizations, purpose/shared instructions, hiring
 and editing durable agent profiles, a manager hierarchy, a project directory,

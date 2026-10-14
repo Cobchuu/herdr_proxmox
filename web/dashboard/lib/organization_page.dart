@@ -82,11 +82,36 @@ class _OrganizationPageState extends State<OrganizationPage> {
       bloc.send(OrganizationCommand(action, body));
 
   Future<void> editOrganization([Map<String, dynamic>? organization]) async {
+    final epoch = connection.generation;
+    Map<String, dynamic>? templates;
+    if (organization == null) {
+      try {
+        templates = Map<String, dynamic>.from(
+          await connection.request('organizations/templates'),
+        );
+      } catch (e) {
+        templates = {'error': 'Role presets could not load: $e'};
+      }
+    }
+    if (!mounted || epoch != connection.generation) return;
     final values = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => OrganizationForm(organization: organization),
+      builder: (_) => OrganizationForm(
+        organization: organization,
+        templates: templates,
+        preview: (body) async {
+          final result = Map<String, dynamic>.from(
+            await connection.request('organizations/templates', body),
+          );
+          if (epoch != connection.generation)
+            throw StateError(
+              'Connection changed. Reopen the organization form.',
+            );
+          return result;
+        },
+      ),
     );
-    if (values != null && mounted) {
+    if (values != null && mounted && epoch == connection.generation) {
       final previous = bloc.state.organizations.map((org) => org['id']).toSet();
       await submit('save', values);
       if (mounted && organization == null && bloc.state.error == null) {
@@ -1107,8 +1132,15 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
 // Controllers belong to dialog states and are disposed when their route finishes.
 class OrganizationForm extends StatefulWidget {
-  const OrganizationForm({super.key, this.organization});
+  const OrganizationForm({
+    super.key,
+    this.organization,
+    this.templates,
+    this.preview,
+  });
   final Map<String, dynamic>? organization;
+  final Map<String, dynamic>? templates;
+  final Future<Map<String, dynamic>> Function(Map<String, dynamic>)? preview;
   @override
   State<OrganizationForm> createState() => _OrganizationFormState();
 }
@@ -1122,11 +1154,53 @@ class _OrganizationFormState extends State<OrganizationForm> {
   late final instructions = TextEditingController(
     text: widget.organization?['instructions'],
   );
+  final project = TextEditingController();
+  final selectedRoles = <String>{};
+  String policy = 'balanced';
+  Map<String, dynamic>? team;
+  String? previewError;
+  bool loading = false;
+  int revision = 0;
+  List<Map<String, dynamic>> get roles => widget.organization == null
+      ? [
+          for (final r in widget.templates?['roles'] as List? ?? [])
+            Map<String, dynamic>.from(r),
+        ]
+      : [];
+  void invalidate() {
+    revision++;
+    team = null;
+    previewError = null;
+    loading = false;
+  }
+
+  Future<void> previewTeam() async {
+    final epoch = ++revision;
+    setState(() {
+      loading = true;
+      team = null;
+      previewError = null;
+    });
+    try {
+      final result = await widget.preview!({
+        'template_roles': selectedRoles.toList(),
+        'project': project.text.trim(),
+        'model_policy': policy,
+      });
+      if (mounted && epoch == revision) setState(() => team = result);
+    } catch (e) {
+      if (mounted && epoch == revision) setState(() => previewError = '$e');
+    } finally {
+      if (mounted && epoch == revision) setState(() => loading = false);
+    }
+  }
+
   @override
   void dispose() {
     name.dispose();
     purpose.dispose();
     instructions.dispose();
+    project.dispose();
     super.dispose();
   }
 
@@ -1154,6 +1228,92 @@ class _OrganizationFormState extends State<OrganizationForm> {
                 lines: 8,
                 required: false,
               ),
+              if (widget.organization == null &&
+                  widget.templates?['error'] != null)
+                Text('${widget.templates!['error']}'),
+              if (roles.isNotEmpty) ...[
+                const Text(
+                  'Select roles to create with this organization. Profiles are ready for tasks; sessions start when launched.',
+                ),
+                for (final role in roles)
+                  CheckboxListTile(
+                    title: Text('${role['name']}'),
+                    value: selectedRoles.contains(role['id']),
+                    onChanged: (value) => setState(() {
+                      if (value == true) {
+                        selectedRoles.add('${role['id']}');
+                      } else {
+                        selectedRoles.remove(role['id']);
+                      }
+                      invalidate();
+                    }),
+                  ),
+                if (selectedRoles.isNotEmpty) ...[
+                  TextFormField(
+                    controller: project,
+                    decoration: const InputDecoration(
+                      labelText: 'Team project directory',
+                    ),
+                    maxLength: 2000,
+                    onChanged: (_) => setState(invalidate),
+                    validator: (v) => v == null || v.trim().isEmpty
+                        ? 'Team project directory is required'
+                        : null,
+                  ),
+                  DropdownButtonFormField<String>(
+                    initialValue: policy,
+                    decoration: const InputDecoration(
+                      labelText: 'Model policy',
+                    ),
+                    items: [
+                      for (final entry in Map<String, String>.from(
+                        widget.templates?['policies'] ?? {},
+                      ).entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(entry.value),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() {
+                      policy = v ?? 'balanced';
+                      invalidate();
+                    }),
+                  ),
+                  TextButton(
+                    onPressed: loading || widget.preview == null
+                        ? null
+                        : previewTeam,
+                    child: Text(
+                      loading ? 'Checking CLI accounts…' : 'Preview team',
+                    ),
+                  ),
+                  if (previewError != null)
+                    Text(
+                      previewError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  for (final warning in team?['warnings'] as List? ?? [])
+                    Text('$warning'),
+                  for (final member in team?['members'] as List? ?? [])
+                    ExpansionTile(
+                      title: Text(
+                        '${member['name']} · ${member['runtime']} · ${member['model_name']}',
+                      ),
+                      children: [
+                        Text(
+                          'Reports to: ${member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer'} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
+                        ),
+                        Text('${member['selection_note']}'),
+                        const Text(
+                          'Separate worktree · CLI default permissions',
+                        ),
+                        SelectableText('${member['persona']}'),
+                      ],
+                    ),
+                ],
+              ],
             ],
           ),
         ),
@@ -1166,13 +1326,26 @@ class _OrganizationFormState extends State<OrganizationForm> {
       ),
       FilledButton(
         onPressed: () {
-          if (form.currentState!.validate())
+          if (form.currentState!.validate()) {
+            if (selectedRoles.isNotEmpty && (team == null || loading)) {
+              setState(
+                () => previewError = 'Preview the selected team before saving.',
+              );
+              return;
+            }
             Navigator.pop(context, {
               'id': widget.organization?['id'] ?? '',
               'name': name.text.trim(),
               'purpose': purpose.text.trim(),
               'instructions': instructions.text.trim(),
+              if (widget.organization == null && selectedRoles.isNotEmpty) ...{
+                'template_roles': selectedRoles.toList(),
+                'project': project.text.trim(),
+                'model_policy': policy,
+                'template_plan': team!['template_plan'],
+              },
             });
+          }
         },
         child: const Text('Save organization'),
       ),

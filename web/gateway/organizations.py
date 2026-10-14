@@ -97,13 +97,14 @@ def policy_guidance(frozen):
 
 class OrganizationStore:
     supports_discussion_preparation = True
-    def __init__(self, path, projects, command, runtime_status=None, model_validator=None, runtime_ready=None):
+    def __init__(self, path, projects, command, runtime_status=None, model_validator=None, runtime_ready=None, template_catalog=None):
         self.path = Path(path)
         self.projects = Path(projects).resolve()
         self.command = command
         self.runtime_status = runtime_status
         self.runtime_ready = runtime_ready
         self.model_validator = model_validator
+        self.template_catalog = template_catalog
         self.lock = threading.RLock()
         # One-way notification only: never call the watcher while holding a
         # store/profile lock or SQLite transaction.
@@ -560,6 +561,21 @@ class OrganizationStore:
         with guard:
             return self._action(action, body)
 
+    def team_plan(self, body):
+        import team_templates
+        roles, policy = team_templates.validate(body)
+        if not roles:
+            return dict(members=[], warnings=[], model_policy=policy)
+        project = self.project(text(body, 'project', 2000))
+        if self.template_catalog is None:
+            raise ValueError('Team presets require CLI account discovery on this gateway.')
+        result = team_templates.plan(dict(body, project=project), self.template_catalog(project))
+        for member in result['members']:
+            model_settings(member, member['runtime'])
+            if self.model_validator is not None:
+                self.model_validator(member)
+        return result
+
     def _action(self, action, body):
         if not isinstance(body, dict):
             raise ValueError('Expected a JSON object.')
@@ -580,6 +596,24 @@ class OrganizationStore:
                 from collaboration import action as collaboration_action
                 return collaboration_action(self, snapshot, action, body, org)
         fingerprint = hashlib.sha256(json.dumps([action, body], sort_keys=True).encode()).hexdigest()
+        planned = None
+        if action == 'save' and 'template_roles' in body:
+            import team_templates
+            roles, _ = team_templates.validate(body)
+            if roles:
+                if body.get('id'):
+                    raise ValueError('Team presets can only be applied when creating an organization.')
+                # Read-only CLI probes must run outside the write transaction.
+                # Replays need no probes: the original team is already persisted.
+                with self.lock, closing(self.connect()) as db:
+                    existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
+                    if existing:
+                        if existing['fingerprint'] != fingerprint:
+                            raise ValueError('Request ID already used for different content.')
+                        return json.loads(existing['response'])
+                planned = self.team_plan(body)
+                if body.get('template_plan') and body['template_plan'] != planned['template_plan']:
+                    raise ValueError('CLI accounts or models changed since the team preview. Preview the team again before creating the organization.')
         submitted = None
         with self.lock, closing(self.connect()) as db, db:
             existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
@@ -589,11 +623,23 @@ class OrganizationStore:
                 return json.loads(existing['response'])
             if action == 'save':
                 item_id = text(body, 'id', 40, optional=True) or uuid.uuid4().hex
+                previous_org = None
                 if body.get('id'):
-                    self.get(db, 'organizations', item_id)
+                    previous_org = self.get(db, 'organizations', item_id)
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
+                if previous_org:
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy') if k in previous_org})
+                if planned:
+                    item.update(template_roles=body['template_roles'], model_policy=planned['model_policy'])
                 self.put(db, 'organizations', item)
+                if planned:
+                    ids = {m['template_role']: uuid.uuid4().hex for m in planned['members']}
+                    for member in planned['members']:
+                        profile = {k: v for k, v in member.items() if k not in ('manager_role', 'model_name')}
+                        profile.update(id=ids[member['template_role']], organization_id=item_id,
+                                       manager_id=ids.get(member['manager_role'], ''), version=1)
+                        self.put(db, 'profiles', profile)
             else:
                 org_id = text(body, 'organization_id', 40)
                 org = self.get(db, 'organizations', org_id)

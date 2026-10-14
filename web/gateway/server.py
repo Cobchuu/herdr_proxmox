@@ -22,6 +22,7 @@ from integration_coordinator import IntegrationCoordinator
 from project_files import ProjectJobs, clone_repository, project_directory
 from cli_setup import CliSetup
 import model_catalog
+import team_templates
 import project_explorer
 import project_git
 from run_logs import RunLogs
@@ -365,6 +366,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/organizations/export':
                 self.reply(200, export_configuration(self.server.organizations))
                 return
+            if self.path == '/api/organizations/templates':
+                self.reply(200, team_templates.snapshot())
+                return
             if self.path not in ('/api/snapshot', '/api/organizations', '/api/organizations/directory', '/api/organizations/state', '/api/projects/jobs', '/api/cli-setup', '/api/logs', '/api/ssh-access', '/api/dashboard-access', '/api/herdr-server', '/api/updates', '/api/models', '/api/integration', '/api/sdk', '/api/validation', '/api/tasks', '/api/github', '/api/discovery'):
                 self.reply(404, {'error': 'Unknown endpoint.'})
                 return
@@ -523,6 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         actor = getattr(self, 'operator', {}).get('name', 'dashboard_operator')
         role = getattr(self, 'operator', {}).get('role', 'operator')
         actions = {f'/api/workspaces/{name}': name for name in ('create', 'focus', 'rename')}
+        actions['/api/organizations/templates'] = 'templates'
         organization_actions = {f'/api/organizations/{name}': name for name in ('save', 'hire', 'launch', 'delegate', 'release', 'report', 'resolve_delegation', 'group', 'discuss', 'chat', 'inspect', 'input', 'recover', 'transcript', 'retry_discussion', 'cancel_discussion', 'remove_agent', 'remove_group', 'session', 'realign_discussion_session')}
         setup_actions = {f'/api/cli-setup/{name}': name for name in ('start', 'poll', 'input', 'resize', 'close', 'verify', 'install_integration')}
         log_actions = {f'/api/logs/{name}': name for name in ('save', 'preview', 'ticket', 'delete')}
@@ -534,7 +539,11 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < size <= (2_000_000 if self.path == '/api/organizations/import' else 65536):
                 raise ValueError('Invalid request size.')
             body = json.loads(self.rfile.read(size))
-            if self.path == '/api/github/configure':
+            if self.path == '/api/organizations/templates':
+                if not isinstance(body, dict):
+                    raise ValueError('Expected a JSON object.')
+                self.reply(200, self.server.organizations.team_plan(body))
+            elif self.path == '/api/github/configure':
                 if role != 'admin':
                     raise ValueError('Only an administrator can configure GitHub publishing.')
                 self.reply(200, self.server.github.configure(body))
@@ -717,7 +726,9 @@ def main():
     operators = Operators(Path('/etc/herdr/operators.json'))
     sdk_install = SdkInstall()
     cli_setup = CliSetup()
-    organizations = OrganizationStore(DATABASE, PROJECTS, command, runtime_status=cli_setup.status, runtime_ready=cli_setup.ready, model_validator=lambda profile: model_catalog.validate_selection(cli_setup, PROJECTS, profile))
+    organizations = OrganizationStore(DATABASE, PROJECTS, command, runtime_status=cli_setup.status, runtime_ready=cli_setup.ready,
+                                      model_validator=lambda profile: model_catalog.validate_selection(cli_setup, PROJECTS, profile),
+                                      template_catalog=lambda project: team_templates.catalog(cli_setup, PROJECTS, project))
     github = GitHub(DATABASE.parent / 'github.json')
     contributions = Contributions(DATABASE.with_name('tasks.sqlite3'), PROJECTS, organizations, github)
     run_logs = RunLogs(DATABASE.parent / 'run-logs', BIN)

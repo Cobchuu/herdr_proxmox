@@ -118,7 +118,25 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Future<void> editOrganization([Json? org]) async {
     final epoch = connection.generation;
-    final values = await organizationForm(org);
+    Json? templates;
+    if (org == null) {
+      try {
+        templates = Json.from(
+          await connection.request('organizations/templates'),
+        );
+      } catch (e) {
+        templates = {'error': 'Role presets could not load: $e'};
+      }
+    }
+    if (!mounted || epoch != connection.generation) return;
+    final values = await organizationForm(org, templates, (body) async {
+      final result = Json.from(
+        await connection.request('organizations/templates', body),
+      );
+      if (epoch != connection.generation)
+        throw StateError('Connection changed. Reopen the organization form.');
+      return result;
+    });
     if (values == null || !mounted || epoch != connection.generation) return;
     final previous = bloc.state.organizations.map((o) => o['id']).toSet();
     await submit('save', values);

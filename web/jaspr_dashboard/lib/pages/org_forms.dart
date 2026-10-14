@@ -181,29 +181,132 @@ Future<Json?> editRecord(
   });
 }
 
-Future<Json?> organizationForm([Json? org]) =>
-    editRecord(
-      org == null ? 'Create organization' : 'Edit organization',
-      {'id': org?['id'] ?? '', ...?org},
-      {
-        'name': 'Organization name',
-        'purpose': 'Purpose',
-        'instructions': 'Shared instructions',
+Future<Json?> organizationForm([
+  Json? org,
+  Json? templates,
+  Future<Json> Function(Json)? preview,
+]) async {
+  final roles = org == null ? records(templates?['roles']) : <Json>[];
+  Json? team;
+  String? previewError;
+  var revision = 0;
+  var loading = false;
+  List<String> selected(Json v) => [
+    for (final role in roles)
+      if (v['preset_${role['id']}'] == true) '${role['id']}',
+  ];
+  final result = await editRecord(
+    org == null ? 'Create organization' : 'Edit organization',
+    {
+      'id': org?['id'] ?? '',
+      ...?org,
+      'model_policy': 'balanced',
+      'project': '',
+    },
+    {
+      'name': 'Organization name',
+      'purpose': 'Purpose',
+      'instructions': 'Shared instructions',
+      if (roles.isNotEmpty) ...{
+        for (final role in roles) 'preset_${role['id']}': '${role['name']}',
+        'project': 'Team project directory',
+        'model_policy': 'Model policy',
       },
-      required: {'name', 'purpose'},
-      long: {'purpose', 'instructions'},
-      limits: {'name': 120, 'purpose': 2000, 'instructions': 8000},
-      wide: {'name'},
-    ).then(
-      (v) => v == null
-          ? null
-          : {
-              'id': v['id'],
-              'name': v['name'],
-              'purpose': v['purpose'],
-              'instructions': v['instructions'],
-            },
-    );
+    },
+    required: {'name', 'purpose'},
+    long: {'purpose', 'instructions'},
+    limits: {
+      'name': 120,
+      'purpose': 2000,
+      'instructions': 8000,
+      'project': 2000,
+    },
+    wide: {'name', 'project'},
+    flags: {for (final role in roles) 'preset_${role['id']}'},
+    choices: {
+      'model_policy': Map<String, String>.from(templates?['policies'] ?? {}),
+    },
+    visible: (key, v) =>
+        !{'project', 'model_policy'}.contains(key) || selected(v).isNotEmpty,
+    changed: (key, value, v) {
+      if (key.startsWith('preset_') ||
+          key == 'project' ||
+          key == 'model_policy') {
+        revision++;
+        team = null;
+        previewError = null;
+        loading = false;
+      }
+    },
+    validate: (v) {
+      if (selected(v).isEmpty) return null;
+      if ('${v['project'] ?? ''}'.trim().isEmpty)
+        return 'Enter the team project directory.';
+      if (team == null || loading)
+        return 'Preview the selected team before saving.';
+      return null;
+    },
+    extra: (v) => [
+      if (org == null && templates?['error'] != null)
+        errorLine('${templates!['error']}'),
+      if (roles.isNotEmpty)
+        prose(
+          'Select roles to create with this organization. Profiles are ready for tasks; sessions start when launched.',
+        ),
+      if (selected(v).isNotEmpty) ...[
+        button(
+          loading ? 'Checking CLI accounts…' : 'Preview team',
+          () async {
+            final epoch = ++revision;
+            loading = true;
+            team = null;
+            previewError = null;
+            refreshDialogs();
+            try {
+              final result = await preview!({
+                'template_roles': selected(v),
+                'project': '${v['project'] ?? ''}'.trim(),
+                'model_policy': v['model_policy'],
+              });
+              if (epoch == revision) team = result;
+            } catch (e) {
+              if (epoch == revision) previewError = '$e';
+            } finally {
+              if (epoch == revision) loading = false;
+              refreshDialogs();
+            }
+          },
+          disabled: loading || preview == null,
+        ),
+        if (previewError != null) errorLine(previewError),
+        for (final warning in team?['warnings'] as List? ?? []) prose(warning),
+        for (final member in records(team?['members']))
+          details(
+            '${member['name']} · ${member['runtime']} · ${member['model_name']}',
+            [
+              prose(
+                'Reports to: ${member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer'} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
+              ),
+              prose(member['selection_note']),
+              prose('Separate worktree · CLI default permissions'),
+              pre(member['persona']),
+            ],
+          ),
+      ],
+    ],
+  );
+  if (result == null) return null;
+  return {
+    for (final key in ['id', 'name', 'purpose', 'instructions'])
+      key: result[key],
+    if (org == null && selected(result).isNotEmpty) ...{
+      'template_roles': selected(result),
+      'project': result['project'],
+      'model_policy': result['model_policy'],
+      'template_plan': team!['template_plan'],
+    },
+  };
+}
 
 Future<Json?> hireForm(
   Json org,

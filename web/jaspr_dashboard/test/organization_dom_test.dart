@@ -217,6 +217,79 @@ void main() {
       posts.where((p) => p['path'] == '/api/organizations/$action').toList();
 
   test(
+    'organization presets preview personas and invalidate changed project settings',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {'id': 'lead_developer', 'name': 'Lead Developer'},
+                ],
+                'policies': {'balanced': 'Balanced', 'economy': 'Lowest cost'},
+              };
+            return {
+              'template_plan': 'preview-digest',
+              'warnings': [],
+              'members': [
+                {
+                  'name': 'Lead Developer',
+                  'runtime': 'claude',
+                  'model_name': 'Sonnet',
+                  'manager_role': '',
+                  'reasoning': 'high',
+                  'selection_note': 'Balanced choice',
+                  'persona': 'Plan and coordinate. Report to the owner.',
+                },
+              ],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Template team');
+      await input('Purpose', 'Build tools');
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await input('Team project directory', '/projects/app');
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Preview the selected team'),
+      );
+      await click('Preview team');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Lead Developer · claude · Sonnet'),
+      );
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Plan and coordinate.'),
+      );
+      await input('Team project directory', '/projects/other');
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      await click('Preview team');
+      await click('Save');
+      final saved = actions('save').single;
+      expect(saved['template_roles'], ['lead_developer']);
+      expect(saved['project'], '/projects/other');
+      expect(saved['model_policy'], 'balanced');
+      expect(saved['template_plan'], 'preview-digest');
+      expect(saved.containsKey('preset_lead_developer'), false);
+      expect(actions('hire'), isEmpty);
+    },
+  );
+
+  test(
     'hire preserves CLI model, worktree and permission defaults when runtime changes',
     () async {
       await mount(const OrganizationPage(initialView: 'team'));
