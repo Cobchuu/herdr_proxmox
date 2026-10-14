@@ -148,6 +148,10 @@ Component statusDot(String activity, {String? tone}) => el(
   attributes: {
     'data-tone': tone ?? agentActivityTone(activity),
     'data-activity': activity,
+    // Pulsing marks live work. Carried on the dot itself so every caller —
+    // including the sidebar agent list, which has no room for a role tile —
+    // breathes while the agent is working.
+    'data-live': '${activity == 'working'}',
     'data-shape': switch (activity) {
       'working' || 'idle' => 'filled',
       'attention' => 'diamond',

@@ -1819,3 +1819,23 @@ class CollaborationTests(unittest.TestCase):
         finally:
             release.set()
             self.drain()
+
+
+class DiscussionStateDriftTests(unittest.TestCase):
+    """Guards the member-task allowlist against states nothing writes."""
+
+    def test_every_listed_member_task_state_is_actually_written(self):
+        # The scheduler listed 'pull_open', which no writer produces — the real
+        # state is 'pr_open' — so a member whose pull request was open looked
+        # unfinished and the meeting waited out its full 24 hours. It also
+        # listed 'publishing', a delivery-flow state that never lands on a task.
+        gateway = Path(__file__).resolve().parents[1] / 'web/gateway'
+        source = (gateway / 'discussion_scheduler.py').read_text()
+        listed = re.search(r"if task\['state'\] not in \(([^)]*)\)", source)
+        self.assertIsNotNone(listed, 'member task allowlist not found')
+        states = [part.strip().strip("'") for part in listed.group(1).split(',')]
+        self.assertIn('pr_open', states)
+        writers = '\n'.join((gateway / name).read_text() for name in
+                            ('contributions.py', 'pr_repairs.py', 'task_delivery.py'))
+        for state in states:
+            self.assertIn("'" + state + "'", writers, state)

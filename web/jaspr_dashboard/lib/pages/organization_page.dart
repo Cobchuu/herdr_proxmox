@@ -132,6 +132,18 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Future<void> hire(Json org, [Json? profile]) async {
     final epoch = connection.generation;
+    // Readiness comes from the gateway so the form offers exactly what saving
+    // will accept. If it cannot be read the form falls back to the full list
+    // rather than blocking the operator; the server still refuses an unready
+    // runtime with its own reason.
+    var runtimes = const <Json>[];
+    try {
+      final status = await connection.request('cli-setup');
+      runtimes = [
+        for (final cli in (status['clis'] as List? ?? []))
+          if (cli is Json) cli,
+      ];
+    } catch (_) {}
     final values = await hireForm(
       org,
       bloc.state.profiles
@@ -141,6 +153,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
           .toList(),
       catalog,
       profile,
+      runtimes,
     );
     if (values != null && mounted && epoch == connection.generation) {
       await submit('hire', values);

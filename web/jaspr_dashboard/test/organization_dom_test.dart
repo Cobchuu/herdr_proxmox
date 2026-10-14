@@ -179,8 +179,28 @@ void main() {
         }
         final data =
             response?.call(request) ??
-            (path.endsWith('/organizations/state') ||
-                    path.endsWith('/organizations/activity')
+            (path.endsWith('/cli-setup')
+                ? {
+                    // The hire form offers only the runtimes the gateway reports
+                    // as ready, so the fixture must report them.
+                    'clis': [
+                      for (final entry in {
+                        'codex': 'Codex',
+                        'claude': 'Claude',
+                        'opencode': 'OpenCode',
+                        'agy': 'Antigravity',
+                      }.entries)
+                        {
+                          'id': entry.key,
+                          'name': entry.value,
+                          'installed': true,
+                          'status': 'not_configured',
+                          'ready': null,
+                        },
+                    ],
+                  }
+                : path.endsWith('/organizations/state') ||
+                      path.endsWith('/organizations/activity')
                 ? snapshot(jobs: jobs)
                 : path.endsWith('/organizations/history')
                 ? {

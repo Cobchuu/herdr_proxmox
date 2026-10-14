@@ -191,6 +191,22 @@ class CliSetupTests(unittest.TestCase):
             # A runtime outside the allowlist is not ours to judge.
             self.assertIsNone(self.manager.ready('some-other-agent'))
 
+    def test_snapshot_reports_the_readiness_the_add_path_enforces(self):
+        # The hire form offers only these, so the snapshot must carry the same
+        # rule rather than leaving the dashboard to reimplement it and drift.
+        with patch('cli_setup.os.access', return_value=True), patch('cli_setup.subprocess.run') as run:
+            run.return_value = Mock(returncode=0, stderr='', stdout=(
+                'opencode: not installed (/p)\nclaude: current (v6) (/c)\n'
+                'codex: needs repair (v5) (/x)\nantigravity-cli: current (v2) (/a)\n'))
+            data = self.manager.snapshot()
+            reported = {cli['id']: cli['ready'] for cli in data['clis']}
+            expected = {name: self.manager.ready(name) for name in reported}
+        self.assertEqual(set(reported), {'codex', 'claude', 'opencode', 'agy'})
+        self.assertEqual(reported, expected)
+        self.assertIsNone(reported['claude'])
+        self.assertIn('no Herdr integration', reported['opencode'])
+        self.assertIn('repair', reported['codex'])
+
     def test_installing_an_outdated_integration_is_reported_as_a_failure(self):
         # Installed but still outdated is not a working integration; reporting
         # success would leave agents silently unable to report or resume.

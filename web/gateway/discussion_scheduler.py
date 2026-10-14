@@ -115,7 +115,13 @@ def prepare_locked(store, job_id):
                 if not controller:
                     raise ValueError('Task completion verification is unavailable; inspect the member task')
                 task = controller.get(run['task_id'])
-                if task['state'] not in ('review_ready', 'publishing', 'published', 'pull_open', 'merged', 'completed', 'closed'):
+                # The states a finished implementation reaches. This listed
+                # 'pull_open', which is never written — the real state is
+                # 'pr_open' — so a member whose pull request was open looked
+                # unfinished and the meeting waited out its full 24 hours.
+                # 'publishing' was here too; that is a delivery-flow state, not a
+                # task state, so it never matched either.
+                if task['state'] not in ('review_ready', 'published', 'pr_open', 'merged', 'completed', 'closed'):
                     raise Waiting(profile['name'] + ': waiting for implementation to finish')
                 verified, reason = controller.execution_finished(task, run)
                 if not verified:
