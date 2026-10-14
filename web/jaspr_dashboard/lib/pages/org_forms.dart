@@ -191,6 +191,8 @@ Future<Json?> organizationForm([
   Future<Json> Function(Json)? preview,
   Future<Json> Function(Json)? library,
   bool canManageTemplates = true,
+  Map<String, String> projectFolders = const {},
+  String? projectFolderError,
 ]) async {
   final roles = org == null ? records(templates?['roles']) : <Json>[];
   final draft = TeamTemplateDraft(
@@ -294,6 +296,7 @@ Future<Json?> organizationForm([
     wide: {'name', 'project'},
     flags: {for (final role in roles) 'preset_${role['id']}'},
     choices: {
+      'project': {'': 'Select a project folder', ...projectFolders},
       'saved_template': savedChoices,
       'model_policy': Map<String, String>.from(templates?['policies'] ?? {}),
       'preferred_runtime': {
@@ -403,8 +406,8 @@ Future<Json?> organizationForm([
     validate: (v) {
       if (libraryBusy) return 'Wait for the template operation to finish.';
       if (selected(v).isEmpty) return null;
-      if ('${v['project'] ?? ''}'.trim().isEmpty)
-        return 'Enter the team project directory.';
+      if (!projectFolders.containsKey(v['project']))
+        return 'Select the team project directory.';
       if (team == null || loading)
         return 'Preview the selected team before saving.';
       return null;
@@ -422,6 +425,12 @@ Future<Json?> organizationForm([
       for (final bundle in bundles.where((b) => b['id'] == v['team_preset']))
         prose(bundle['description']),
       if (selected(v).isNotEmpty) ...[
+        if (projectFolderError != null)
+          errorLine(projectFolderError)
+        else if (projectFolders.isEmpty)
+          prose(
+            'No project folders are available. Add or clone a project in the project explorer, then reopen this form.',
+          ),
         prose(
           'Resource limits cover every launched session, including idle sessions and review helpers. Use 0 for unlimited.',
         ),
@@ -458,7 +467,11 @@ Future<Json?> organizationForm([
               refreshDialogs();
             }
           },
-          disabled: loading || libraryBusy || preview == null,
+          disabled:
+              loading ||
+              libraryBusy ||
+              preview == null ||
+              !projectFolders.containsKey(v['project']),
         ),
         for (final member in draft.members) ...[
           details('Configure ${draft.name(member)}', [

@@ -1,6 +1,7 @@
 import 'org_form_values.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:herdr_dashboard_state/project_directory_choices.dart';
 import 'package:web/web.dart' as web;
 import '../services.dart';
 import '../ui.dart';
@@ -119,6 +120,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
   Future<void> editOrganization([Json? org]) async {
     final epoch = connection.generation;
     Json? templates;
+    var projectFolders = <String, String>{};
+    String? projectFolderError;
     if (org == null) {
       try {
         templates = Json.from(
@@ -126,6 +129,13 @@ class _OrganizationPageState extends State<OrganizationPage> {
         );
       } catch (e) {
         templates = {'error': 'Role presets could not load: $e'};
+      }
+      try {
+        projectFolders = projectDirectoryChoices(
+          Json.from(await connection.request('projects/browse', {'path': ''})),
+        );
+      } catch (e) {
+        projectFolderError = 'Project folders could not load: $e';
       }
     }
     if (!mounted || epoch != connection.generation) return;
@@ -149,6 +159,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
         return result;
       },
       connection.operator.value['role'] == 'admin',
+      projectFolders,
+      projectFolderError,
     );
     if (values == null || !mounted || epoch != connection.generation) return;
     final previous = bloc.state.organizations.map((o) => o['id']).toSet();

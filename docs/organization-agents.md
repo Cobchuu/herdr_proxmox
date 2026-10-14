@@ -31,8 +31,13 @@ Python/SQLite. No plugin source or Node UI has been vendored or installed.
 When creating an organization, select any combination of Lead Developer,
 Frontend Developer, Backend Developer, Full-stack Developer, Reviewer,
 Integration Engineer, QA Engineer and DevOps Engineer. Select an existing
-project directory and a model policy, then use **Preview team** to inspect
+project folder from the **Team project directory** dropdown and a model policy,
+then use **Preview team** to inspect
 personas, CLI/model/effort choices and reporting relationships before saving.
+The dropdown uses the same root folder listing as the project explorer, excluding
+files, symbolic links and hidden folders. If no folders are available, add or
+clone a project in the explorer and reopen the organization form. Changing the
+selected folder requires a fresh team preview.
 The **Team preset** selector can fill that draft with Solo developer (one member),
 Small product team (three), Frontend/backend team (five), or Full engineering team
 (all eight roles). All presets start with the balanced model policy. Applying a

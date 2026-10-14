@@ -3,6 +3,92 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:herdr_dashboard/organization_page.dart';
 
 void main() {
+  const projectFolders = {
+    '/projects/app': '/projects/app',
+    '/projects/other': '/projects/other',
+  };
+  Future<void> selectProject(WidgetTester tester, String path) async {
+    final selector = find.widgetWithText(
+      DropdownButtonFormField<String>,
+      'Team project directory',
+    );
+    await tester.ensureVisible(selector);
+    await tester.tap(selector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(path).last);
+    await tester.pumpAndSettle();
+  }
+
+  for (final folderError in [
+    null,
+    'Project folders could not load: unavailable',
+  ]) {
+    testWidgets(
+      'unavailable project folders prevent team creation ($folderError)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1400, 1300);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        Map<String, dynamic>? saved;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () async {
+                    saved = await showDialog<Map<String, dynamic>>(
+                      context: context,
+                      builder: (_) => OrganizationForm(
+                        projectFolderError: folderError,
+                        templates: {
+                          'roles': [
+                            {'id': 'lead_developer', 'name': 'Lead Developer'},
+                          ],
+                        },
+                        preview: (_) async =>
+                            throw StateError('Preview must remain disabled'),
+                      ),
+                    );
+                  },
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextFormField).at(0), 'Empty team');
+        await tester.enterText(find.byType(TextFormField).at(1), 'Hire later');
+        await tester.tap(find.text('Lead Developer'));
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining(
+            folderError ?? 'No project folders are available.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<TextButton>(
+                find.widgetWithText(TextButton, 'Preview team'),
+              )
+              .onPressed,
+          isNull,
+        );
+        await tester.tap(find.text('Save organization'));
+        await tester.pumpAndSettle();
+        expect(saved, isNull);
+        expect(find.text('Select the team project directory.'), findsOneWidget);
+        await tester.tap(find.text('Lead Developer'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save organization'));
+        await tester.pumpAndSettle();
+        expect(saved?['name'], 'Empty team');
+      },
+    );
+  }
   testWidgets(
     'load a pinned saved template without losing fallback CLI preferences',
     (tester) async {
@@ -39,6 +125,7 @@ void main() {
                   saved = await showDialog<Map<String, dynamic>>(
                     context: context,
                     builder: (_) => OrganizationForm(
+                      projectFolders: projectFolders,
                       templates: {
                         'roles': [
                           {'id': 'lead_developer', 'name': 'Lead Developer'},
@@ -100,13 +187,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Configure Maya'), findsOneWidget);
       expect(find.text('Save reusable template'), findsNothing);
-      await tester.ensureVisible(
+      expect(
         find.widgetWithText(TextFormField, 'Team project directory'),
+        findsNothing,
       );
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Team project directory'),
-        '/projects/other',
-      );
+      await selectProject(tester, '/projects/other');
       await tester.ensureVisible(find.text('Preview team'));
       await tester.tap(find.text('Preview team'));
       await tester.pumpAndSettle();
@@ -137,6 +222,7 @@ void main() {
                   saved = await showDialog<Map<String, dynamic>>(
                     context: context,
                     builder: (_) => OrganizationForm(
+                      projectFolders: projectFolders,
                       templates: {
                         'roles': [
                           {'id': 'lead_developer', 'name': 'Lead Developer'},
@@ -180,10 +266,7 @@ void main() {
       await tester.enterText(find.byType(TextFormField).at(1), 'Build tools');
       await tester.tap(find.text('Lead Developer'));
       await tester.pumpAndSettle();
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Team project directory'),
-        '/projects/app',
-      );
+      await selectProject(tester, '/projects/app');
       await tester.tap(find.text('Save organization'));
       await tester.pumpAndSettle();
       expect(saved, isNull);
@@ -194,10 +277,7 @@ void main() {
       await tester.tap(find.text('Preview team'));
       await tester.pumpAndSettle();
       expect(find.text('Lead Developer · claude · Sonnet'), findsOneWidget);
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Team project directory'),
-        '/projects/other',
-      );
+      await selectProject(tester, '/projects/other');
       await tester.pumpAndSettle();
       expect(find.text('Lead Developer · claude · Sonnet'), findsNothing);
       await tester.tap(find.text('Preview team'));

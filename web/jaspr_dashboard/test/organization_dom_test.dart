@@ -163,6 +163,7 @@ void main() {
     String? failAction,
     bool Function(http.Request)? failWhen,
     Map<String, dynamic> Function(http.Request)? response,
+    Map<String, dynamic>? projectListing,
   }) async {
     var lost = false;
     connection = DashboardBloc(
@@ -181,7 +182,23 @@ void main() {
           }
         }
         final data =
-            response?.call(request) ??
+            (path.endsWith('/projects/browse')
+                ? projectListing ??
+                      {
+                        'root': '/projects',
+                        'kind': 'folder',
+                        'entries': [
+                          for (final name in ['app', 'other', 'new-app'])
+                            {'name': name, 'path': name, 'kind': 'folder'},
+                          {
+                            'name': 'notes.txt',
+                            'path': 'notes.txt',
+                            'kind': 'file',
+                          },
+                          {'name': 'linked', 'path': 'linked', 'kind': 'link'},
+                        ],
+                      }
+                : response?.call(request)) ??
             (path.endsWith('/organizations/state') ||
                     path.endsWith('/organizations/activity')
                 ? snapshot(jobs: jobs)
@@ -218,6 +235,43 @@ void main() {
 
   List<Map<String, dynamic>> actions(String action) =>
       posts.where((p) => p['path'] == '/api/organizations/$action').toList();
+
+  test(
+    'empty project explorer blocks team preview but permits a bare organization',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        projectListing: {'root': '/projects', 'kind': 'folder', 'entries': []},
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates'))
+            return {
+              'roles': [
+                {'id': 'lead_developer', 'name': 'Lead Developer'},
+              ],
+            };
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          return {'authenticated': true};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Empty team');
+      await input('Purpose', 'Hire later');
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      expect(btn('Preview team').disabled, true);
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('No project folders are available.'),
+      );
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await click('Save');
+      expect(actions('save'), hasLength(1));
+    },
+  );
 
   test(
     'organization presets preview personas and invalidate changed project settings',
@@ -274,7 +328,12 @@ void main() {
       await input('Purpose', 'Build tools');
       (control('Lead Developer') as web.HTMLInputElement).click();
       await settle();
-      await input('Team project directory', '/projects/app');
+      expect(control('Team project directory'), isA<web.HTMLSelectElement>());
+      final folders = nodes('select option').map((n) => n.textContent).toList();
+      expect(folders, contains('/projects/app'));
+      expect(folders, isNot(contains('/projects/notes.txt')));
+      expect(folders, isNot(contains('/projects/linked')));
+      await choose('Team project directory', '/projects/app');
       await input('Maximum concurrent sessions', '2');
       await input('Sessions per 24 hours', '10');
       await choose('Preferred CLI', 'codex');
@@ -297,7 +356,7 @@ void main() {
         web.document.getElementById('org-dom-test')!.textContent,
         contains('Plan and coordinate.'),
       );
-      await input('Team project directory', '/projects/other');
+      await choose('Team project directory', '/projects/other');
       await click('Save');
       expect(actions('save'), isEmpty);
       await click('Preview team');
@@ -385,7 +444,7 @@ void main() {
       await input('Purpose', 'Build tools');
       (control('Lead Developer') as web.HTMLInputElement).click();
       await settle();
-      await input('Team project directory', '/projects/app');
+      await choose('Team project directory', '/projects/app');
       nodes(
         'summary',
       ).firstWhere((n) => n.textContent == 'Configure Lead Developer').click();
@@ -473,7 +532,7 @@ void main() {
       );
       (control('Backend Developer') as web.HTMLInputElement).click();
       await settle();
-      await input('Team project directory', '/projects/app');
+      await choose('Team project directory', '/projects/app');
       await click('Preview team');
       await click('Save');
       final saved = actions('save').single;
@@ -601,7 +660,7 @@ void main() {
       expect(saves[0]['request_id'], saves[1]['request_id']);
       expect((saves[1]['definition'] as Map).containsKey('project'), false);
       expect(saves[1]['expected_version'], 1);
-      await input('Team project directory', '/projects/new-app');
+      await choose('Team project directory', '/projects/new-app');
       await click('Preview team');
       await click('Save');
       final body = actions('save').single;

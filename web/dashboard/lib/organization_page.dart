@@ -1,5 +1,6 @@
 import 'organization_automation.dart';
 import 'package:herdr_dashboard_state/team_template_draft.dart';
+import 'package:herdr_dashboard_state/project_directory_choices.dart';
 import 'dart:convert';
 import 'artifact_download.dart';
 import 'permission_options.dart';
@@ -85,6 +86,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
   Future<void> editOrganization([Map<String, dynamic>? organization]) async {
     final epoch = connection.generation;
     Map<String, dynamic>? templates;
+    var projectFolders = <String, String>{};
+    String? projectFolderError;
     if (organization == null) {
       try {
         templates = Map<String, dynamic>.from(
@@ -93,6 +96,15 @@ class _OrganizationPageState extends State<OrganizationPage> {
       } catch (e) {
         templates = {'error': 'Role presets could not load: $e'};
       }
+      try {
+        projectFolders = projectDirectoryChoices(
+          Map<String, dynamic>.from(
+            await connection.request('projects/browse', {'path': ''}),
+          ),
+        );
+      } catch (e) {
+        projectFolderError = 'Project folders could not load: $e';
+      }
     }
     if (!mounted || epoch != connection.generation) return;
     final values = await showDialog<Map<String, dynamic>>(
@@ -100,6 +112,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
       builder: (_) => OrganizationForm(
         organization: organization,
         templates: templates,
+        projectFolders: projectFolders,
+        projectFolderError: projectFolderError,
         preview: (body) async {
           final result = Map<String, dynamic>.from(
             await connection.request('organizations/templates', body),
@@ -1151,12 +1165,16 @@ class OrganizationForm extends StatefulWidget {
     this.preview,
     this.library,
     this.canManageTemplates = true,
+    this.projectFolders = const {},
+    this.projectFolderError,
   });
   final Map<String, dynamic>? organization;
   final Map<String, dynamic>? templates;
   final Future<Map<String, dynamic>> Function(Map<String, dynamic>)? preview;
   final Future<Map<String, dynamic>> Function(Map<String, dynamic>)? library;
   final bool canManageTemplates;
+  final Map<String, String> projectFolders;
+  final String? projectFolderError;
   @override
   State<OrganizationForm> createState() => _OrganizationFormState();
 }
@@ -1703,17 +1721,39 @@ class _OrganizationFormState extends State<OrganizationForm> {
                     }),
                   ),
                 if (selectedRoles.isNotEmpty) ...[
-                  TextFormField(
-                    controller: project,
+                  DropdownButtonFormField<String>(
+                    initialValue: project.text.isEmpty ? null : project.text,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Team project directory',
                     ),
-                    maxLength: 2000,
-                    onChanged: (_) => setState(invalidate),
-                    validator: (v) => v == null || v.trim().isEmpty
-                        ? 'Team project directory is required'
+                    hint: const Text('Select a project folder'),
+                    items: [
+                      for (final entry in widget.projectFolders.entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(
+                            entry.value,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: widget.projectFolders.isEmpty
+                        ? null
+                        : (v) => setState(() {
+                            project.text = v ?? '';
+                            invalidate();
+                          }),
+                    validator: (v) => !widget.projectFolders.containsKey(v)
+                        ? 'Select the team project directory.'
                         : null,
                   ),
+                  if (widget.projectFolderError != null)
+                    Text(widget.projectFolderError!)
+                  else if (widget.projectFolders.isEmpty)
+                    const Text(
+                      'No project folders are available. Add or clone a project in the project explorer, then reopen this form.',
+                    ),
                   DropdownButtonFormField<String>(
                     key: ValueKey('model-policy-$policy'),
                     initialValue: policy,
@@ -1735,7 +1775,11 @@ class _OrganizationFormState extends State<OrganizationForm> {
                     }),
                   ),
                   TextButton(
-                    onPressed: loading || libraryBusy || widget.preview == null
+                    onPressed:
+                        loading ||
+                            libraryBusy ||
+                            widget.preview == null ||
+                            !widget.projectFolders.containsKey(project.text)
                         ? null
                         : previewTeam,
                     child: Text(
