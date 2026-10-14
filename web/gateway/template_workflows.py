@@ -5,10 +5,9 @@ import project_git
 
 
 def preview(project, projects, members):
-    roles = {m['template_role'] for m in members}
-    reviewers = [r for r in ('reviewer', 'qa_engineer') if r in roles]
-    coordinator = 'integration_engineer' if 'integration_engineer' in roles else ''
-    settings = dict(repository='', reviewer_roles=reviewers, coordinator_role=coordinator)
+    reviewers = [m['template_key'] for role in ('reviewer', 'qa_engineer') for m in members if m['template_role'] == role]
+    coordinator = next((m['template_key'] for m in members if m['template_role'] == 'integration_engineer'), '')
+    settings = dict(repository='', reviewer_keys=reviewers, coordinator_key=coordinator)
     notes = []
     if not reviewers and not coordinator:
         return settings, notes

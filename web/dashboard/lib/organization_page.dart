@@ -1,4 +1,5 @@
 import 'organization_automation.dart';
+import 'package:herdr_dashboard_state/team_template_draft.dart';
 import 'dart:convert';
 import 'artifact_download.dart';
 import 'permission_options.dart';
@@ -1159,6 +1160,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
   String policy = 'balanced';
   String preferredRuntime = '';
   Map<String, dynamic>? team;
+  Map<String, dynamic>? lastPreview;
   String? previewError;
   bool loading = false;
   int revision = 0;
@@ -1168,6 +1170,10 @@ class _OrganizationFormState extends State<OrganizationForm> {
             Map<String, dynamic>.from(r),
         ]
       : [];
+  late final draft = TeamTemplateDraft(
+    roles,
+    maxMembers: widget.templates?['max_members'] as int? ?? 20,
+  );
   void invalidate() {
     revision++;
     team = null;
@@ -1184,19 +1190,212 @@ class _OrganizationFormState extends State<OrganizationForm> {
     });
     try {
       final result = await widget.preview!({
-        'template_roles': selectedRoles.toList(),
+        ...draft.payload,
         'project': project.text.trim(),
         'model_policy': policy,
         'runtime_preferences': [
           if (preferredRuntime.isNotEmpty) preferredRuntime,
         ],
       });
-      if (mounted && epoch == revision) setState(() => team = result);
+      if (mounted && epoch == revision)
+        setState(() {
+          team = result;
+          lastPreview = result;
+          draft.hydrate(result['member_specs']);
+        });
     } catch (e) {
       if (mounted && epoch == revision) setState(() => previewError = '$e');
     } finally {
       if (mounted && epoch == revision) setState(() => loading = false);
     }
+  }
+
+  Widget memberEditor(Map<String, dynamic> member) {
+    final key = '${member['key']}';
+    final role = draft.role('${member['template_role']}');
+    final resolved = (lastPreview?['members'] as List? ?? [])
+        .where((m) => m['template_key'] == key)
+        .firstOrNull;
+    final runtime = '${member['runtime'] ?? resolved?['runtime'] ?? ''}';
+    final entry =
+        (lastPreview?['runtimes'] as Map? ?? {})[runtime] as Map? ?? {};
+    final models = entry['models'] as List? ?? [];
+    final chosen = models
+        .where(
+          (m) =>
+              m['id'] == (member['model'] ?? resolved?['model']) &&
+              m['provider'] == (member['provider'] ?? resolved?['provider']),
+        )
+        .firstOrNull;
+    final reasoning = chosen?['reasoning'] as List? ?? [];
+    void change(String field, dynamic value) => setState(() {
+      member[field] = value;
+      invalidate();
+    });
+    return ExpansionTile(
+      key: ValueKey('member-$key'),
+      title: Text('Configure ${draft.name(member)}'),
+      children: [
+        TextFormField(
+          key: ValueKey('member-name-$key'),
+          initialValue: draft.name(member),
+          decoration: const InputDecoration(labelText: 'Member name'),
+          maxLength: 120,
+          onChanged: (v) => change('name', v),
+        ),
+        TextFormField(
+          key: ValueKey('member-persona-$key'),
+          initialValue:
+              '${member['persona'] ?? role['persona_instruction'] ?? ''}',
+          decoration: const InputDecoration(
+            labelText: 'Persona responsibilities',
+          ),
+          maxLength: 6000,
+          minLines: 3,
+          maxLines: 8,
+          onChanged: (v) => change('persona', v),
+        ),
+        DropdownButtonFormField<String>(
+          key: ValueKey('member-runtime-$key-${member['runtime']}'),
+          initialValue: '${member['runtime'] ?? ''}',
+          decoration: const InputDecoration(labelText: 'Member CLI'),
+          items: [
+            const DropdownMenuItem(value: '', child: Text('Automatic')),
+            for (final entry in Map<String, String>.from(
+              widget.templates?['runtime_names'] ?? {},
+            ).entries)
+              DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+          ],
+          onChanged: (v) => setState(() {
+            if (v == null || v.isEmpty)
+              member.remove('runtime');
+            else
+              member['runtime'] = v;
+            for (final field in [
+              'provider',
+              'model',
+              'reasoning',
+              'permission_mode',
+              'accessible_paths',
+            ])
+              member.remove(field);
+            invalidate();
+          }),
+        ),
+        if (models.isNotEmpty && runtime != 'agy') ...[
+          DropdownButtonFormField<String>(
+            key: ValueKey('member-model-$key-$runtime-${member['model']}'),
+            initialValue: member['model'] == null
+                ? ''
+                : jsonEncode([member['provider'] ?? '', member['model']]),
+            decoration: const InputDecoration(labelText: 'Member model'),
+            items: [
+              const DropdownMenuItem(
+                value: '',
+                child: Text('Automatic for role'),
+              ),
+              for (final model in models)
+                DropdownMenuItem(
+                  value: jsonEncode([model['provider'] ?? '', model['id']]),
+                  child: Text(
+                    '${model['provider'] == '' ? '' : '${model['provider']}/'}${model['name']}',
+                  ),
+                ),
+            ],
+            onChanged: (v) => setState(() {
+              member.remove('reasoning');
+              if (v == null || v.isEmpty) {
+                member.remove('model');
+                member.remove('provider');
+              } else {
+                final pair = jsonDecode(v) as List;
+                member['runtime'] = runtime;
+                member['provider'] = pair[0];
+                member['model'] = pair[1];
+              }
+              invalidate();
+            }),
+          ),
+          if (runtime != 'opencode' || entry['supports_variants'] == true)
+            DropdownButtonFormField<String>(
+              key: ValueKey(
+                'member-effort-$key-$runtime-${member['reasoning']}',
+              ),
+              initialValue: '${member['reasoning'] ?? '__auto__'}',
+              decoration: const InputDecoration(labelText: 'Member reasoning'),
+              items: [
+                const DropdownMenuItem(
+                  value: '__auto__',
+                  child: Text('Automatic for role'),
+                ),
+                const DropdownMenuItem(value: '', child: Text('Model default')),
+                for (final value in reasoning)
+                  DropdownMenuItem(value: '$value', child: Text('$value')),
+              ],
+              onChanged: (v) => setState(() {
+                if (v == '__auto__')
+                  member.remove('reasoning');
+                else
+                  member['reasoning'] = v ?? '';
+                invalidate();
+              }),
+            ),
+        ],
+        DropdownButtonFormField<String>(
+          key: ValueKey(
+            'member-manager-$key-${member['manager_key']}-${draft.members.length}',
+          ),
+          initialValue: '${member['manager_key'] ?? '__auto__'}',
+          decoration: const InputDecoration(labelText: 'Reports to'),
+          items: [
+            const DropdownMenuItem(
+              value: '__auto__',
+              child: Text('Role default'),
+            ),
+            const DropdownMenuItem(
+              value: '',
+              child: Text('Organization owner'),
+            ),
+            for (final manager in draft.members)
+              if (manager['key'] != member['key'])
+                DropdownMenuItem(
+                  value: '${manager['key']}',
+                  child: Text(draft.name(manager)),
+                ),
+          ],
+          onChanged: (v) => setState(() {
+            if (v == '__auto__')
+              member.remove('manager_key');
+            else
+              member['manager_key'] = v ?? '';
+            invalidate();
+          }),
+        ),
+        Wrap(
+          children: [
+            TextButton(
+              onPressed: draft.members.length >= draft.maxMembers
+                  ? null
+                  : () => setState(() {
+                      draft.add('${member['template_role']}', member);
+                      invalidate();
+                    }),
+              child: Text('Add another ${role['name']}'),
+            ),
+            TextButton(
+              onPressed: () => setState(() {
+                draft.remove(key);
+                selectedRoles
+                  ..clear()
+                  ..addAll(draft.selectedRoles);
+                invalidate();
+              }),
+              child: Text('Remove ${draft.name(member)}'),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
   @override
@@ -1249,7 +1448,14 @@ class _OrganizationFormState extends State<OrganizationForm> {
                       } else {
                         selectedRoles.remove(role['id']);
                       }
+                      final withinLimit = draft.syncRoles(selectedRoles);
+                      selectedRoles
+                        ..clear()
+                        ..addAll(draft.selectedRoles);
                       invalidate();
+                      if (!withinLimit)
+                        previewError =
+                            'A team supports up to ${draft.maxMembers} members.';
                     }),
                   ),
                 if (selectedRoles.isNotEmpty) ...[
@@ -1314,6 +1520,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                       invalidate();
                     }),
                   ),
+                  for (final member in draft.members) memberEditor(member),
                   if (previewError != null)
                     Text(
                       previewError!,
@@ -1330,7 +1537,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                       ),
                       children: [
                         Text(
-                          'Reports to: ${member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer'} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
+                          'Reports to: ${member['manager_name'] ?? (member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer')} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
                         ),
                         Text('${member['selection_note']}'),
                         const Text(
@@ -1366,7 +1573,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
               'purpose': purpose.text.trim(),
               'instructions': instructions.text.trim(),
               if (widget.organization == null && selectedRoles.isNotEmpty) ...{
-                'template_roles': selectedRoles.toList(),
+                ...draft.payload,
                 'project': project.text.trim(),
                 'model_policy': policy,
                 'runtime_preferences': [

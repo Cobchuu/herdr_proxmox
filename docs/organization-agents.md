@@ -38,6 +38,16 @@ a failed save creates no partial team, and retrying the same request cannot
 duplicate hires. Existing organizations and manually hired profiles retain their
 normal editing workflow. Preset profiles can be renamed and customized afterward.
 
+Before creation, expand **Configure member** to edit the name, persona
+responsibilities, CLI, model, reasoning and reporting relationship. Use **Add
+another role** to create multiple specialists of the same type (up to 20 members).
+Automatic model choices remain automatic when the global policy changes; explicit
+overrides remain attached to that member. Any edit requires another preview.
+Manager cycles, missing managers and unsupported model/effort overrides are
+rejected before any records are saved. The resolved persona includes the reporting
+instruction and shared team boundaries. The API accepts a `team_members` draft
+roster with distinct `key` values and `manager_key` references.
+
 The lead reports to the organization owner. Developers, integration and DevOps
 report to the selected lead, or to the owner if no lead was selected. Reviewer
 and QA report directly to the owner for independent assessment. Every role has

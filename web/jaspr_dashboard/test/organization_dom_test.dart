@@ -293,6 +293,103 @@ void main() {
   );
 
   test(
+    'custom member names personas models and duplicates survive re-preview',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {
+                    'id': 'lead_developer',
+                    'name': 'Lead Developer',
+                    'persona_instruction': 'Plan and coordinate.',
+                  },
+                ],
+                'policies': {'balanced': 'Balanced'},
+                'runtime_names': {'claude': 'Claude Code'},
+              };
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            final specs = body['team_members'] as List;
+            return {
+              'template_plan': 'custom-preview',
+              'member_specs': specs,
+              'warnings': [],
+              'runtimes': {
+                'claude': {
+                  'models': [
+                    {
+                      'provider': '',
+                      'id': 'claude-sonnet-5-5',
+                      'name': 'Sonnet',
+                      'reasoning': ['medium', 'high'],
+                    },
+                  ],
+                },
+              },
+              'members': [
+                for (final spec in specs)
+                  {
+                    'template_key': spec['key'],
+                    'name': spec['name'] ?? 'Lead Developer',
+                    'runtime': 'claude',
+                    'provider': '',
+                    'model': 'claude-sonnet-5-5',
+                    'model_name': 'Sonnet',
+                    'reasoning': spec['reasoning'] ?? 'high',
+                    'manager_name': 'Organization owner',
+                    'manager_role': '',
+                    'persona': spec['persona'] ?? 'Plan and coordinate.',
+                    'selection_note': 'Fits this role',
+                  },
+              ],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Custom team');
+      await input('Purpose', 'Build tools');
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await input('Team project directory', '/projects/app');
+      nodes(
+        'summary',
+      ).firstWhere((n) => n.textContent == 'Configure Lead Developer').click();
+      await settle();
+      await input('Member name', 'Maya');
+      await input('Persona responsibilities', 'Lead the API migration.');
+      await click('Add another Lead Developer');
+      await click('Preview team');
+      await choose('Member CLI', 'claude');
+      await choose('Member model', jsonEncode(['', 'claude-sonnet-5-5']));
+      await choose('Member reasoning', 'medium');
+      await choose('Reports to', '');
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      await click('Preview team');
+      await click('Save');
+      final saved = actions('save').single;
+      final members = saved['team_members'] as List;
+      expect(members.length, 2);
+      expect(members[0]['name'], 'Maya');
+      expect(members[0]['persona'], 'Lead the API migration.');
+      expect(members[0]['model'], 'claude-sonnet-5-5');
+      expect(members[0]['reasoning'], 'medium');
+      expect(members[0]['manager_key'], '');
+      expect(members[0]['key'], isNot(members[1]['key']));
+      expect(saved['template_roles'], ['lead_developer']);
+    },
+  );
+
+  test(
     'hire preserves CLI model, worktree and permission defaults when runtime changes',
     () async {
       await mount(const OrganizationPage(initialView: 'team'));

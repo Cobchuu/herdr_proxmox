@@ -5,6 +5,7 @@ import hashlib
 import json
 
 import model_catalog
+from permissions import permission_mode, accessible_paths
 
 
 COMMON = (
@@ -69,6 +70,71 @@ RUNTIME_NAMES = {'codex': 'Codex', 'claude': 'Claude Code', 'opencode': 'OpenCod
 # Compatibility floors are policy, not model benchmarks. Substantial coding,
 # coordination and independent review should not silently use a light model.
 ROLE_MINIMUMS = {r['id']: (1 if r['id'] == 'qa_engineer' else 2) for r in ROLES}
+MAX_MEMBERS = 20
+MEMBER_FIELDS = {'key', 'template_role', 'name', 'persona', 'runtime', 'provider', 'model', 'reasoning',
+                 'manager_key', 'permission_mode', 'accessible_paths', 'use_worktree'}
+
+
+def member_specs(body):
+    supplied = body.get('team_members')
+    if supplied is None and 'team_members' not in body:
+        return [dict(key=role['id'], template_role=role['id']) for role in ROLES
+                if role['id'] in body.get('template_roles', [])]
+    if not isinstance(supplied, list) or len(supplied) > MAX_MEMBERS:
+        raise ValueError(f'Choose up to {MAX_MEMBERS} team members.')
+    result, keys = [], set()
+    for spec in supplied:
+        if not isinstance(spec, dict) or set(spec) - MEMBER_FIELDS:
+            raise ValueError('Invalid member customization fields.')
+        key, role = spec.get('key'), spec.get('template_role')
+        if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', key) or key in keys:
+            raise ValueError('Member draft IDs must be distinct valid identifiers.')
+        if not isinstance(role, str) or role not in BY_ID:
+            raise ValueError('Choose a supported member role.')
+        keys.add(key)
+        result.append(dict(spec))
+    return result
+
+
+def member_text(spec, key, fallback, limit):
+    value = spec.get(key, fallback)
+    if not isinstance(value, str) or not value.strip() or len(value) > limit or '\x00' in value:
+        raise ValueError(f'Invalid member {key} (maximum {limit} characters).')
+    return value.strip()
+
+
+def member_selection(spec, role, policy, available, preferred):
+    runtime = spec.get('runtime', '')
+    if not isinstance(runtime, str) or runtime and runtime not in RUNTIME_NAMES:
+        raise ValueError('Choose a supported member CLI.')
+    filtered = available
+    if runtime:
+        if runtime not in available['runtimes']:
+            raise ValueError(f'{RUNTIME_NAMES[runtime]} is unavailable for this member.')
+        filtered = dict(available, runtimes={runtime: available['runtimes'][runtime]})
+    if spec.get('model'):
+        if not runtime or runtime == 'agy':
+            raise ValueError('Select a member CLI before overriding its model; Antigravity uses CLI defaults.')
+        entry = filtered['runtimes'][runtime]
+        chosen = next((m for m in entry['models'] if m['id'] == spec['model'] and
+                       m.get('provider', '') == spec.get('provider', '')), None)
+        if chosen is None or not suitable(role, chosen, runtime):
+            raise ValueError('The overridden member model is unavailable or below the role capability minimum.')
+        filtered = dict(available, runtimes={runtime: dict(entry, models=[chosen])})
+    elif spec.get('provider'):
+        raise ValueError('Select a model with the overridden provider.')
+    selected = selection(role, policy, filtered, [runtime] if runtime else preferred)
+    if runtime or spec.get('model'):
+        selected['selection_note'] += ' Member CLI/model override applied.'
+    if 'reasoning' in spec:
+        effort = spec['reasoning']
+        entry = filtered['runtimes'][selected['runtime']]
+        chosen = next(m for m in entry['models'] if m['id'] == selected['model'] and m.get('provider', '') == selected['provider'])
+        if (not isinstance(effort, str) or effort and
+                (effort not in chosen.get('reasoning', []) or selected['runtime'] == 'opencode' and not entry.get('supports_variants'))):
+            raise ValueError('The overridden reasoning effort is unavailable for this member model.')
+        selected['reasoning'] = effort
+    return selected
 
 
 def preferences(body):
@@ -208,27 +274,63 @@ def validate(body):
     if not isinstance(policy, str) or policy not in POLICIES:
         raise ValueError('Choose a supported model policy.')
     preferences(body)
+    if 'team_members' in body:
+        specs = member_specs(body)
+        derived = list(dict.fromkeys(s['template_role'] for s in specs))
+        if 'template_roles' in body and set(roles) != set(derived):
+            raise ValueError('Selected roles must match the customized member roster.')
+        roles = derived
     return roles, policy
 
 
 def plan(body, available):
     roles, policy = validate(body)
+    specs = member_specs(dict(body, template_roles=roles))
+    lead = next((s['key'] for s in specs if s['template_role'] == 'lead_developer'), '')
+    names, managers, counts = {}, {}, {}
+    for spec in specs:
+        role = BY_ID[spec['template_role']]
+        counts[role['id']] = counts.get(role['id'], 0) + 1
+        suffix = ' ' + str(counts[role['id']]) if counts[role['id']] > 1 else ''
+        names[spec['key']] = member_text(spec, 'name', role['name'] + suffix, 120)
+        default_manager = lead if role['manager'] and lead != spec['key'] else ''
+        manager = spec.get('manager_key', default_manager)
+        if not isinstance(manager, str):
+            raise ValueError('Invalid member manager.')
+        managers[spec['key']] = manager
+    for key in managers:
+        visited, current = {key}, managers[key]
+        while current:
+            if current not in managers:
+                raise ValueError('Member manager must be part of this team.')
+            if current in visited:
+                raise ValueError('Manager relationships cannot contain cycles.')
+            visited.add(current)
+            current = managers[current]
     members = []
-    for role in ROLES:
-        if role['id'] not in roles:
-            continue
-        manager = role['manager'] if role['manager'] in roles else ''
-        reporting = 'Report to the Lead Developer.' if manager else 'Report directly to the organization owner.'
-        members.append(dict(template_role=role['id'], name=role['name'], role=role['name'],
-                            persona=role['persona'] + ' ' + reporting + '\n\n' + COMMON,
-                            manager_role=manager, permission_mode='default', accessible_paths=[], use_worktree=True,
+    for spec in specs:
+        role = BY_ID[spec['template_role']]
+        manager = managers[spec['key']]
+        reporting = 'Report to ' + names[manager] + '.' if manager else 'Report directly to the organization owner.'
+        chosen = member_selection(spec, role, policy, available, preferences(body))
+        worktree = spec.get('use_worktree', True)
+        if not isinstance(worktree, bool):
+            raise ValueError('Use worktree must be true or false.')
+        members.append(dict(template_role=role['id'], template_key=spec['key'], name=names[spec['key']], role=role['name'],
+                            persona=member_text(spec, 'persona', role['persona'], 6000) + ' ' + reporting + '\n\n' + COMMON,
+                            persona_instruction=member_text(spec, 'persona', role['persona'], 6000),
+                            manager_key=manager, manager_role=BY_ID[next(s['template_role'] for s in specs if s['key'] == manager)]['id'] if manager else '',
+                            manager_name=names.get(manager, 'Organization owner'),
+                            permission_mode=permission_mode(spec, chosen['runtime']),
+                            accessible_paths=accessible_paths(spec, chosen['runtime']), use_worktree=worktree,
                             project=body.get('project', ''),
-                            **selection(role, policy, available, preferences(body))))
+                            **chosen))
     digest = hashlib.sha256(json.dumps([policy, members], sort_keys=True).encode()).hexdigest()
     return dict(members=members, warnings=available.get('warnings', []), model_policy=policy,
-                runtime_preferences=preferences(body), template_plan=digest)
+                runtime_preferences=preferences(body), template_plan=digest, member_specs=specs, runtimes=available['runtimes'])
 
 
 def snapshot():
-    return dict(roles=[dict(role, minimum_capability=ROLE_MINIMUMS[role['id']], persona=role['persona'] + '\n\n' + COMMON)
-                       for role in ROLES], policies=POLICIES, runtime_names=RUNTIME_NAMES)
+    return dict(roles=[dict(role, minimum_capability=ROLE_MINIMUMS[role['id']], persona_instruction=role['persona'],
+                           persona=role['persona'] + '\n\n' + COMMON) for role in ROLES],
+                policies=POLICIES, runtime_names=RUNTIME_NAMES, max_members=MAX_MEMBERS)

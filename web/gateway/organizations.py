@@ -607,7 +607,7 @@ class OrganizationStore:
                 return collaboration_action(self, snapshot, action, body, org)
         fingerprint = hashlib.sha256(json.dumps([action, body], sort_keys=True).encode()).hexdigest()
         planned = None
-        if action == 'save' and 'template_roles' in body:
+        if action == 'save' and ('template_roles' in body or 'team_members' in body):
             import team_templates
             roles, _ = team_templates.validate(body)
             if roles:
@@ -641,20 +641,20 @@ class OrganizationStore:
                 if previous_org:
                     item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows') if k in previous_org})
                 if planned:
-                    item.update(template_roles=body['template_roles'], model_policy=planned['model_policy'],
+                    item.update(template_roles=list(dict.fromkeys(m['template_role'] for m in planned['members'])), model_policy=planned['model_policy'],
                                 runtime_preferences=planned['runtime_preferences'])
                 self.put(db, 'organizations', item)
                 if planned:
-                    ids = {m['template_role']: uuid.uuid4().hex for m in planned['members']}
+                    ids = {m['template_key']: uuid.uuid4().hex for m in planned['members']}
                     for member in planned['members']:
-                        profile = {k: v for k, v in member.items() if k not in ('manager_role', 'model_name')}
-                        profile.update(id=ids[member['template_role']], organization_id=item_id,
-                                       manager_id=ids.get(member['manager_role'], ''), version=1)
+                        profile = {k: v for k, v in member.items() if k not in ('manager_role', 'manager_key', 'manager_name', 'model_name', 'persona_instruction')}
+                        profile.update(id=ids[member['template_key']], organization_id=item_id,
+                                       manager_id=ids.get(member['manager_key'], ''), version=1)
                         self.put(db, 'profiles', profile)
                     workflow = planned['workflow_plan']
                     item['team_workflows'] = dict(repository=workflow['repository'],
-                                                 coordinator_id=ids.get(workflow['coordinator_role'], ''),
-                                                 reviewer_ids=[ids[r] for r in workflow['reviewer_roles']])
+                                                 coordinator_id=ids.get(workflow['coordinator_key'], ''),
+                                                 reviewer_ids=[ids[r] for r in workflow['reviewer_keys']])
                     self.put(db, 'organizations', item)
             else:
                 org_id = text(body, 'organization_id', 40)

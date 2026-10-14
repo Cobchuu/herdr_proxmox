@@ -210,6 +210,44 @@ class TeamTemplateTests(unittest.TestCase):
         self.assertEqual((entry['runtime'], entry['provider'], entry['model'], entry['reasoning']), ('agy', '', '', ''))
         self.assertEqual(launch_arguments(entry), [])
 
+    def test_custom_members_duplicate_roles_models_personas_and_reporting(self):
+        specs = [
+            dict(key='lead', template_role='lead_developer', name='Maya', persona='Coordinate the API team.'),
+            dict(key='api', template_role='backend_developer', name='API specialist', runtime='claude',
+                 provider='', model='claude-sonnet-5-5', reasoning='medium', manager_key='lead'),
+            dict(key='storage', template_role='backend_developer', persona='Own storage and migrations.'),
+        ]
+        body = dict(self.body, template_roles=['lead_developer', 'backend_developer'], team_members=specs)
+        preview = self.store.team_plan(body)
+        self.assertEqual(preview['member_specs'], specs)
+        self.assertEqual(preview['members'][2]['name'], 'Backend Developer 2')
+        self.store.action('save', dict(body, template_plan=preview['template_plan']))
+        members = {m['template_key']: m for m in self.store.profile_records()}
+        self.assertEqual(len(members), 3)
+        self.assertEqual(members['api']['model'], 'claude-sonnet-5-5')
+        self.assertEqual(members['api']['reasoning'], 'medium')
+        self.assertEqual(members['storage']['manager_id'], members['lead']['id'])
+        self.assertIn('Own storage and migrations.', members['storage']['persona'])
+        self.assertIn('Report to Maya.', members['storage']['persona'])
+
+    def test_custom_member_validation_rejects_cycles_models_and_invalid_fields(self):
+        roles = ['lead_developer', 'backend_developer']
+        specs = [dict(key='lead', template_role=roles[0]), dict(key='worker', template_role=roles[1])]
+        invalid = [
+            [dict(specs[0], manager_key='worker'), specs[1]],
+            [specs[0], dict(specs[1], manager_key='missing')],
+            [specs[0], dict(specs[1], key='lead')],
+            [specs[0], dict(specs[1], runtime='codex', model='gpt-6-luna')],
+            [specs[0], dict(specs[1], runtime='codex', reasoning='impossible')],
+            [specs[0], dict(specs[1], id='injected')],
+            [specs[0], dict(specs[1], name='')],
+        ]
+        for members in invalid:
+            with self.subTest(members=members), self.assertRaises(ValueError):
+                self.store.action('save', dict(self.body, template_roles=roles, team_members=members))
+        self.assertEqual(self.store.profile_records(), [])
+        self.assertEqual(self.store.organization_records(), [])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,4 +1,6 @@
 import 'org_form_values.dart';
+import 'dart:convert';
+import 'package:herdr_dashboard_state/team_template_draft.dart';
 import 'package:web/web.dart' as web;
 import '../ui.dart';
 import 'model_catalog.dart';
@@ -95,6 +97,7 @@ Future<Json?> editRecord(
                     'change': (e) {
                       values[entry.key] =
                           (e.target as web.HTMLInputElement).checked;
+                      changed?.call(entry.key, values[entry.key], values);
                       refreshDialogs();
                     },
                   },
@@ -187,10 +190,23 @@ Future<Json?> organizationForm([
   Future<Json> Function(Json)? preview,
 ]) async {
   final roles = org == null ? records(templates?['roles']) : <Json>[];
+  final draft = TeamTemplateDraft(
+    roles,
+    maxMembers: templates?['max_members'] as int? ?? 20,
+  );
   Json? team;
+  Json? lastPreview;
   String? previewError;
   var revision = 0;
   var loading = false;
+  void invalidate() {
+    revision++;
+    team = null;
+    previewError = null;
+    loading = false;
+    refreshDialogs();
+  }
+
   List<String> selected(Json v) => [
     for (final role in roles)
       if (v['preset_${role['id']}'] == true) '${role['id']}',
@@ -240,10 +256,16 @@ Future<Json?> organizationForm([
           key == 'project' ||
           key == 'model_policy' ||
           key == 'preferred_runtime') {
-        revision++;
-        team = null;
-        previewError = null;
-        loading = false;
+        final withinLimit =
+            !key.startsWith('preset_') || draft.syncRoles(selected(v));
+        invalidate();
+        if (!withinLimit) {
+          for (final role in roles)
+            v['preset_${role['id']}'] = draft.selectedRoles.contains(
+              role['id'],
+            );
+          previewError = 'A team supports up to ${draft.maxMembers} members.';
+        }
       }
     },
     validate: (v) {
@@ -272,14 +294,18 @@ Future<Json?> organizationForm([
             refreshDialogs();
             try {
               final result = await preview!({
-                'template_roles': selected(v),
+                ...draft.payload,
                 'project': '${v['project'] ?? ''}'.trim(),
                 'model_policy': v['model_policy'],
                 'runtime_preferences': [
                   if (v['preferred_runtime'] != '') v['preferred_runtime'],
                 ],
               });
-              if (epoch == revision) team = result;
+              if (epoch == revision) {
+                team = result;
+                lastPreview = result;
+                draft.hydrate(result['member_specs']);
+              }
             } catch (e) {
               if (epoch == revision) previewError = '$e';
             } finally {
@@ -289,6 +315,80 @@ Future<Json?> organizationForm([
           },
           disabled: loading || preview == null,
         ),
+        for (final member in draft.members) ...[
+          details('Configure ${draft.name(member)}', [
+            field('Member name', draft.name(member), (value) {
+              member['name'] = value;
+              invalidate();
+            }),
+            textarea(
+              'Persona responsibilities',
+              '${member['persona'] ?? draft.role('${member['template_role']}')['persona_instruction'] ?? ''}',
+              (value) {
+                member['persona'] = value;
+                invalidate();
+              },
+            ),
+            select(
+              'Member CLI',
+              '${member['runtime'] ?? ''}',
+              {
+                '': 'Automatic',
+                ...Map<String, String>.from(templates?['runtime_names'] ?? {}),
+              },
+              (value) {
+                if (value.isEmpty)
+                  member.remove('runtime');
+                else
+                  member['runtime'] = value;
+                for (final key in [
+                  'provider',
+                  'model',
+                  'reasoning',
+                  'permission_mode',
+                  'accessible_paths',
+                ])
+                  member.remove(key);
+                invalidate();
+              },
+            ),
+            ...memberModelFields(member, lastPreview, invalidate),
+            select(
+              'Reports to',
+              '${member['manager_key'] ?? '__auto__'}',
+              {
+                '__auto__': 'Role default',
+                '': 'Organization owner',
+                for (final manager in draft.members)
+                  if (manager['key'] != member['key'])
+                    '${manager['key']}': draft.name(manager),
+              },
+              (value) {
+                if (value == '__auto__')
+                  member.remove('manager_key');
+                else
+                  member['manager_key'] = value;
+                invalidate();
+              },
+            ),
+            row([
+              button(
+                'Add another ${draft.role('${member['template_role']}')['name']}',
+                () {
+                  draft.add('${member['template_role']}', member);
+                  invalidate();
+                },
+                disabled: draft.members.length >= draft.maxMembers,
+              ),
+              button('Remove ${draft.name(member)}', () {
+                final roleId = member['template_role'];
+                draft.remove('${member['key']}');
+                v['preset_$roleId'] = draft.selectedRoles.contains(roleId);
+                invalidate();
+              }),
+            ]),
+          ]),
+        ],
         if (previewError != null) errorLine(previewError),
         for (final warning in team?['warnings'] as List? ?? []) prose(warning),
         for (final member in records(team?['members']))
@@ -296,7 +396,7 @@ Future<Json?> organizationForm([
             '${member['name']} · ${member['runtime']} · ${member['model_name']}',
             [
               prose(
-                'Reports to: ${member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer'} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
+                'Reports to: ${member['manager_name'] ?? (member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer')} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
               ),
               prose(member['selection_note']),
               prose('Separate worktree · CLI default permissions'),
@@ -311,7 +411,7 @@ Future<Json?> organizationForm([
     for (final key in ['id', 'name', 'purpose', 'instructions'])
       key: result[key],
     if (org == null && selected(result).isNotEmpty) ...{
-      'template_roles': selected(result),
+      ...draft.payload,
       'project': result['project'],
       'model_policy': result['model_policy'],
       'runtime_preferences': [
@@ -320,6 +420,76 @@ Future<Json?> organizationForm([
       'template_plan': team!['template_plan'],
     },
   };
+}
+
+List<Component> memberModelFields(
+  Json member,
+  Json? preview,
+  void Function() changed,
+) {
+  final resolved = records(
+    preview?['members'],
+  ).where((m) => m['template_key'] == member['key']).firstOrNull;
+  final runtime = '${member['runtime'] ?? resolved?['runtime'] ?? ''}';
+  final runtimes = preview?['runtimes'] as Map? ?? {};
+  final entry = runtimes[runtime] as Map? ?? {};
+  final models = records(entry['models']);
+  if (runtime.isEmpty || runtime == 'agy' || models.isEmpty) return [];
+  final model = models
+      .where(
+        (m) =>
+            m['id'] == (member['model'] ?? resolved?['model']) &&
+            m['provider'] == (member['provider'] ?? resolved?['provider']),
+      )
+      .firstOrNull;
+  final reasoning = (model?['reasoning'] as List? ?? [])
+      .map((v) => '$v')
+      .toList();
+  return [
+    select(
+      'Member model',
+      member['model'] == null
+          ? ''
+          : jsonEncode([member['provider'] ?? '', member['model']]),
+      {
+        '': 'Automatic for role',
+        for (final model in models)
+          jsonEncode(
+            [model['provider'] ?? '', model['id']],
+          ): '${model['provider'] == '' ? '' : '${model['provider']}/'}${model['name']}',
+      },
+      (value) {
+        member.remove('reasoning');
+        if (value.isEmpty) {
+          member.remove('provider');
+          member.remove('model');
+        } else {
+          final pair = jsonDecode(value) as List;
+          member['runtime'] = runtime;
+          member['provider'] = pair[0];
+          member['model'] = pair[1];
+        }
+        changed();
+      },
+    ),
+    if (runtime != 'opencode' || entry['supports_variants'] == true)
+      select(
+        'Member reasoning',
+        '${member['reasoning'] ?? '__auto__'}',
+        {
+          '__auto__': 'Automatic for role',
+          '': 'Model default',
+          for (final value in reasoning) value: value,
+        },
+        (value) {
+          if (value == '__auto__')
+            member.remove('reasoning');
+          else
+            member['reasoning'] = value;
+          changed();
+        },
+      ),
+  ];
 }
 
 Future<Json?> hireForm(
