@@ -1,3 +1,4 @@
+import 'native_task_ui.dart';
 import 'operations_support.dart';
 import 'ops_ui.dart';
 
@@ -15,6 +16,23 @@ class _ToolchainState extends OperationsState<ToolchainCard> {
   Map<String, dynamic> get toolchains =>
       (sdk['toolchains'] as Map?)?.cast<String, dynamic>() ?? {};
   bool get queued => ['queued', 'running'].contains(sdk['state']);
+
+  /// Installer-reported percentage, or null when it has not reported one.
+  int? get percent {
+    final value = (sdk['progress'] as Map?)?['percent'];
+    return value is int && value >= 0 && value <= 100 ? value : null;
+  }
+
+  String get progressLabel => switch ((sdk['progress'] as Map?)?['phase']) {
+    'starting' => 'Starting SDK installation',
+    'dependencies' => 'Installing SDK dependencies',
+    'download' => 'Downloading SDK',
+    'verify' => 'Verifying SDK archive',
+    'extract' => 'Extracting SDK archive',
+    'initialize' => 'Initializing SDK',
+    'done' => 'Finalizing SDK installation',
+    _ => 'Installing SDK',
+  };
   @override
   void initState() {
     super.initState();
@@ -126,6 +144,16 @@ class _ToolchainState extends OperationsState<ToolchainCard> {
         ),
       if (sdk['error'] != null && sdk['state'] != 'unavailable')
         callout([calloutText(sdk['error'])], tone: 'danger'),
+      // The installer reports real bytes while downloading and phase boundaries
+      // elsewhere, so this is determinate when it can be and honest when it
+      // cannot. The card polls while queued, which drives it.
+      if (queued)
+        LinearProgressIndicator(
+          value: percent == null ? null : percent! / 100,
+          label: progressLabel,
+        ),
+      if (queued)
+        meta('$progressLabel${percent == null ? '' : ' · $percent%'}'),
       if (sdk['state'] == 'complete' && '${sdk['output'] ?? ''}'.isNotEmpty)
         disclosure('Installation output', [codeText(sdk['output'])]),
       if (!admin && toolchains.values.any((v) => v['installed'] != true))

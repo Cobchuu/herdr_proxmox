@@ -1,5 +1,6 @@
 """The SDK install client and its root worker; no service or installer runs."""
 import importlib.util
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
@@ -83,6 +84,43 @@ class SdkClientTests(unittest.TestCase):
             unsupported.install({})
         (self.root / 'status.json').write_text(json.dumps({'state': 'failed', 'error': 'network'}))
         self.assertEqual(self.service.install({})['state'], 'queued')
+
+    def test_installer_progress_is_reported_and_optional(self):
+        # The installer writes this file and the gateway only reads it, so a
+        # missing or malformed file must mean "no percentage" rather than a
+        # broken card, and an implausible one must not be shown as progress.
+        progress = self.service.state.parent / 'progress.json'
+        started = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        self.service.state.write_text(json.dumps({'state': 'running', 'started_at': started}))
+        self.assertIsNone(self.service.progress(started))
+        for broken in ('{not json', '[]', '{"percent": "half"}',
+                       '{"percent": -1}', '{"percent": 101}', 'null'):
+            progress.write_text(broken)
+            self.assertIsNone(self.service.progress(started), broken)
+        at = datetime.now(timezone.utc).isoformat()
+        progress.write_text(json.dumps({'percent': 43, 'phase': 'download',
+                                        'at': at}))
+        self.assertEqual(self.service.progress(started),
+                         {'percent': 43, 'phase': 'download',
+                          'at': at})
+        self.assertEqual(self.service.snapshot()['progress']['percent'], 43)
+
+    def test_progress_must_belong_to_the_current_running_install(self):
+        now = datetime.now(timezone.utc)
+        started = (now - timedelta(seconds=5)).isoformat()
+        self.service.state.write_text(json.dumps({'state': 'running', 'started_at': started}))
+        path = self.service.state.parent / 'progress.json'
+        for at in ((now - timedelta(days=1)).isoformat(), (now + timedelta(days=1)).isoformat(),
+                   'invalid', now.replace(tzinfo=None).isoformat(), None):
+            path.write_text(json.dumps({'percent': 100, 'phase': 'done', 'at': at}))
+            self.assertIsNone(self.service.snapshot()['progress'], at)
+        path.write_text(json.dumps({'percent': 43, 'phase': 'download', 'at': now.isoformat()}))
+        for state in ('idle', 'complete', 'failed'):
+            self.service.state.write_text(json.dumps({'state': state, 'started_at': started}))
+            self.assertIsNone(self.service.snapshot()['progress'], state)
+        self.service.state.write_text(json.dumps({'state': 'failed'}))
+        self.service.install({})
+        self.assertIsNone(self.service.snapshot()['progress'])
 
     def test_malformed_status_is_reported_without_breaking_polling(self):
         self.service.state.write_text('{broken')

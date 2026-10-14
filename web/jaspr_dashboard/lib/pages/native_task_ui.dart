@@ -486,11 +486,24 @@ class Chip extends StatelessComponent {
 }
 
 class LinearProgressIndicator extends StatelessComponent {
-  const LinearProgressIndicator({super.key});
+  const LinearProgressIndicator({
+    super.key,
+    this.value,
+    this.label = 'Loading',
+  });
+
+  /// 0..1 when the progress is known; null renders the indeterminate bar.
+  final double? value;
+  final String label;
   @override
   Component build(BuildContext context) => Component.element(
     tag: 'progress',
-    attributes: {'aria-label': 'Loading'},
+    attributes: {
+      'aria-label': label,
+      if (value != null && value!.isFinite)
+        'value': '${(value!.clamp(0.0, 1.0) * 100).round()}',
+      if (value != null && value!.isFinite) 'max': '100',
+    },
     children: [],
   );
 }
@@ -1083,7 +1096,7 @@ class AlertDialog extends StatelessComponent {
       // Styled as the dialog's heading rather than body text: this component
       // renders inside the dialog body, so an unstyled title reads as the first
       // paragraph of the content.
-      dom.h2([title], classes: 'dialog__title'),      if (content != null) content!,
+      dom.h2([title], classes: 'dialog__title'), if (content != null) content!,
       Wrap(children: actions),
     ],
   );

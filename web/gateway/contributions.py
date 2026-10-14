@@ -1742,6 +1742,10 @@ class Contributions:
             if task.get('acceptance'):
                 task['acceptance'] = {k: v for k, v in task['acceptance'].items() if k != 'request'}
             task['audit'] = task.get('audit', [])[-20:]
+            # The workflow and list views read this same snapshot, so the label
+            # has to be derivable here too — only for tasks in flight, which is
+            # normally the one being worked on.
+            task['awaiting_candidate'] = self.awaiting_candidate(task)
         try:
             github = self.github.snapshot()
         except ValueError as error:
@@ -1763,6 +1767,35 @@ class Contributions:
             automation = {organization: {k: v for k, v in policy.items() if k in AUTOMATION_DEFAULTS}
                           for organization, policy in automation.items()}
         return dict(tasks=tasks, github=github, executor=executor, automation=automation)
+
+    def awaiting_candidate(self, task):
+        """Whether an agent has committed and only the capture step remains.
+
+        'implementing' covers both an agent still working and an agent whose
+        commit is waiting to be captured. availability reports 'working' for
+        both, execution_finished excludes the state by design, and
+        completion_receipt is only written at capture time — so the branch is the
+        only signal that changes. Returns False rather than raising when the
+        checkout is unreadable, so listing tasks never fails over it.
+        """
+        if task.get('state') != 'implementing' or task.get('head_sha'):
+            return False
+        baseline = task.get('start_sha') or task.get('base_sha')
+        if not baseline:
+            return False
+        try:
+            tree = self.tree_for(task)
+            head = project_git.git(tree, 'rev-parse', 'HEAD').strip()
+            if not head or head == baseline:
+                return False
+            # Capture rejects uncommitted changes, including unfinished work
+            # after an intermediate commit. Do not label those ready to capture.
+            return (not project_git.merge_state(tree) and
+                    not project_git.git(tree, 'status', '--porcelain=v1', '--untracked-files=all').strip())
+        except (KeyError, TypeError, ValueError, OSError):
+            # A task with no recorded checkout, or an unreadable one, simply has
+            # no candidate to report.
+            return False
 
     def detail(self, task_id):
         if not isinstance(task_id, str) or not re.fullmatch(r'[a-f0-9]{32}', task_id):
@@ -1834,18 +1867,7 @@ class Contributions:
             task['blocking_execution'] = None
         task['launch_retryable'] = self.retryable_preflight(next((j for j in jobs if j.get('id') == task.get('run_id')), None))
         task['availability'] = self.display_availability(task.get('profile_id'), jobs)
-        # Distinguish "the agent is still working" from "the agent has committed
-        # and only the capture step remains". Both are state 'implementing', and
-        # the execution stays bound to the task either way, so availability
-        # reports 'working' for both. The branch is the signal: once it has moved
-        # past the start commit there is a candidate to capture, which is an
-        # operator action rather than work in progress.
-        if task.get('state') == 'implementing' and not task.get('head_sha'):
-            try:
-                head = project_git.git(self.tree_for(task), 'rev-parse', 'HEAD').strip()
-                task['awaiting_candidate'] = bool(head and head != task.get('start_sha'))
-            except (ValueError, OSError):
-                pass
+        task['awaiting_candidate'] = self.awaiting_candidate(task)
         task['sessions'] = [{k: j.get(k) for k in ('id', 'kind', 'state', 'profile_id', 'created_at',
                             'updated_at', 'error', 'pane_id', 'alias', 'session_closed_at')} |
                             dict(history=[{k: h.get(k) for k in ('alias', 'pane_id', 'session_closed_at')}

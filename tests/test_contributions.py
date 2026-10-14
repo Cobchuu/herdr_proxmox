@@ -144,11 +144,36 @@ class GitHubTests(unittest.TestCase):
         self.assertEqual(entry['verification']['account_write_to_publishing'], 'verified')
         # Setup never creates a branch or pull request to prove write access.
         self.assertEqual(entry['verification']['token_write_capability'], 'not_exercised')
-        self.assertEqual(entry['verification']['upstream_pr_creation'], 'needs_different_authentication')
+        self.assertEqual(entry['verification']['upstream_pr_creation'], 'not_exercised')
         self.assertEqual(self.api.publication_options(), {'owner/repo': ['owner/repo', 'contributor/repo']})
         self.api.allow_publishing('owner/repo', 'contributor/repo')
+        with patch.object(self.api, 'request', side_effect=answer):
+            self.assertEqual(self.api.publication_preflight('owner/repo', 'contributor/repo')['mode'], 'fork')
         with self.assertRaisesRegex(ValueError, 'configured fork'):
             self.api.allow_publishing('owner/repo', 'stranger/repo')
+
+    def test_upstream_push_access_does_not_prove_fine_grained_pr_permission(self):
+        # Account push permission cannot establish the token's separate PR
+        # permission. Preflight leaves that verdict to the publication attempt.
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=True))
+            if path == '/repos/contributor/repo':
+                return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                            permissions=dict(push=True))
+            raise AssertionError(path)
+
+        token = 'github_pat_' + 'x' * 40
+        with patch.object(self.api, 'request', side_effect=answer):
+            result = self.api.configure(dict(
+                token=token, repositories=['owner/repo'],
+                publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')}))
+        entry = result['publication']['owner/repo']
+        self.assertEqual(entry['verification']['upstream_pr_creation'], 'not_exercised')
+        with patch.object(self.api, 'request', side_effect=answer):
+            self.assertEqual(self.api.publication_preflight('owner/repo', 'contributor/repo')['mode'], 'fork')
 
     def test_direct_publication_keeps_requiring_upstream_push_access(self):
         def answer(path, *arguments, **keywords):
@@ -199,7 +224,7 @@ class GitHubTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid or expired'):
                 self.api.publication_preflight('owner/repo', 'owner/repo')
 
-    def test_publication_preflight_checks_fork_network_and_upstream_pr_authentication(self):
+    def test_publication_preflight_checks_fork_network_without_guessing_pr_permissions(self):
         config = dict(token='x' * 40, login='contributor', repositories=['owner/repo'],
             publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')})
         self.path.write_text(json.dumps(config))
@@ -215,8 +240,9 @@ class GitHubTests(unittest.TestCase):
         config['token'] = 'github_pat_' + 'x' * 50
         self.path.write_text(json.dumps(config))
         with patch.object(self.api, 'request', side_effect=[dict(login='contributor'), target, fork]):
-            with self.assertRaisesRegex(ValueError, 'upstream fork PR'):
-                self.api.publication_preflight('owner/repo', 'contributor/repo')
+            result = self.api.publication_preflight('owner/repo', 'contributor/repo')
+        self.assertEqual(result['mode'], 'fork')
+        self.assertEqual(result['token_write'], 'not_exercised')
 
     def test_pull_discovery_uses_the_fork_owner(self):
         calls = []
@@ -1139,6 +1165,28 @@ class ContributionTests(unittest.TestCase):
             restarted.action('create', dict(self.body, title='Different'), 'admin', 'admin')
         with self.assertRaisesRegex(ValueError, 'administrator'):
             restarted.action('launch', dict(request_id='launch', task_id=self.task['id']), 'operator', 'operator')
+
+    def test_candidate_waiting_requires_a_clean_commit_beyond_task_base(self):
+        tree = self.root / 'tree'
+        self.git('worktree', 'add', '-b', self.task['branch'], str(tree), self.base)
+        self.task.update(worktree=str(tree), run_id='run', state='implementing', awaiting_candidate=True)
+        self.service.save(self.task, 'launch', 'admin')
+        self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent')]
+        self.assertFalse(self.service.awaiting_candidate(self.task))
+        self.assertFalse(self.service.snapshot()['tasks'][0]['awaiting_candidate'])
+        self.assertFalse(self.service.detail(self.task['id'])['awaiting_candidate'])
+        (tree / 'file').write_text('Implementation\n')
+        self.git('add', '.', path=tree)
+        self.git('commit', '-m', 'Implementation', path=tree)
+        self.assertTrue(self.service.snapshot()['tasks'][0]['awaiting_candidate'])
+        self.assertTrue(self.service.detail(self.task['id'])['awaiting_candidate'])
+        with patch.object(project_git, 'merge_state', return_value=True):
+            self.assertFalse(self.service.awaiting_candidate(self.task))
+        (tree / 'pending').write_text('Work still in progress')
+        self.assertFalse(self.service.awaiting_candidate(self.task))
+        self.assertFalse(self.service.awaiting_candidate(dict(self.task, base_sha=None)))
+        self.assertFalse(self.service.awaiting_candidate(dict(self.task, worktree=None)))
+        self.assertFalse(self.service.awaiting_candidate(dict(self.task, state='completed')))
 
     def test_task_captures_explicit_base_and_launch_parameters(self):
         self.store.action.return_value = dict(id='run')

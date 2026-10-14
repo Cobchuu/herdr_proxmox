@@ -188,6 +188,30 @@ void main() {
       : {'workspaces': [], 'agents': []};
 
   test(
+    'missing SDK blockers link to configuration without triggering an installation',
+    () async {
+      final oldHash = web.window.location.hash;
+      addTearDown(
+        () => web.window.history.replaceState(
+          null,
+          '',
+          oldHash.isEmpty ? '#' : oldHash,
+        ),
+      );
+      final task = publishedTask()
+        ..['error'] = 'Missing required SDK'
+        ..['delivery_blocker'] = {'kind': 'missing_toolchain'};
+      await mount(
+        const TasksPage(taskId: 'task'),
+        (r) => taskResponse(r, task),
+      );
+      await click('Install the required SDK');
+      expect(web.window.location.hash, '#/configuration');
+      expect(posts, isEmpty);
+    },
+  );
+
+  test(
     'PR preview retains public destinations, validation, cancellation and explicit excerpt opt-in',
     () async {
       final task = publishedTask();

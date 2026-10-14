@@ -156,12 +156,13 @@ class GitHub:
         return isinstance(name, str) and source['full_name'].lower() == name.lower()
 
     @staticmethod
-    def pr_capability(token, login, upstream):
-        """Whether this credential can plausibly open a pull request upstream."""
-        if upstream.split('/')[0].lower() == str(login).lower():
-            return 'supported'
-        return ('needs_different_authentication' if token.startswith(FINE_GRAINED)
-                else 'supported')
+    def pr_capability(token):
+        """Report compatibility without inferring token permissions from account access.
+
+        Repository push access does not prove a fine-grained token has the
+        separate Pull requests write permission. Only publication tests that.
+        """
+        return 'not_exercised' if token.startswith(FINE_GRAINED) else 'supported'
 
     def repository_info(self, repository, token):
         info = self.request('/repos/' + repository, token=token)
@@ -198,8 +199,6 @@ class GitHub:
         if upstream != publishing:
             if not self.same_fork_network(target, destination):
                 raise ValueError(publishing + ' is no longer a fork of ' + upstream + '.')
-            if self.pr_capability(token, login, upstream) != 'supported':
-                raise ValueError('This fine-grained credential cannot create the upstream fork PR. Configure authentication authorized for ' + upstream + '.')
         return dict(login=login, repository=publishing, upstream=upstream,
                     mode='direct' if upstream == publishing else 'fork',
                     account_write='verified', token_write='not_exercised')
@@ -267,7 +266,7 @@ class GitHub:
             entry['verification'] = dict(
                 fork_access='verified', account_write_to_publishing='verified',
                 token_write_capability='not_exercised',
-                upstream_pr_creation=self.pr_capability(token, login, upstream))
+                upstream_pr_creation=self.pr_capability(token))
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = self.path.with_suffix('.tmp')

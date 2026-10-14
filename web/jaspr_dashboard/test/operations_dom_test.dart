@@ -318,6 +318,44 @@ void main() {
     },
   );
   test(
+    'SDK progress shows the phase and falls back when no percentage is known',
+    () async {
+      var state = 'running';
+      Map<String, dynamic>? progress = {'percent': 43, 'phase': 'download'};
+      await mount(
+        const ToolchainCard(),
+        (r) => r.url.path == '/api/sdk'
+            ? {
+                'supported': true,
+                'state': state,
+                'toolchains': {},
+                'progress': progress,
+              }
+            : {'workspaces': [], 'agents': []},
+      );
+      expect(elements('progress').single.getAttribute('value'), '43');
+      expect(elements('progress').single.getAttribute('max'), '100');
+      expect(
+        elements('progress').single.getAttribute('aria-label'),
+        'Downloading SDK',
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Downloading SDK · 43%'),
+      );
+      progress = {'percent': 101};
+      await click('Refresh toolchain status');
+      expect(elements('progress').single.hasAttribute('value'), false);
+      state = 'queued';
+      progress = null;
+      await click('Refresh toolchain status');
+      expect(elements('progress').single.hasAttribute('value'), false);
+      state = 'complete';
+      await click('Refresh toolchain status');
+      expect(elements('progress'), isEmpty);
+    },
+  );
+  test(
     'SDK install allows only declared versions and administrators',
     () async {
       dynamic sdk(http.Request r) => r.url.path == '/api/sdk'

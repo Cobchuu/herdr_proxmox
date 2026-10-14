@@ -1,4 +1,5 @@
 import 'native_task_ui.dart';
+import '../navigation.dart';
 import '../services.dart';
 import 'discovery_panel.dart';
 import 'task_activity.dart';
@@ -31,8 +32,7 @@ const taskStates = <String, String>{
 /// `working` for both, and the completion receipt is only written at capture
 /// time — so nothing else on the task distinguishes them.
 bool candidateWaiting(Map<String, dynamic> task) =>
-    '${task['state']}' == 'implementing' &&
-    task['awaiting_candidate'] == true;
+    '${task['state']}' == 'implementing' && task['awaiting_candidate'] == true;
 
 String taskState(Map<String, dynamic> task) =>
     (task['assignment'] as Map?)?['state'] == 'queued'
@@ -2553,6 +2553,20 @@ class _TasksPageState extends State<TasksPage> {
                       ),
                   if (task['error'] != null)
                     ui.notice('Task issue: ${task['error']}', error: true),
+                  // The gateway marks why delivery is blocked, so the action
+                  // can be offered without matching on the message text. A
+                  // missing toolchain is an operator task; the install lives
+                  // on the Settings page rather than being duplicated here.
+                  if ((task['delivery_blocker'] as Map?)?['kind'] ==
+                      'missing_toolchain')
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () => navigate('/configuration'),
+                          child: const Text('Install the required SDK'),
+                        ),
+                      ],
+                    ),
                   if (task['automation_error'] != null)
                     ui.notice(
                       'Automation waiting: ${task['automation_error']}',
