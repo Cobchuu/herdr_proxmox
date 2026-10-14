@@ -1834,6 +1834,18 @@ class Contributions:
             task['blocking_execution'] = None
         task['launch_retryable'] = self.retryable_preflight(next((j for j in jobs if j.get('id') == task.get('run_id')), None))
         task['availability'] = self.display_availability(task.get('profile_id'), jobs)
+        # Distinguish "the agent is still working" from "the agent has committed
+        # and only the capture step remains". Both are state 'implementing', and
+        # the execution stays bound to the task either way, so availability
+        # reports 'working' for both. The branch is the signal: once it has moved
+        # past the start commit there is a candidate to capture, which is an
+        # operator action rather than work in progress.
+        if task.get('state') == 'implementing' and not task.get('head_sha'):
+            try:
+                head = project_git.git(self.tree_for(task), 'rev-parse', 'HEAD').strip()
+                task['awaiting_candidate'] = bool(head and head != task.get('start_sha'))
+            except (ValueError, OSError):
+                pass
         task['sessions'] = [{k: j.get(k) for k in ('id', 'kind', 'state', 'profile_id', 'created_at',
                             'updated_at', 'error', 'pane_id', 'alias', 'session_closed_at')} |
                             dict(history=[{k: h.get(k) for k in ('alias', 'pane_id', 'session_closed_at')}
@@ -2545,9 +2557,14 @@ class Contributions:
                 made.setdefault('source', {}).setdefault('proposal', dict(
                     at=stamp(), meeting_id=job_id, group_id=job.get('group_id'),
                     proposal_key=key, started_by=actor, queued=True))
+                # The task view reads group_id, meeting_id and task_id from the
+                # top level of source. A group proposal has no originating task,
+                # so only those two are set; leaving task_id absent is what keeps
+                # "Open originating task" from offering a link to nothing.
+                made['source'].update(meeting_id=job_id, group_id=job.get('group_id'),
+                                      proposal_key=key)
                 if parent:
-                    made['source'].update(task_id=parent_id, meeting_id=job_id,
-                                          group_id=job.get('group_id'), proposal_key=key,
+                    made['source'].update(task_id=parent_id,
                                           depth=(parent.get('source', {}).get('depth') or 0) + 1)
                 if (made.get('assignment') or {}).get('state') != 'queued':
                     made = self.enqueue_assignment(made, actor)

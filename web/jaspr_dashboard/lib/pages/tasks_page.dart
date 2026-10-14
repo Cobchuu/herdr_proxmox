@@ -22,9 +22,23 @@ const taskStates = <String, String>{
   'closed': 'Closed',
 };
 
+/// Whether the assigned agent has committed and only the capture step remains.
+///
+/// `implementing` covers two very different situations: the agent is still
+/// working, and the agent has committed a candidate that needs an operator to
+/// capture it. The gateway reports the second as `awaiting_candidate`, because
+/// the execution stays bound to the task in both cases, availability reports
+/// `working` for both, and the completion receipt is only written at capture
+/// time — so nothing else on the task distinguishes them.
+bool candidateWaiting(Map<String, dynamic> task) =>
+    '${task['state']}' == 'implementing' &&
+    task['awaiting_candidate'] == true;
+
 String taskState(Map<String, dynamic> task) =>
     (task['assignment'] as Map?)?['state'] == 'queued'
     ? 'Queued'
+    : candidateWaiting(task)
+    ? 'Need candidate'
     : taskStates['${task['state']}'] ?? '${task['state']}';
 
 bool needsPrAuthentication(Map github, String? repository) =>
@@ -2463,7 +2477,8 @@ class _TasksPageState extends State<TasksPage> {
             if (section == 'Overview') ...[
               _groupReviewStatus(task),
               if (task['availability']?['state'] == 'decision') _decision(task),
-              if (task['source'] is Map)
+              if (task['source'] is Map &&
+                  '${task['source']['group_id'] ?? ''}'.isNotEmpty)
                 ui.el('div', [
                   ui.el('p', [
                     ui.icon('git-branch'),
@@ -2471,10 +2486,13 @@ class _TasksPageState extends State<TasksPage> {
                       'Follow-up proposed by group ${task['source']['group_id']} in meeting ${task['source']['meeting_id']}',
                     ),
                   ], classes: 'task-page__status'),
-                  TextButton(
-                    onPressed: () => openTask('${task['source']['task_id']}'),
-                    child: const Text('Open originating task'),
-                  ),
+                  // Only when there is an originating task to open: a group
+                  // proposal has none, and linking to it produced /tasks/null.
+                  if ('${task['source']['task_id'] ?? ''}'.isNotEmpty)
+                    TextButton(
+                      onPressed: () => openTask('${task['source']['task_id']}'),
+                      child: const Text('Open originating task'),
+                    ),
                 ], classes: 'task-detail__source'),
               if (task['outcome_notice'] is Map)
                 _outcomeNotice(task['outcome_notice'] as Map),
