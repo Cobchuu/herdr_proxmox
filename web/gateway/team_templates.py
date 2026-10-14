@@ -146,8 +146,9 @@ def member_selection(spec, role, policy, available, preferred):
         if not runtime or runtime == 'agy':
             raise ValueError('Select a member CLI before overriding its model; Antigravity uses CLI defaults.')
         entry = filtered['runtimes'][runtime]
+        provider = '' if runtime == 'claude' and spec.get('provider') == 'anthropic' else spec.get('provider', '')
         chosen = next((m for m in entry['models'] if m['id'] == spec['model'] and
-                       m.get('provider', '') == spec.get('provider', '')), None)
+                       m.get('provider', '') == provider), None)
         if chosen is None or not suitable(role, chosen, runtime):
             raise ValueError('The overridden member model is unavailable or below the role capability minimum.')
         filtered = dict(available, runtimes={runtime: dict(entry, models=[chosen])})

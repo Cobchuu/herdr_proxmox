@@ -135,6 +135,8 @@ class OrganizationStore:
             ''')
             from notifications import schema
             schema(db)
+            import team_template_library
+            team_template_library.schema(db)
             # A crash may have occurred after terminal input. Never replay automatically.
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
@@ -327,6 +329,46 @@ class OrganizationStore:
         """Saved organization defaults, without runtime queries."""
         with self.lock, closing(self.connect()) as db:
             return [json.loads(row['data']) for row in db.execute('SELECT data FROM organizations ORDER BY rowid')]
+
+    def saved_templates(self):
+        import team_template_library
+        with self.lock, closing(self.connect()) as db:
+            return team_template_library.catalog(db)
+
+    def template_library(self, body, actor):
+        import team_template_library
+        if not isinstance(body, dict):
+            raise ValueError('Expected a JSON object.')
+        with self.lock, closing(self.connect()) as db, db:
+            if body.get('action') == 'read':
+                return team_template_library.read(db, body.get('template_id'), body.get('version'))
+            if body.get('action') != 'save':
+                raise ValueError('Choose a supported template library action.')
+            key = text(body, 'request_id', 80)
+            if not re.fullmatch(r'[A-Za-z0-9_-]{8,80}', key):
+                raise ValueError('Invalid request ID.')
+            fingerprint = hashlib.sha256(json.dumps(['template_library', body], sort_keys=True).encode()).hexdigest()
+            previous = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
+            if previous:
+                if previous['fingerprint'] != fingerprint:
+                    raise ValueError('Request ID already used for different content.')
+                return json.loads(previous['response'])
+            result = team_template_library.save(db, body, actor)
+            db.execute('INSERT INTO requests VALUES (?,?,?)', (key, fingerprint, json.dumps(result)))
+            return result
+
+    def resolve_team_body(self, body):
+        import team_templates
+        if not body.get('template_id'):
+            if 'template_id' in body and body['template_id'] != '':
+                raise ValueError('Select a valid saved team template.')
+            return team_templates.expand(body), None
+        saved = self.template_library(dict(action='read', template_id=body['template_id'], version=body.get('template_version')), '')
+        resolved = {**saved['definition'], **body, 'template_version': saved['version']}
+        if 'template_roles' in body and 'team_members' not in body:
+            resolved.pop('team_members', None)
+        reference = {k: saved[k] for k in ('id', 'version', 'name', 'digest')}
+        return team_templates.expand(resolved), reference
 
     def frozen_policy(self, job, profile):
         """The approved toolchain policy as it stood when this session started.
@@ -568,7 +610,7 @@ class OrganizationStore:
 
     def team_plan(self, body):
         import team_templates
-        body = team_templates.expand(body)
+        body, source = self.resolve_team_body(body)
         roles, policy = team_templates.validate(body)
         if not roles:
             return dict(members=[], warnings=[], model_policy=policy)
@@ -588,8 +630,9 @@ class OrganizationStore:
         import template_workflows
         result['workflow_plan'], notes = template_workflows.preview(project, self.projects, result['members'])
         result['warnings'] = [*result['warnings'], *notes]
+        result['source_template'] = source
         result['template_plan'] = hashlib.sha256(json.dumps(
-            [policy, result['members'], result['workflow_plan'], result['resource_limits']], sort_keys=True).encode()).hexdigest()
+            [policy, result['members'], result['workflow_plan'], result['resource_limits'], source], sort_keys=True).encode()).hexdigest()
         return result
 
     def _action(self, action, body):
@@ -613,9 +656,9 @@ class OrganizationStore:
                 return collaboration_action(self, snapshot, action, body, org)
         fingerprint = hashlib.sha256(json.dumps([action, body], sort_keys=True).encode()).hexdigest()
         planned = None
-        if action == 'save' and ('template_roles' in body or 'team_members' in body or 'team_preset' in body):
+        if action == 'save' and any(k in body for k in ('template_roles', 'team_members', 'team_preset', 'template_id')):
             import team_templates
-            plan_body = team_templates.expand(body)
+            plan_body, _ = self.resolve_team_body(body)
             roles, _ = team_templates.validate(plan_body)
             if roles:
                 if body.get('id'):
@@ -646,11 +689,13 @@ class OrganizationStore:
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
                 if previous_org:
-                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset', 'resource_limits') if k in previous_org})
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset', 'resource_limits', 'source_template') if k in previous_org})
                 if planned:
                     item.update(template_roles=list(dict.fromkeys(m['template_role'] for m in planned['members'])), model_policy=planned['model_policy'],
                                 runtime_preferences=planned['runtime_preferences'], team_preset=body.get('team_preset', ''))
                     item['resource_limits'] = planned['resource_limits']
+                    if planned.get('source_template'):
+                        item['source_template'] = planned['source_template']
                 self.put(db, 'organizations', item)
                 if planned:
                     ids = {m['template_key']: uuid.uuid4().hex for m in planned['members']}

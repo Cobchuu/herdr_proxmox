@@ -367,7 +367,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, export_configuration(self.server.organizations))
                 return
             if self.path == '/api/organizations/templates':
-                self.reply(200, team_templates.snapshot())
+                self.reply(200, dict(team_templates.snapshot(), saved_templates=self.server.organizations.saved_templates()))
                 return
             if self.path not in ('/api/snapshot', '/api/organizations', '/api/organizations/directory', '/api/organizations/state', '/api/projects/jobs', '/api/cli-setup', '/api/logs', '/api/ssh-access', '/api/dashboard-access', '/api/herdr-server', '/api/updates', '/api/models', '/api/integration', '/api/sdk', '/api/validation', '/api/tasks', '/api/github', '/api/discovery'):
                 self.reply(404, {'error': 'Unknown endpoint.'})
@@ -528,6 +528,7 @@ class Handler(BaseHTTPRequestHandler):
         role = getattr(self, 'operator', {}).get('role', 'operator')
         actions = {f'/api/workspaces/{name}': name for name in ('create', 'focus', 'rename')}
         actions['/api/organizations/templates'] = 'templates'
+        actions['/api/organizations/templates/library'] = 'template_library'
         organization_actions = {f'/api/organizations/{name}': name for name in ('save', 'hire', 'launch', 'delegate', 'release', 'report', 'resolve_delegation', 'group', 'discuss', 'chat', 'inspect', 'input', 'recover', 'transcript', 'retry_discussion', 'cancel_discussion', 'remove_agent', 'remove_group', 'session', 'realign_discussion_session')}
         setup_actions = {f'/api/cli-setup/{name}': name for name in ('start', 'poll', 'input', 'resize', 'close', 'verify', 'install_integration')}
         log_actions = {f'/api/logs/{name}': name for name in ('save', 'preview', 'ticket', 'delete')}
@@ -537,10 +538,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if not 0 < size <= (2_000_000 if self.path == '/api/organizations/import' else
-                                256_000 if self.path in ('/api/organizations/save', '/api/organizations/templates') else 65536):
+                                256_000 if self.path in ('/api/organizations/save', '/api/organizations/templates', '/api/organizations/templates/library') else 65536):
                 raise ValueError('Invalid request size.')
             body = json.loads(self.rfile.read(size))
-            if self.path == '/api/organizations/templates':
+            if self.path == '/api/organizations/templates/library':
+                if not isinstance(body, dict):
+                    raise ValueError('Expected a JSON object.')
+                if body.get('action') == 'save' and role != 'admin':
+                    raise ValueError('Only an administrator can save shared team templates.')
+                self.reply(200, self.server.organizations.template_library(body, actor))
+            elif self.path == '/api/organizations/templates':
                 if not isinstance(body, dict):
                     raise ValueError('Expected a JSON object.')
                 self.reply(200, self.server.organizations.team_plan(body))
@@ -562,6 +569,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.integration.wake()
                 self.reply(200, result)
             elif self.path == '/api/organizations/import':
+                if role != 'admin' and isinstance(body, dict) and (body.get('team_templates') or body.get('team_template_versions')):
+                    raise ValueError('Only an administrator can import shared team templates.')
                 self.reply(200, import_configuration(self.server.organizations, body))
             elif self.path == '/api/organizations/activity':
                 self.reply(200, self.server.organizations.activity(body))

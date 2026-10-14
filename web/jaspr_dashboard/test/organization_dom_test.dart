@@ -161,6 +161,7 @@ void main() {
     Component child, {
     List<Map<String, dynamic>> jobs = const [],
     String? failAction,
+    bool Function(http.Request)? failWhen,
     Map<String, dynamic> Function(http.Request)? response,
   }) async {
     var lost = false;
@@ -172,7 +173,9 @@ void main() {
             'path': path,
             ...jsonDecode(request.body) as Map<String, dynamic>,
           });
-          if (path.endsWith('/$failAction') && !lost) {
+          if ((path.endsWith('/$failAction') ||
+                  failWhen?.call(request) == true) &&
+              !lost) {
             lost = true;
             return http.Response('{"error":"response lost"}', 503);
           }
@@ -477,6 +480,135 @@ void main() {
       expect(saved['team_preset'], 'frontend_backend');
       expect(saved['template_roles'], ['lead_developer']);
       expect((saved['team_members'] as List).length, 1);
+    },
+  );
+
+  test(
+    'saved template versions load edit retry and create with pinned provenance',
+    () async {
+      const identifier = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      var latest = 1;
+      final versions = <int, Map<String, dynamic>>{
+        1: {
+          'team_members': [
+            {
+              'key': 'lead',
+              'template_role': 'lead_developer',
+              'name': 'Maya',
+              'persona': 'Plan delivery.',
+              'manager_key': '',
+              'use_worktree': true,
+            },
+          ],
+          'model_policy': 'balanced',
+          'runtime_preferences': ['codex', 'claude'],
+          'resource_limits': {
+            'max_active_sessions': 3,
+            'max_active_meetings': 1,
+            'daily_session_cap': 20,
+          },
+        },
+      };
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        failWhen: (r) =>
+            r.url.path.endsWith('/templates/library') &&
+            (jsonDecode(r.body) as Map)['action'] == 'save',
+        response: (request) {
+          if (request.url.path.endsWith('/templates/library')) {
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            if (body['action'] == 'save')
+              versions[++latest] = Map<String, dynamic>.from(
+                body['definition'],
+              );
+            final version = body['action'] == 'save'
+                ? latest
+                : body['version'] as int;
+            return {
+              'id': identifier,
+              'version': version,
+              'latest_version': latest,
+              'name': 'API team',
+              'description': 'A portable API team',
+              'definition': versions[version],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {
+                    'id': 'lead_developer',
+                    'name': 'Lead Developer',
+                    'persona_instruction': 'Plan delivery.',
+                  },
+                ],
+                'policies': {'balanced': 'Balanced'},
+                'runtime_names': {'codex': 'Codex', 'claude': 'Claude Code'},
+                'saved_templates': [
+                  {
+                    'id': identifier,
+                    'name': 'API team',
+                    'version': 1,
+                    'versions': [
+                      {'version': 1, 'name': 'API team'},
+                    ],
+                  },
+                ],
+              };
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            return {
+              'template_plan': 'version-2-plan',
+              'member_specs': body['team_members'],
+              'members': [],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'New organization');
+      await input('Purpose', 'Build tools');
+      await choose('Saved template version', '$identifier@1');
+      expect((control('Lead Developer') as web.HTMLInputElement).checked, true);
+      expect(
+        (control('Maximum concurrent sessions') as web.HTMLInputElement).value,
+        '3',
+      );
+      nodes(
+        'summary',
+      ).firstWhere((n) => n.textContent == 'Configure Maya').click();
+      await settle();
+      await input('Member name', 'Maya v2');
+      nodes(
+        'summary',
+      ).firstWhere((n) => n.textContent == 'Save reusable template').click();
+      await settle();
+      await click('Save new version');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('response lost'),
+      );
+      await click('Save new version');
+      final saves = actions(
+        'templates/library',
+      ).where((p) => p['action'] == 'save').toList();
+      expect(saves.length, 2);
+      expect(saves[0]['request_id'], saves[1]['request_id']);
+      expect((saves[1]['definition'] as Map).containsKey('project'), false);
+      expect(saves[1]['expected_version'], 1);
+      await input('Team project directory', '/projects/new-app');
+      await click('Preview team');
+      await click('Save');
+      final body = actions('save').single;
+      expect(body['template_id'], identifier);
+      expect(body['template_version'], 2);
+      expect(body['runtime_preferences'], ['codex', 'claude']);
+      expect((body['team_members'] as List).single['name'], 'Maya v2');
     },
   );
 

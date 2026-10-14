@@ -35,6 +35,11 @@ def export_configuration(store):
                    for table in TABLES}
     result = {'format': 'herdr-configuration', 'version': 1,
             'exported_at': datetime.now(timezone.utc).isoformat(), **records}
+    import team_template_library
+    with store.lock, closing(store.connect()) as db:
+        library = team_template_library.export(db)
+    if library['team_templates']:
+        result.update(library)
     # Preserve large backups rather than truncating or silently losing records.
     # Import has a separate request limit; callers can warn before downloading.
     result['import_size_supported'] = len(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8')) + 40 <= MAX_TRANSFER_BYTES
@@ -46,6 +51,8 @@ def import_configuration(store, bundle):
         raise ValueError('Configuration exceeds the 2 MB import limit.')
     if not isinstance(bundle, dict) or bundle.get('format') != 'herdr-configuration' or bundle.get('version') != 1:
         raise ValueError('Unsupported configuration export format or version.')
+    import team_template_library
+    library = team_template_library.validate_import(bundle)
     records = {}
     for table in TABLES:
         values = bundle.get(table)
@@ -116,4 +123,5 @@ def import_configuration(store, bundle):
         for table in TABLES:
             for item in records[table].values():
                 store.put(db, table, item)
+        team_template_library.import_records(db, library)
     return {'imported': {table: len(records[table]) for table in TABLES}}

@@ -129,14 +129,27 @@ class _OrganizationPageState extends State<OrganizationPage> {
       }
     }
     if (!mounted || epoch != connection.generation) return;
-    final values = await organizationForm(org, templates, (body) async {
-      final result = Json.from(
-        await connection.request('organizations/templates', body),
-      );
-      if (epoch != connection.generation)
-        throw StateError('Connection changed. Reopen the organization form.');
-      return result;
-    });
+    final values = await organizationForm(
+      org,
+      templates,
+      (body) async {
+        final result = Json.from(
+          await connection.request('organizations/templates', body),
+        );
+        if (epoch != connection.generation)
+          throw StateError('Connection changed. Reopen the organization form.');
+        return result;
+      },
+      (body) async {
+        final result = Json.from(
+          await connection.request('organizations/templates/library', body),
+        );
+        if (epoch != connection.generation)
+          throw StateError('Connection changed. Reopen the organization form.');
+        return result;
+      },
+      connection.operator.value['role'] == 'admin',
+    );
     if (values == null || !mounted || epoch != connection.generation) return;
     final previous = bloc.state.organizations.map((o) => o['id']).toSet();
     await submit('save', values);

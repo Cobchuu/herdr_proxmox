@@ -1,5 +1,6 @@
 import 'org_form_values.dart';
 import 'dart:convert';
+import 'dart:math';
 import 'package:herdr_dashboard_state/team_template_draft.dart';
 import 'package:web/web.dart' as web;
 import '../ui.dart';
@@ -188,6 +189,8 @@ Future<Json?> organizationForm([
   Json? org,
   Json? templates,
   Future<Json> Function(Json)? preview,
+  Future<Json> Function(Json)? library,
+  bool canManageTemplates = true,
 ]) async {
   final roles = org == null ? records(templates?['roles']) : <Json>[];
   final draft = TeamTemplateDraft(
@@ -195,6 +198,28 @@ Future<Json?> organizationForm([
     maxMembers: templates?['max_members'] as int? ?? 20,
   );
   final bundles = records(templates?['bundles']);
+  final savedTemplates = records(templates?['saved_templates']);
+  final savedChoices = <String, String>{'': 'Custom draft'};
+  void updateSavedChoices() {
+    savedChoices
+      ..clear()
+      ..[''] = 'Custom draft';
+    for (final entry in savedTemplates) {
+      for (final version in records(entry['versions'])) {
+        savedChoices['${entry['id']}@${version['version']}'] =
+            '${version['name'] ?? entry['name']} · v${version['version']}';
+      }
+    }
+  }
+
+  updateSavedChoices();
+  Json? sourceTemplate, libraryPending;
+  List<dynamic>? loadedPreferences;
+  List<dynamic> preferredValues(Json v) =>
+      loadedPreferences ??
+      [if (v['preferred_runtime'] != '') v['preferred_runtime']];
+  bool libraryBusy = false;
+  String? libraryError, libraryNotice;
   final resourceDefaults = Json.from(
     templates?['resource_defaults'] ??
         {
@@ -222,6 +247,7 @@ Future<Json?> organizationForm([
     team = null;
     previewError = null;
     loading = false;
+    libraryPending = null;
     refreshDialogs();
   }
 
@@ -237,6 +263,9 @@ Future<Json?> organizationForm([
       'model_policy': 'balanced',
       'preferred_runtime': '',
       'team_preset': '',
+      'saved_template': '',
+      'template_name': '',
+      'template_description': '',
       ...resourceDefaults,
       'project': '',
     },
@@ -245,6 +274,7 @@ Future<Json?> organizationForm([
       'purpose': 'Purpose',
       'instructions': 'Shared instructions',
       if (roles.isNotEmpty) ...{
+        if (library != null) 'saved_template': 'Saved template version',
         if (bundles.isNotEmpty) 'team_preset': 'Team preset',
         for (final role in roles) 'preset_${role['id']}': '${role['name']}',
         'project': 'Team project directory',
@@ -264,6 +294,7 @@ Future<Json?> organizationForm([
     wide: {'name', 'project'},
     flags: {for (final role in roles) 'preset_${role['id']}'},
     choices: {
+      'saved_template': savedChoices,
       'model_policy': Map<String, String>.from(templates?['policies'] ?? {}),
       'preferred_runtime': {
         '': 'Automatic',
@@ -283,7 +314,59 @@ Future<Json?> organizationForm([
         }.contains(key) ||
         selected(v).isNotEmpty,
     changed: (key, value, v) {
+      if (key == 'saved_template') {
+        sourceTemplate = null;
+        invalidate();
+        if ('$value'.isNotEmpty && library != null) {
+          final epoch = revision;
+          libraryBusy = true;
+          libraryError = null;
+          refreshDialogs();
+          final parts = '$value'.split('@');
+          () async {
+            try {
+              final record = await library({
+                'action': 'read',
+                'template_id': parts[0],
+                'version': int.parse(parts[1]),
+              });
+              if (epoch != revision) return;
+              sourceTemplate = record;
+              final definition = Json.from(record['definition']);
+              draft.hydrate(definition['team_members']);
+              for (final role in roles)
+                v['preset_${role['id']}'] = draft.selectedRoles.contains(
+                  role['id'],
+                );
+              v['model_policy'] = definition['model_policy'];
+              loadedPreferences = List.from(
+                definition['runtime_preferences'] as List? ?? [],
+              );
+              v['preferred_runtime'] =
+                  (definition['runtime_preferences'] as List? ?? [])
+                      .firstOrNull ??
+                  '';
+              v['team_preset'] = '';
+              v['template_name'] = record['name'];
+              v['template_description'] = record['description'];
+              for (final key in resourceLabels.keys)
+                v[key] = definition['resource_limits'][key];
+              lastPreview = null;
+              invalidate();
+              libraryNotice =
+                  'Loaded ${record['name']} · v${record['version']}. Re-preview for this project and its CLI accounts.';
+            } catch (e) {
+              libraryError = '$e';
+            } finally {
+              libraryBusy = false;
+              refreshDialogs();
+            }
+          }();
+        }
+      }
       if (key == 'team_preset') {
+        sourceTemplate = null;
+        v['saved_template'] = '';
         final bundle = bundles.where((b) => b['id'] == value).firstOrNull;
         if (bundle != null) {
           draft.applyBundle(bundle);
@@ -304,6 +387,7 @@ Future<Json?> organizationForm([
           key == 'model_policy' ||
           key == 'preferred_runtime' ||
           resourceLabels.containsKey(key)) {
+        if (key == 'preferred_runtime') loadedPreferences = null;
         final withinLimit =
             !key.startsWith('preset_') || draft.syncRoles(selected(v));
         invalidate();
@@ -317,6 +401,7 @@ Future<Json?> organizationForm([
       }
     },
     validate: (v) {
+      if (libraryBusy) return 'Wait for the template operation to finish.';
       if (selected(v).isEmpty) return null;
       if ('${v['project'] ?? ''}'.trim().isEmpty)
         return 'Enter the team project directory.';
@@ -325,6 +410,9 @@ Future<Json?> organizationForm([
       return null;
     },
     extra: (v) => [
+      if (libraryBusy) prose('Loading or saving template…'),
+      if (libraryError != null) errorLine(libraryError),
+      if (libraryNotice != null) prose(libraryNotice),
       if (org == null && templates?['error'] != null)
         errorLine('${templates!['error']}'),
       if (roles.isNotEmpty)
@@ -350,11 +438,13 @@ Future<Json?> organizationForm([
                 ...draft.payload,
                 'project': '${v['project'] ?? ''}'.trim(),
                 'model_policy': v['model_policy'],
-                'runtime_preferences': [
-                  if (v['preferred_runtime'] != '') v['preferred_runtime'],
-                ],
+                'runtime_preferences': preferredValues(v),
                 'team_preset': v['team_preset'],
                 'resource_limits': resources(v),
+                if (sourceTemplate != null) ...{
+                  'template_id': sourceTemplate!['id'],
+                  'template_version': sourceTemplate!['version'],
+                },
               });
               if (epoch == revision) {
                 team = result;
@@ -368,7 +458,7 @@ Future<Json?> organizationForm([
               refreshDialogs();
             }
           },
-          disabled: loading || preview == null,
+          disabled: loading || libraryBusy || preview == null,
         ),
         for (final member in draft.members) ...[
           details('Configure ${draft.name(member)}', [
@@ -452,6 +542,98 @@ Future<Json?> organizationForm([
                 '${account['name']}: ${account['available'] == true ? 'Available' : 'Excluded'} · ${account['reason']}',
               ),
           ]),
+        if (library != null && canManageTemplates)
+          details('Save reusable template', [
+            prose(
+              'Save this team configuration without its project path or CLI account data. New versions do not update existing organizations.',
+            ),
+            field('Template name', '${v['template_name']}', (value) {
+              v['template_name'] = value;
+              libraryPending = null;
+            }),
+            textarea('Template description', '${v['template_description']}', (
+              value,
+            ) {
+              v['template_description'] = value;
+              libraryPending = null;
+            }),
+            row([
+              for (final update in [false, if (sourceTemplate != null) true])
+                button(
+                  update ? 'Save new version' : 'Save as new template',
+                  () async {
+                    if (libraryBusy) return;
+                    libraryBusy = true;
+                    libraryError = null;
+                    libraryNotice = null;
+                    final intent = {
+                      'action': 'save',
+                      'name': '${v['template_name']}'.trim(),
+                      'description': '${v['template_description']}'.trim(),
+                      'definition': {
+                        ...draft.payload,
+                        'model_policy': v['model_policy'],
+                        'runtime_preferences': preferredValues(v),
+                        'resource_limits': resources(v),
+                      },
+                      if (update) ...{
+                        'template_id': sourceTemplate!['id'],
+                        'expected_version': sourceTemplate!['version'],
+                      },
+                    };
+                    final previous = libraryPending == null
+                        ? null
+                        : (Json.from(libraryPending!)..remove('request_id'));
+                    if (jsonEncode(previous) != jsonEncode(intent)) {
+                      libraryPending = {
+                        ...intent,
+                        'request_id':
+                            '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(0x7fffffff)}',
+                      };
+                    }
+                    refreshDialogs();
+                    final saveEpoch = revision;
+                    try {
+                      final saved = await library(libraryPending!);
+                      final header = savedTemplates
+                          .where((t) => t['id'] == saved['id'])
+                          .firstOrNull;
+                      final versions = records(
+                        header?['versions'],
+                      ).where((t) => t['version'] != saved['version']).toList();
+                      final metadata = {
+                        'id': saved['id'],
+                        'name': saved['name'],
+                        'description': saved['description'],
+                        'version': saved['version'],
+                        'versions': [
+                          {'version': saved['version'], 'name': saved['name']},
+                          ...versions,
+                        ],
+                      };
+                      savedTemplates.removeWhere((t) => t['id'] == saved['id']);
+                      savedTemplates.add(metadata);
+                      updateSavedChoices();
+                      if (saveEpoch == revision) {
+                        sourceTemplate = saved;
+                        draft.hydrate(saved['definition']['team_members']);
+                        v['saved_template'] =
+                            '${saved['id']}@${saved['version']}';
+                        invalidate();
+                      }
+                      libraryNotice =
+                          'Saved ${saved['name']} · v${saved['version']}. Re-preview before creating the organization.';
+                    } catch (e) {
+                      libraryError = '$e';
+                    } finally {
+                      libraryBusy = false;
+                      refreshDialogs();
+                    }
+                  },
+                  disabled: libraryBusy,
+                ),
+            ]),
+          ]),
         for (final warning in team?['warnings'] as List? ?? []) prose(warning),
         for (final member in records(team?['members']))
           details(
@@ -476,12 +658,14 @@ Future<Json?> organizationForm([
       ...draft.payload,
       'project': result['project'],
       'model_policy': result['model_policy'],
-      'runtime_preferences': [
-        if (result['preferred_runtime'] != '') result['preferred_runtime'],
-      ],
+      'runtime_preferences': preferredValues(result),
       'template_plan': team!['template_plan'],
       'team_preset': result['team_preset'],
       'resource_limits': resources(result),
+      if (sourceTemplate != null) ...{
+        'template_id': sourceTemplate!['id'],
+        'template_version': sourceTemplate!['version'],
+      },
     },
   };
 }

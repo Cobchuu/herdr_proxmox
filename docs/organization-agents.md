@@ -112,6 +112,40 @@ model discovery. It never copies credentials into a team or template. Reported
 sign-in and catalog availability do not claim that subscription quotas or every
 model entitlement have been verified.
 
+### Saved template library
+
+Administrators can expand **Save reusable template** in the creation form,
+provide a name/description, and save the current draft as a new template.
+**Saved template version** loads an exact saved version into the editable draft;
+**Save new version** appends edits to that template. Old versions remain readable.
+A stale editor cannot overwrite newer changes: load the latest version first,
+or save the draft under a new template name. Lost-response retries use the same
+request ID and do not create duplicate versions. Loading replaces the draft;
+saving preserves edits made while a save was in flight.
+
+Versions freeze member names, persona responsibilities and reporting references,
+plus model policy, explicit CLI/model/effort overrides, fallback CLI preferences,
+and resource limits. They exclude project paths, account data, organization
+branding and live sessions. Automatic model choices are evaluated against the
+new project's CLI catalog whenever a saved template is used. Each created
+organization records the source template ID/version/digest; its member profiles
+and initial limits remain independent of later template updates.
+
+The library supports 50 templates and 25 immutable versions per template, stored
+alongside the organization database. Configuration exports include its complete
+history; imports validate definitions, version continuity and content digests,
+and reject conflicting records. The existing 2 MB import limit still applies.
+Shared-library writes and imports require an administrator; authenticated
+operators can load templates and create organizations using them.
+
+`GET /api/organizations/templates` includes saved-template/version metadata.
+`POST /api/organizations/templates/library` supports `action=read` with
+`template_id`/`version`, and `action=save` with `name`, `description`, `definition`
+and `request_id`. Appending also requires `template_id` and `expected_version`.
+Preview and organization creation accept `template_id` and `template_version`,
+with optional member overrides. Omitting the version selects the current latest
+version, while supplying it pins the exact version.
+
 These policies are deterministic recommendations, not billing guarantees or
 benchmarks. They compare reported input/output costs when available; account
 subscriptions, quotas and unknown prices cannot be compared reliably. Free
