@@ -134,6 +134,9 @@ def parse_models(output):
         capabilities = metadata.get('capabilities')
         if isinstance(capabilities, dict) and isinstance(capabilities.get('toolcall'), bool):
             entry['tool_call'] = capabilities['toolcall']
+        limits = metadata.get('limit')
+        if isinstance(limits, dict) and type(limits.get('context')) is int and limits['context'] > 0:
+            entry['context'] = limits['context']
         models.append(entry)
     return list({(m['provider'], m['id']): m for m in models}.values())
 

@@ -201,6 +201,7 @@ Future<Json?> organizationForm([
       'id': org?['id'] ?? '',
       ...?org,
       'model_policy': 'balanced',
+      'preferred_runtime': '',
       'project': '',
     },
     {
@@ -211,6 +212,7 @@ Future<Json?> organizationForm([
         for (final role in roles) 'preset_${role['id']}': '${role['name']}',
         'project': 'Team project directory',
         'model_policy': 'Model policy',
+        'preferred_runtime': 'Preferred CLI',
       },
     },
     required: {'name', 'purpose'},
@@ -225,13 +227,19 @@ Future<Json?> organizationForm([
     flags: {for (final role in roles) 'preset_${role['id']}'},
     choices: {
       'model_policy': Map<String, String>.from(templates?['policies'] ?? {}),
+      'preferred_runtime': {
+        '': 'Automatic',
+        ...Map<String, String>.from(templates?['runtime_names'] ?? {}),
+      },
     },
     visible: (key, v) =>
-        !{'project', 'model_policy'}.contains(key) || selected(v).isNotEmpty,
+        !{'project', 'model_policy', 'preferred_runtime'}.contains(key) ||
+        selected(v).isNotEmpty,
     changed: (key, value, v) {
       if (key.startsWith('preset_') ||
           key == 'project' ||
-          key == 'model_policy') {
+          key == 'model_policy' ||
+          key == 'preferred_runtime') {
         revision++;
         team = null;
         previewError = null;
@@ -267,6 +275,9 @@ Future<Json?> organizationForm([
                 'template_roles': selected(v),
                 'project': '${v['project'] ?? ''}'.trim(),
                 'model_policy': v['model_policy'],
+                'runtime_preferences': [
+                  if (v['preferred_runtime'] != '') v['preferred_runtime'],
+                ],
               });
               if (epoch == revision) team = result;
             } catch (e) {
@@ -303,6 +314,9 @@ Future<Json?> organizationForm([
       'template_roles': selected(result),
       'project': result['project'],
       'model_policy': result['model_policy'],
+      'runtime_preferences': [
+        if (result['preferred_runtime'] != '') result['preferred_runtime'],
+      ],
       'template_plan': team!['template_plan'],
     },
   };

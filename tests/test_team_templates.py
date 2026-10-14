@@ -130,7 +130,7 @@ class TeamTemplateTests(unittest.TestCase):
     def test_cost_policies_families_and_supported_efforts(self):
         for runtime, ordinary, strong in [('claude', 'haiku', 'opus'), ('codex', 'luna', 'astra')]:
             catalogs = {'runtimes': {runtime: model_catalog.curated(runtime)}}
-            basic = templates.selection(templates.BY_ID['backend_developer'], 'balanced', catalogs)
+            basic = templates.selection(templates.BY_ID['qa_engineer'], 'balanced', catalogs)
             advanced = templates.selection(templates.BY_ID['reviewer'], 'capability', catalogs)
             self.assertIn(ordinary, basic['model'])
             self.assertIn(strong, advanced['model'])
@@ -138,6 +138,27 @@ class TeamTemplateTests(unittest.TestCase):
             self.assertEqual(advanced['reasoning'], 'high')
             lead = templates.selection(templates.BY_ID['lead_developer'], 'balanced', catalogs)
             self.assertTrue('sonnet' in lead['model'] or 'sol' in lead['model'])
+            implementation = templates.selection(templates.BY_ID['backend_developer'], 'balanced', catalogs)
+            self.assertTrue('sonnet' in implementation['model'] or 'sol' in implementation['model'])
+
+    def test_role_capability_floor_context_and_runtime_preference(self):
+        available_models = available(opencode={'models': [
+            {'provider': 'zen', 'id': 'luna-free', 'reasoning': [], 'cost': {'input': 0, 'output': 0}},
+            {'provider': 'zen', 'id': 'coder-free', 'reasoning': [], 'context': 4000},
+        ]})
+        role = templates.BY_ID['backend_developer']
+        selected = templates.selection(role, 'economy', available_models, ['codex'])
+        self.assertEqual(selected['runtime'], 'codex')
+        self.assertIn('sol', selected['model'])
+        unknown = model_catalog.parse_models('zen/new-model-free\n{"capabilities":{"toolcall":true},"limit":{"context":64000}}\n')[0]
+        self.assertTrue(templates.suitable(role, unknown, 'opencode'))
+        self.assertFalse(templates.suitable(role, dict(unknown, tool_call=False), 'opencode'))
+        self.assertFalse(templates.suitable(role, dict(unknown, context=4000), 'opencode'))
+        with self.assertRaisesRegex(ValueError, 'capability requirements'):
+            templates.selection(role, 'economy', {'runtimes': {'opencode': {'models': [dict(unknown, context=4000)]}}})
+        for preferences in (['missing'], ['codex', 'codex'], 'claude'):
+            with self.assertRaises(ValueError):
+                templates.validate(dict(template_roles=[], runtime_preferences=preferences))
 
     def test_opencode_free_preference_cost_metadata_and_variant_fallback(self):
         models = model_catalog.parse_models(

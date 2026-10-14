@@ -229,6 +229,7 @@ void main() {
                   {'id': 'lead_developer', 'name': 'Lead Developer'},
                 ],
                 'policies': {'balanced': 'Balanced', 'economy': 'Lowest cost'},
+                'runtime_names': {'codex': 'Codex', 'claude': 'Claude Code'},
               };
             return {
               'template_plan': 'preview-digest',
@@ -259,6 +260,7 @@ void main() {
       (control('Lead Developer') as web.HTMLInputElement).click();
       await settle();
       await input('Team project directory', '/projects/app');
+      await choose('Preferred CLI', 'codex');
       await click('Save');
       expect(actions('save'), isEmpty);
       expect(
@@ -283,6 +285,7 @@ void main() {
       expect(saved['template_roles'], ['lead_developer']);
       expect(saved['project'], '/projects/other');
       expect(saved['model_policy'], 'balanced');
+      expect(saved['runtime_preferences'], ['codex']);
       expect(saved['template_plan'], 'preview-digest');
       expect(saved.containsKey('preset_lead_developer'), false);
       expect(actions('hire'), isEmpty);

@@ -65,12 +65,22 @@ tool calling are excluded. The CLI's
 [model enumeration](https://opencode.ai/docs/cli/#models) reports available models
 from configured providers and supports verbose cost metadata.
 
-- **Balanced:** general models (Sonnet/Sol families) for coordination, review and
-  integration; lighter models (Haiku/Luna families) or available free OpenCode
-  models for bounded implementation and QA.
-- **Lowest cost:** prefer models reported free by cost metadata or a free model
-  ID, then lighter model families. Explicit positive pricing overrides a free ID.
-- **Higher capability:** prefer Opus/Astra and other stronger model families.
+- **Balanced:** choose models meeting each role's capability floor. Coding,
+  coordination, review and integration require the general/coding tier; bounded
+  QA permits lighter models. Suitable free OpenCode models are preferred within
+  the target tier.
+- **Lowest cost:** prefer eligible models reported free by cost metadata or a
+  free model ID, then preferred CLIs and known costs. Explicit positive pricing
+  overrides a free ID. Cheap models below the role minimum are excluded.
+- **Higher capability:** prefer the stronger tier for lead/review/integration,
+  with a general-tier fallback when necessary.
+
+**Preferred CLI** breaks ties between equally suitable model choices, allowing
+an included-usage account to be preferred without guessing its subscription.
+The preview explains capability floors and reported context capacity. Models
+with explicitly insufficient context or no tool calling are excluded; unfamiliar
+models need positive tool/context metadata to establish compatibility. Capability
+tiers are maintained policy heuristics, not measured model benchmarks.
 
 These policies are deterministic recommendations, not billing guarantees or
 benchmarks. They compare reported input/output costs when available; account

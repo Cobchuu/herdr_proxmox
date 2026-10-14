@@ -1157,6 +1157,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
   final project = TextEditingController();
   final selectedRoles = <String>{};
   String policy = 'balanced';
+  String preferredRuntime = '';
   Map<String, dynamic>? team;
   String? previewError;
   bool loading = false;
@@ -1186,6 +1187,9 @@ class _OrganizationFormState extends State<OrganizationForm> {
         'template_roles': selectedRoles.toList(),
         'project': project.text.trim(),
         'model_policy': policy,
+        'runtime_preferences': [
+          if (preferredRuntime.isNotEmpty) preferredRuntime,
+        ],
       });
       if (mounted && epoch == revision) setState(() => team = result);
     } catch (e) {
@@ -1287,6 +1291,29 @@ class _OrganizationFormState extends State<OrganizationForm> {
                       loading ? 'Checking CLI accounts…' : 'Preview team',
                     ),
                   ),
+                  DropdownButtonFormField<String>(
+                    initialValue: preferredRuntime,
+                    decoration: const InputDecoration(
+                      labelText: 'Preferred CLI',
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Automatic'),
+                      ),
+                      for (final entry in Map<String, String>.from(
+                        widget.templates?['runtime_names'] ?? {},
+                      ).entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(entry.value),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() {
+                      preferredRuntime = v ?? '';
+                      invalidate();
+                    }),
+                  ),
                   if (previewError != null)
                     Text(
                       previewError!,
@@ -1342,6 +1369,9 @@ class _OrganizationFormState extends State<OrganizationForm> {
                 'template_roles': selectedRoles.toList(),
                 'project': project.text.trim(),
                 'model_policy': policy,
+                'runtime_preferences': [
+                  if (preferredRuntime.isNotEmpty) preferredRuntime,
+                ],
                 'template_plan': team!['template_plan'],
               },
             });

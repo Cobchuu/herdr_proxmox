@@ -639,9 +639,10 @@ class OrganizationStore:
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
                 if previous_org:
-                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'team_workflows') if k in previous_org})
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows') if k in previous_org})
                 if planned:
-                    item.update(template_roles=body['template_roles'], model_policy=planned['model_policy'])
+                    item.update(template_roles=body['template_roles'], model_policy=planned['model_policy'],
+                                runtime_preferences=planned['runtime_preferences'])
                 self.put(db, 'organizations', item)
                 if planned:
                     ids = {m['template_role']: uuid.uuid4().hex for m in planned['members']}

@@ -65,6 +65,18 @@ ROLES = [
 ]
 BY_ID = {role['id']: role for role in ROLES}
 POLICIES = {'balanced': 'Balanced', 'economy': 'Lowest cost', 'capability': 'Higher capability'}
+RUNTIME_NAMES = {'codex': 'Codex', 'claude': 'Claude Code', 'opencode': 'OpenCode', 'agy': 'Antigravity'}
+# Compatibility floors are policy, not model benchmarks. Substantial coding,
+# coordination and independent review should not silently use a light model.
+ROLE_MINIMUMS = {r['id']: (1 if r['id'] == 'qa_engineer' else 2) for r in ROLES}
+
+
+def preferences(body):
+    values = body.get('runtime_preferences', [])
+    if (not isinstance(values, list) or len(values) > 4 or
+            any(not isinstance(v, str) or v not in RUNTIME_NAMES for v in values) or len(set(values)) != len(values)):
+        raise ValueError('Choose distinct supported preferred CLIs.')
+    return values
 
 
 def price(model):
@@ -119,35 +131,58 @@ def catalog(cli, projects, project):
 
 
 def family(model):
-    name = model['id'].lower()
-    if any(s in name for s in ('opus', 'astra', 'fable', 'max', 'pro')):
+    tokens = re.split(r'[-_.:/\s]+', model['id'].lower())
+    if any(s in tokens for s in ('opus', 'astra', 'fable', 'max', 'pro')):
         return 'strong'
-    if any(s in name for s in ('luna', 'haiku', 'mini', 'nano', 'flash', 'lite')):
+    if any(s in tokens for s in ('luna', 'haiku', 'mini', 'nano', 'flash', 'lite')):
         return 'economy'
     return 'standard'
 
 
-def selection(role, policy, available):
-    target = 'strong' if policy == 'capability' else 'economy' if policy == 'economy' else 'standard'
-    if policy == 'balanced' and role['tier'] == 'standard':
-        target = 'economy'
+def capability(model):
+    tokens = re.split(r'[-_.:/\s]+', model['id'].lower())
+    if any(t in tokens for t in ('opus', 'astra', 'fable', 'pro', 'max')):
+        return 3
+    if any(t in tokens for t in ('sonnet', 'sol', 'codex', 'coder', 'code', 'deepseek', 'qwen', 'glm', 'minimax', 'kimi')):
+        return 2
+    if any(t in tokens for t in ('luna', 'haiku', 'mini', 'nano', 'flash', 'lite')):
+        return 1
+    context = model.get('context')
+    if model.get('tool_call') is True and type(context) is int:
+        return 2 if context >= 64000 else 1 if context >= 16000 else 0
+    return 0
+
+
+def suitable(role, model, runtime):
+    if runtime == 'agy':
+        return True  # The CLI-managed choice is explicitly unverified in preview.
+    floor = ROLE_MINIMUMS[role['id']]
+    context = model.get('context')
+    return (model.get('tool_call') is not False and capability(model) >= floor
+            and (context is None or type(context) is int and context >= (16000 if floor == 1 else 32000)))
+
+
+def selection(role, policy, available, preferred=()):
+    minimum = ROLE_MINIMUMS[role['id']]
+    target = 3 if policy == 'capability' and role['tier'] == 'strong' else minimum
     candidates = []
     for runtime, entry in available['runtimes'].items():
         for index, model in enumerate(entry['models']):
-            if model.get('tool_call') is False:
+            if not suitable(role, model, runtime):
                 continue
             if runtime == 'agy':
-                rank = (9, 9, 9, 9)
+                rank = (9, 9, 9, 9, 9)
             else:
                 free, known = is_free(model), price(model)
-                fit = 0 if family(model) == target else 1 if family(model) == 'standard' else 2
-                if policy == 'economy' or policy == 'balanced' and role['tier'] == 'standard':
-                    rank = (0 if free else 1, fit, known if known is not None else float('inf'), index)
+                fit = abs(capability(model) - target)
+                preference = preferred.index(runtime) if runtime in preferred else len(preferred)
+                if policy == 'economy':
+                    rank = (0 if free else 1, preference, known if known is not None else float('inf'), fit, index)
                 else:
-                    rank = (fit, 0 if free else 1, known if known is not None else float('inf'), index)
+                    rank = (fit, 0 if free else 1, preference, known if known is not None else float('inf'), index)
             candidates.append((rank, runtime, model, entry))
     if not candidates:
-        raise ValueError('No ready CLI account/model is available for team presets. Connect a CLI and its Herdr integration on CLI accounts first.')
+        raise ValueError(f"No ready CLI account/model meets the {role['name']} capability requirements. Connect a suitable CLI/model and its Herdr integration first.")
     _, runtime, model, entry = min(candidates, key=lambda c: (c[0], c[1], c[2]['id']))
     effort = 'high' if role['tier'] == 'strong' else 'medium'
     supported = model.get('reasoning', [])
@@ -155,6 +190,11 @@ def selection(role, policy, available):
     note = ('Free according to catalog pricing/model ID; availability and quotas can change.' if is_free(model)
             else 'CLI-managed model and billing.' if runtime == 'agy'
             else 'Model family chosen for role and cost policy; account pricing and limits are not verified.')
+    if runtime != 'agy':
+        note += f' Role minimum: {minimum}; selected capability tier: {capability(model)} (policy heuristic).'
+        note += (' Context: ' + str(model['context']) + ' tokens.' if model.get('context') else ' Context capacity is not reported.')
+        if preferred and runtime not in preferred:
+            note += ' Preferred CLI was unavailable or a better eligible model was selected.'
     return dict(runtime=runtime, provider=model.get('provider', ''), model=model['id'], reasoning=reasoning,
                 model_name=model.get('name', model['id']), selection_note=note)
 
@@ -167,6 +207,7 @@ def validate(body):
     policy = body.get('model_policy', 'balanced')
     if not isinstance(policy, str) or policy not in POLICIES:
         raise ValueError('Choose a supported model policy.')
+    preferences(body)
     return roles, policy
 
 
@@ -182,10 +223,12 @@ def plan(body, available):
                             persona=role['persona'] + ' ' + reporting + '\n\n' + COMMON,
                             manager_role=manager, permission_mode='default', accessible_paths=[], use_worktree=True,
                             project=body.get('project', ''),
-                            **selection(role, policy, available)))
+                            **selection(role, policy, available, preferences(body))))
     digest = hashlib.sha256(json.dumps([policy, members], sort_keys=True).encode()).hexdigest()
-    return dict(members=members, warnings=available.get('warnings', []), model_policy=policy, template_plan=digest)
+    return dict(members=members, warnings=available.get('warnings', []), model_policy=policy,
+                runtime_preferences=preferences(body), template_plan=digest)
 
 
 def snapshot():
-    return dict(roles=[dict(role, persona=role['persona'] + '\n\n' + COMMON) for role in ROLES], policies=POLICIES)
+    return dict(roles=[dict(role, minimum_capability=ROLE_MINIMUMS[role['id']], persona=role['persona'] + '\n\n' + COMMON)
+                       for role in ROLES], policies=POLICIES, runtime_names=RUNTIME_NAMES)
