@@ -1,6 +1,7 @@
 import 'native_task_ui.dart';
 import '../services.dart';
 import 'dart:convert';
+import '../ui.dart' as ui;
 
 /// Product-level planning is independent of task review and starts with drafts.
 class DiscoveryPanel extends StatefulComponent {
@@ -454,109 +455,121 @@ class _DiscoveryPanelState extends State<DiscoveryPanel> {
           ),
         ),
       for (final proposal in record['proposals'] as List? ?? [])
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${proposal['title']}',
-                  style: Theme.of(context).textTheme.titleMedium,
+        ui.el('article', [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${proposal['title']}',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              ui.el('div', [
+                ui.el('span', [
+                  ui.icon(
+                    proposal['type'] == 'initiative' ? 'layers' : 'sparkles',
+                  ),
+                  ui.text('${proposal['type']}'),
+                ], classes: 'type-tag'),
+                ui.badge(
+                  _proposalState(proposal),
+                  tone: switch ('${proposal['state']}') {
+                    'proposed' => 'accent',
+                    'draft' || 'planning' => 'success',
+                    'duplicate' => 'warning',
+                    _ => 'neutral',
+                  },
                 ),
-                Text('${proposal['type']} \u00b7 ${_proposalState(proposal)}'),
-                Text('${proposal['problem']}\n${proposal['impact']}'),
-                ExpansionTile(
-                  title: const Text('Scope and acceptance criteria'),
+              ], classes: 'task-discovery__proposal-meta'),
+              Text('${proposal['problem']}\n${proposal['impact']}'),
+              ExpansionTile(
+                title: const Text('Scope and acceptance criteria'),
+                children: [
+                  SelectableText('${proposal['description']}'),
+                  for (final criterion
+                      in proposal['acceptance_criteria'] as List? ?? [])
+                    Text('• $criterion'),
+                  for (final check
+                      in proposal['required_checks'] as List? ?? [])
+                    Text('Check: $check'),
+                ],
+              ),
+              TextButton(
+                onPressed: () =>
+                    evidence(record, proposal['evidence'] as List?),
+                child: const Text('View cited evidence'),
+              ),
+              if (proposal['state'] == 'proposed')
+                Wrap(
+                  spacing: 8,
                   children: [
-                    SelectableText('${proposal['description']}'),
-                    for (final criterion
-                        in proposal['acceptance_criteria'] as List? ?? [])
-                      Text('• $criterion'),
-                    for (final check
-                        in proposal['required_checks'] as List? ?? [])
-                      Text('Check: $check'),
+                    FilledButton(
+                      onPressed: busy
+                          ? null
+                          : () => send({
+                              'mode': 'proposal',
+                              'discovery_id': record['id'],
+                              'proposal_key': proposal['key'],
+                              'decision': 'accept',
+                            }),
+                      child: Text(
+                        proposal['type'] == 'initiative'
+                            ? 'Approve planning'
+                            : 'Create draft',
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: busy
+                          ? null
+                          : () => send({
+                              'mode': 'proposal',
+                              'discovery_id': record['id'],
+                              'proposal_key': proposal['key'],
+                              'decision': 'reject',
+                            }),
+                      child: const Text('Reject'),
+                    ),
                   ],
                 ),
-                TextButton(
-                  onPressed: () =>
-                      evidence(record, proposal['evidence'] as List?),
-                  child: const Text('View cited evidence'),
-                ),
-                if (proposal['state'] == 'proposed')
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      FilledButton(
-                        onPressed: busy
-                            ? null
-                            : () => send({
-                                'mode': 'proposal',
-                                'discovery_id': record['id'],
-                                'proposal_key': proposal['key'],
-                                'decision': 'accept',
-                              }),
-                        child: Text(
-                          proposal['type'] == 'initiative'
-                              ? 'Approve planning'
-                              : 'Create draft',
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: busy
-                            ? null
-                            : () => send({
-                                'mode': 'proposal',
-                                'discovery_id': record['id'],
-                                'proposal_key': proposal['key'],
-                                'decision': 'reject',
-                              }),
-                        child: const Text('Reject'),
-                      ),
-                    ],
-                  ),
-                if (proposal['duplicate_task_id'] != null)
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      TextButton(
-                        onPressed: component.coordinator == null
-                            ? null
-                            : () => component.coordinator!.push(
-                                TaskDetailRoute(
-                                  '${proposal['duplicate_task_id']}',
-                                ),
+              if (proposal['duplicate_task_id'] != null)
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: component.coordinator == null
+                          ? null
+                          : () => component.coordinator!.push(
+                              TaskDetailRoute(
+                                '${proposal['duplicate_task_id']}',
                               ),
-                        child: Text(
-                          'Duplicate of task ${proposal['duplicate_task_id']}',
-                        ),
+                            ),
+                      child: Text(
+                        'Duplicate of task ${proposal['duplicate_task_id']}',
                       ),
-                      TextButton(
-                        onPressed: busy
-                            ? null
-                            : () => send({
-                                'mode': 'proposal',
-                                'discovery_id': record['id'],
-                                'proposal_key': proposal['key'],
-                                'decision': 'accept',
-                                'allow_duplicate': true,
-                              }),
-                        child: const Text('Create draft anyway'),
-                      ),
-                    ],
-                  ),
-                if (proposal['task_id'] != null &&
-                    component.coordinator != null)
-                  TextButton(
-                    onPressed: () => component.coordinator!.push(
-                      TaskDetailRoute('${proposal['task_id']}'),
                     ),
-                    child: const Text('Open draft task'),
+                    TextButton(
+                      onPressed: busy
+                          ? null
+                          : () => send({
+                              'mode': 'proposal',
+                              'discovery_id': record['id'],
+                              'proposal_key': proposal['key'],
+                              'decision': 'accept',
+                              'allow_duplicate': true,
+                            }),
+                      child: const Text('Create draft anyway'),
+                    ),
+                  ],
+                ),
+              if (proposal['task_id'] != null && component.coordinator != null)
+                TextButton(
+                  onPressed: () => component.coordinator!.push(
+                    TaskDetailRoute('${proposal['task_id']}'),
                   ),
-              ],
-            ),
+                  child: const Text('Open draft task'),
+                ),
+            ],
           ),
-        ),
+        ], classes: 'task-discovery__proposal'),
     ],
   );
 
@@ -574,8 +587,8 @@ class _DiscoveryPanelState extends State<DiscoveryPanel> {
           (DateTime.tryParse('${r['next_at']}')?.isAfter(DateTime.now()) ??
               false),
     );
-    return Card(
-      child: ExpansionTile(
+    return ui.el('section', [
+      ExpansionTile(
         title: const Text('Product discovery'),
         subtitle: const Text(
           'Product goals → grounded proposals → approved drafts',
@@ -613,12 +626,24 @@ class _DiscoveryPanelState extends State<DiscoveryPanel> {
               ],
               onChanged: busy ? null : (v) => setState(() => organization = v),
             ),
-            Text(
-              'Scheduled: ${policy['discovery_enabled'] == true ? 'on' : 'off'} · ${policy['discovery_paused'] == true || policy['paused'] == true ? 'paused' : 'available'}',
-            ),
-            Text(
-              'Next window: ${policy['discovery_next_at'] ?? 'Not configured'}',
-            ),
+            ui.el('div', [
+              ui.badge(
+                'Scheduled: ${policy['discovery_enabled'] == true ? 'on' : 'off'} · ${policy['discovery_paused'] == true || policy['paused'] == true ? 'paused' : 'available'}',
+                tone:
+                    policy['discovery_paused'] == true ||
+                        policy['paused'] == true
+                    ? 'warning'
+                    : policy['discovery_enabled'] == true
+                    ? 'success'
+                    : 'neutral',
+              ),
+              ui.el('span', [
+                ui.icon('calendar'),
+                ui.text(
+                  'Next window: ${policy['discovery_next_at'] ?? 'Not configured'}',
+                ),
+              ], classes: 'type-tag'),
+            ], classes: 'task-discovery__facts'),
             if (policy['discovery_error'] != null)
               Text('Discovery waiting: ${policy['discovery_error']}'),
             Text(
@@ -669,6 +694,6 @@ class _DiscoveryPanelState extends State<DiscoveryPanel> {
           ],
         ],
       ),
-    );
+    ], classes: 'card task-discovery');
   }
 }

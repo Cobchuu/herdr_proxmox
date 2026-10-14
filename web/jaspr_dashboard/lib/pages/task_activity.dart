@@ -1,4 +1,6 @@
 import 'native_task_ui.dart';
+import 'package:jaspr/dom.dart' as dom;
+import '../ui.dart' as ui;
 
 /// JSON collections are dynamic: extension getters must not be dispatched on them.
 String taskAgentName(
@@ -283,96 +285,139 @@ class TaskActivity extends StatelessComponent {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        ui.card(
           'Agent participation',
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        if (participants.isEmpty)
-          const Text('No historical agent participation recorded yet.'),
-        for (final person in participants)
-          Card(
-            child: ExpansionTile(
-              title: Text('${person['name'] ?? 'Agent identity unavailable'}'),
-              subtitle: Text(
-                '${person['role'] ?? ''} \u00b7 ${person['runtime'] ?? ''}',
-              ),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SelectableText(
-                        'Assigned ${person['assigned_at'] ?? 'at an unknown time'}\nSession: ${person['run_id'] ?? 'not recorded'}\nIdentity source: ${person['provenance'] ?? 'task record'}',
-                      ),
-                      if (person['model'] != null)
-                        Text(
-                          'Model: ${person['provider'] ?? ''}/${person['model']}',
-                        ),
-                      for (final session in task['sessions'] as List? ?? [])
-                        if (session is Map &&
-                            session['id'] == person['run_id']) ...[
-                          Text(
-                            'Session status: ${session['state'] ?? 'unknown'}',
-                          ),
-                          if (session['error'] != null &&
-                              '${session['error']}'.isNotEmpty)
-                            Text('Session issue: ${session['error']}'),
-                          for (final previous
-                              in session['history'] as List? ?? [])
-                            if (previous is Map)
-                              Text(
-                                'Previous session ${previous['alias']} closed ${previous['session_closed_at']}',
-                              ),
-                        ],
-                    ],
-                  ),
+          [
+            if (participants.isEmpty)
+              const Text('No historical agent participation recorded yet.'),
+            for (final person in participants)
+              ui.el('div', [
+                ui.roleTile(
+                  person['name'] ?? 'Agent',
+                  role: person['role'] ?? person['name'],
+                  size: 'sm',
                 ),
+                ExpansionTile(
+                  title: Text(
+                    '${person['name'] ?? 'Agent identity unavailable'}',
+                  ),
+                  subtitle: Text(
+                    '${person['role'] ?? ''} · ${person['runtime'] ?? ''}',
+                  ),
+                  children: [
+                    SelectableText(
+                      'Assigned ${person['assigned_at'] ?? 'at an unknown time'}\nSession: ${person['run_id'] ?? 'not recorded'}\nIdentity source: ${person['provenance'] ?? 'task record'}',
+                    ),
+                    if (person['model'] != null)
+                      Text(
+                        'Model: ${person['provider'] ?? ''}/${person['model']}',
+                      ),
+                    for (final session in task['sessions'] as List? ?? [])
+                      if (session is Map &&
+                          session['id'] == person['run_id']) ...[
+                        Text(
+                          'Session status: ${session['state'] ?? 'unknown'}',
+                        ),
+                        if (session['error'] != null &&
+                            '${session['error']}'.isNotEmpty)
+                          Text('Session issue: ${session['error']}'),
+                        for (final previous
+                            in session['history'] as List? ?? [])
+                          if (previous is Map)
+                            Text(
+                              'Previous session ${previous['alias']} closed ${previous['session_closed_at']}',
+                            ),
+                      ],
+                  ],
+                ),
+              ], classes: 'task-activity__person'),
+            if (task['completion_receipt'] is Map)
+              ExpansionTile(
+                title: const Text('Worker completion report'),
+                children: [
+                  SelectableText(
+                    'Reported commit: ${task['completion_receipt']['commit']}',
+                  ),
+                  const Text(
+                    'Worker-reported checks; independent build evidence is on Checks & builds.',
+                  ),
+                  for (final check
+                      in task['completion_receipt']['tests'] as List? ?? [])
+                    SelectableText('$check'),
+                ],
+              ),
+          ],
+          iconName: 'users',
+          count: participants.isEmpty ? null : participants.length,
+          classes: 'task-detail__card',
+        ),
+        ui.card(
+          'Task activity',
+          [
+            if (grouped.isEmpty)
+              ui.emptyState('No activity recorded.', iconName: 'activity'),
+            if (grouped.isNotEmpty)
+              ui.el('ol', [
+                for (final entry in grouped.reversed)
+                  ui.el('li', [
+                    ui.el('span', [
+                      ui.icon(_activityIcon(entry['action'])),
+                    ], classes: 'icon-tile icon-tile--sm'),
+                    ui.el('div', [
+                      () {
+                        final title = Text(
+                          '${activityLabel(entry['action'])}${entry['count'] > 1 ? ' (${entry['count']} records)' : ''}',
+                        );
+                        final subtitle = Text(
+                          '${entry['actor'] == 'automatic_task_policy' ? 'Task automation' : entry['actor']} · ${entry['at']}'
+                          '${shortSha(entry['head_sha']).isEmpty ? (entry['state'] == null ? '' : ' · ${entry['state']}') : ' · ${shortSha(entry['head_sha'])}'}',
+                        );
+                        return onOpen == null
+                            ? ui.el('div', [
+                                ui.el('p', [title], classes: 'timeline__text'),
+                                ui.el('p', [
+                                  subtitle,
+                                ], classes: 'timeline__time'),
+                              ])
+                            : dom.button(
+                                [
+                                  ui.el('span', [
+                                    title,
+                                  ], classes: 'timeline__text'),
+                                  ui.el('span', [
+                                    subtitle,
+                                  ], classes: 'timeline__time'),
+                                ],
+                                type: dom.ButtonType.button,
+                                classes: 'task-activity__entry',
+                                onClick: () =>
+                                    onOpen!(activitySection(entry['action'])),
+                              );
+                      }(),
+                    ]),
+                  ], classes: 'timeline__item'),
+              ], classes: 'timeline timeline--trail task-activity__timeline'),
+            ExpansionTile(
+              title: const Text('Retained audit records (up to 500)'),
+              children: [
+                for (final entry in task['audit'] as List? ?? [])
+                  SelectableText('$entry'),
               ],
             ),
-          ),
-        if (task['completion_receipt'] is Map)
-          ExpansionTile(
-            title: const Text('Worker completion report'),
-            children: [
-              SelectableText(
-                'Reported commit: ${task['completion_receipt']['commit']}',
-              ),
-              const Text(
-                'Worker-reported checks; independent build evidence is on Checks & builds.',
-              ),
-              for (final check
-                  in task['completion_receipt']['tests'] as List? ?? [])
-                SelectableText('$check'),
-            ],
-          ),
-        const SizedBox(height: 16),
-        Text('Task activity', style: Theme.of(context).textTheme.titleLarge),
-        if (grouped.isEmpty) const Text('No activity recorded.'),
-        for (final entry in grouped.reversed)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon('circle_outlined', size: 20),
-            onTap: onOpen == null
-                ? null
-                : () => onOpen!(activitySection(entry['action'])),
-            trailing: onOpen == null ? null : const Icon('chevron_right'),
-            title: Text(
-              '${activityLabel(entry['action'])}${entry['count'] > 1 ? ' (${entry['count']} records)' : ''}',
-            ),
-            subtitle: Text(
-              '${entry['actor'] == 'automatic_task_policy' ? 'Task automation' : entry['actor']} \u00b7 ${entry['at']}'
-              '${shortSha(entry['head_sha']).isEmpty ? (entry['state'] == null ? '' : ' \u00b7 ${entry['state']}') : ' \u00b7 ${shortSha(entry['head_sha'])}'}',
-            ),
-          ),
-        ExpansionTile(
-          title: const Text('Retained audit records (up to 500)'),
-          children: [
-            for (final entry in task['audit'] as List? ?? [])
-              SelectableText('$entry'),
           ],
+          iconName: 'activity',
+          count: grouped.isEmpty ? null : grouped.length,
+          classes: 'task-detail__card',
         ),
       ],
     );
   }
 }
+
+/// A monochrome lead icon for an activity entry, by the section it opens.
+String _activityIcon(Object? action) => switch (activitySection(action)) {
+  'Changes' => 'git-commit-horizontal',
+  'Checks & builds' => 'circle-check',
+  'Activity & agents' => 'bot',
+  _ => 'circle-dot',
+};

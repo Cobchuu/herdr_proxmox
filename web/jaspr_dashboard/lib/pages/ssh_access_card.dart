@@ -1,5 +1,6 @@
 import 'operations_support.dart';
 import 'dashboard_access_controls.dart';
+import 'ops_ui.dart';
 
 class SshAccessCard extends StatefulComponent {
   const SshAccessCard({super.key});
@@ -40,20 +41,49 @@ class _SshState extends OperationsState<SshAccessCard> {
       });
   });
   @override
-  Component build(BuildContext context) => card('SSH access (optional)', [
-    paragraph(
-      'Use the dashboard directly on your LAN. Add your computer’s public key for SSH access to agent work terminals. The login user is herdr.',
+  Component build(BuildContext context) => el('div', [
+    card(
+      'SSH access (optional)',
+      [
+        paragraph(
+          'Use the dashboard directly on your LAN. Add your computer’s public key for SSH access to agent work terminals. The login user is herdr.',
+        ),
+        facts([
+          ('Login user', mono('herdr')),
+          (
+            'Public keys',
+            count == null
+                ? none()
+                : text(
+                    '$count SSH public key${count == 1 ? '' : 's'} configured',
+                  ),
+          ),
+        ]),
+        textarea(
+          'SSH public key (.pub)',
+          publicKey,
+          (value) => publicKey = value,
+        ),
+        button(
+          busy ? 'Adding key…' : 'Add SSH public key',
+          add,
+          primary: true,
+          disabled: busy,
+          iconName: 'plus',
+        ),
+        feedback(),
+      ],
+      iconName: 'key-round',
+      actions: [
+        if (count != null)
+          pill(
+            count! > 0 ? 'Key configured' : 'No keys',
+            tone: count! > 0 ? 'success' : 'neutral',
+            shape: count! > 0 ? 'filled' : 'hollow',
+          ),
+      ],
+      classes: 'ssh-card',
     ),
-    if (count != null)
-      paragraph('$count SSH public key${count == 1 ? '' : 's'} configured'),
-    textarea('SSH public key (.pub)', publicKey, (value) => publicKey = value),
-    button(
-      busy ? 'Adding key…' : 'Add SSH public key',
-      add,
-      primary: true,
-      disabled: busy,
-    ),
-    feedback(),
     DashboardAccessControls(keyCount: count ?? 0),
-  ]);
+  ], classes: 'access-grid');
 }

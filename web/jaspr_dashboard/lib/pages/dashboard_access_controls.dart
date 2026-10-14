@@ -1,5 +1,6 @@
 import 'package:web/web.dart' as web;
 import 'operations_support.dart';
+import 'ops_ui.dart';
 
 class DashboardAccessControls extends StatefulComponent {
   const DashboardAccessControls({super.key, required this.keyCount});
@@ -88,32 +89,63 @@ class _AccessState extends OperationsState<DashboardAccessControls> {
   }
 
   @override
-  Component build(BuildContext context) => card('Dashboard access', [
-    if (mode != null)
+  Component build(BuildContext context) => card(
+    'Dashboard access',
+    [
       paragraph(
-        'Current mode: ${mode == 'ssh' ? 'SSH only' : 'Local network'}${pending == null ? '' : ' · switching to $pending'}',
+        'SSH keys protect SSH login. Choose whether the dashboard also requires an SSH tunnel.',
       ),
-    paragraph(
-      'SSH keys protect SSH login. Choose whether the dashboard also requires an SSH tunnel.',
-    ),
-    actions([
-      button(
-        'Allow LAN access',
-        () => change('lan'),
-        disabled: busy || pending != null || mode == null || mode == 'lan',
-      ),
-      button(
-        'Require SSH tunnel',
-        () => change('ssh'),
-        disabled:
-            busy ||
-            pending != null ||
-            mode == null ||
-            mode == 'ssh' ||
-            component.keyCount < 1,
-      ),
-      button('Refresh access status', load, disabled: busy),
-    ]),
-    feedback(),
-  ]);
+      if (mode != null)
+        facts([
+          ('Current mode', text(mode == 'ssh' ? 'SSH only' : 'Local network')),
+          if (pending != null) ('Switching to', text(pending)),
+        ]),
+      actions([
+        button(
+          'Allow LAN access',
+          () => change('lan'),
+          disabled: busy || pending != null || mode == null || mode == 'lan',
+          iconName: 'wifi',
+        ),
+        button(
+          'Require SSH tunnel',
+          () => change('ssh'),
+          disabled:
+              busy ||
+              pending != null ||
+              mode == null ||
+              mode == 'ssh' ||
+              component.keyCount < 1,
+          iconName: 'lock',
+        ),
+        button(
+          'Refresh access status',
+          load,
+          disabled: busy,
+          variant: 'ghost',
+          iconName: 'refresh-cw',
+        ),
+      ]),
+      if (mode != 'ssh' && component.keyCount < 1)
+        meta(
+          'Add an SSH public key before requiring an SSH tunnel.',
+          iconName: 'info',
+        ),
+      feedback(),
+    ],
+    iconName: 'shield-check',
+    actions: [
+      if (mode != null)
+        pill(
+          pending != null
+              ? 'Switching'
+              : mode == 'ssh'
+              ? 'SSH only'
+              : 'Local network',
+          tone: pending != null ? 'warning' : 'neutral',
+          shape: pending != null ? 'filled' : 'hollow',
+        ),
+    ],
+    classes: 'access-card',
+  );
 }

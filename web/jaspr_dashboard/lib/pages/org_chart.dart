@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:web/web.dart' as web;
 import '../ui.dart';
 import 'org_forms.dart' show Json;
+import 'org_ui.dart';
 
 const chartNodeWidth = 232.0;
 const chartNodeHeight = 144.0;
@@ -322,49 +323,18 @@ class _OrgChartState extends State<OrgChart> {
     return 'M ${parent.$1 + chartNodeWidth / 2} $fromY V $middle H ${child.$1 + chartNodeWidth / 2} V $toY';
   }
 
-  String activity(Json? live) =>
-      switch (live?['agent_status'] ?? live?['state']) {
-        'idle' || 'done' => 'idle',
-        'working' || 'running' || 'busy' || 'thinking' => 'working',
-        'blocked' => 'attention',
-        _ => 'offline',
-      };
-  String activityLabel(String value) => switch (value) {
-    'idle' => 'Idle',
-    'working' => 'Working',
-    'attention' => 'Requires attention',
-    _ => 'No live session',
-  };
-  String activityTone(String value) => switch (value) {
-    'idle' => 'success',
-    'working' => 'info',
-    'attention' => 'warning',
-    _ => 'neutral',
-  };
   String role(Json p) => p['coordination_binding'] == 'used'
       ? 'Used by coordination'
       : p['coordination_binding'] == 'inactive'
       ? 'Inactive coordinator profile'
       : '${p['role'] ?? 'Agent'}';
-  String roleKind(Json p) {
-    final value = role(p).toLowerCase();
-    return value.contains('coordinat')
-        ? 'coordinator'
-        : value.contains('review')
-        ? 'reviewer'
-        : value.contains('lead') || value.contains('manager')
-        ? 'lead'
-        : value.contains('qa') || value.contains('test')
-        ? 'qa'
-        : 'developer';
-  }
 
   Component agentNode(Json profile) {
     final id = '${profile['id']}', pos = layout.positions[id]!;
     final live = component.agents
         .where((a) => a['profile_id'] == profile['id'])
         .firstOrNull;
-    final state = activity(live);
+    final state = liveActivity(live);
     final run = component.jobs
         .where(
           (j) =>
@@ -382,17 +352,11 @@ class _OrgChartState extends State<OrgChart> {
       'article',
       [
         el('div', [
-          el(
-            'span',
-            [
-              text(
-                name.trim().isEmpty
-                    ? '?'
-                    : name.trim().substring(0, 1).toUpperCase(),
-              ),
-            ],
+          agentTile(
+            name,
+            role: role(profile),
+            live: state == 'working',
             classes: 'org-chart-node__avatar',
-            attributes: {'data-role': roleKind(profile), 'aria-hidden': 'true'},
           ),
           el('div', [
             el(
@@ -423,23 +387,7 @@ class _OrgChartState extends State<OrgChart> {
             ),
         ], classes: 'org-chart-node__head'),
         el('div', [
-          el(
-            'span',
-            [
-              el(
-                'span',
-                [],
-                classes: 'org-chart-node__dot',
-                attributes: {'aria-hidden': 'true'},
-              ),
-              text(activityLabel(state)),
-            ],
-            classes: 'status',
-            attributes: {
-              'data-tone': activityTone(state),
-              'data-activity': state,
-            },
-          ),
+          activityPill(state),
           el('span', [
             text(profile['runtime'] ?? 'CLI'),
           ], classes: 'org-chart-node__runtime'),
@@ -501,12 +449,11 @@ class _OrgChartState extends State<OrgChart> {
   Component groupNode(Json group) {
     final pos = layout.groupPositions['${group['id']}']!,
         members = group['members'] as List? ?? [];
-    final names = members
-        .map(
-          (id) =>
-              profiles.where((p) => p['id'] == id).firstOrNull?['name'] ?? id,
-        )
-        .join(', ');
+    final people = [
+      for (final id in members)
+        profiles.where((p) => p['id'] == id).firstOrNull ?? {'name': id},
+    ];
+    final names = people.map((p) => p['name']).join(', ');
     return el(
       'article',
       [
@@ -514,8 +461,8 @@ class _OrgChartState extends State<OrgChart> {
           el(
             'span',
             [icon('message-square')],
-            classes: 'org-chart-node__avatar',
-            attributes: {'data-role': 'coordinator', 'aria-hidden': 'true'},
+            classes: 'org-chart-node__avatar org-chart-node__avatar--group',
+            attributes: {'aria-hidden': 'true'},
           ),
           el('div', [
             el(
@@ -543,7 +490,21 @@ class _OrgChartState extends State<OrgChart> {
         ),
         el(
           'div',
-          [text(names.isEmpty ? 'No selected members' : names)],
+          [
+            if (people.isNotEmpty)
+              el(
+                'span',
+                [
+                  for (final p in people.take(6))
+                    agentTile(p['name'], role: p['role'], size: 'xs'),
+                ],
+                classes: 'avatar-stack org-chart-node__stack',
+                attributes: {'aria-hidden': 'true'},
+              ),
+            el('span', [
+              text(names.isEmpty ? 'No selected members' : names),
+            ], classes: 'org-chart-node__names'),
+          ],
           classes: 'org-chart-node__members',
           attributes: {'title': names},
         ),
@@ -561,33 +522,55 @@ class _OrgChartState extends State<OrgChart> {
   Component build(BuildContext context) {
     final edges = layout.reportingProfiles(profiles),
         empty = profiles.isEmpty && component.groups.isEmpty;
+    Component control(String label, String iconName, void Function() onTap) =>
+        el(
+          'button',
+          [icon(iconName), text(label)],
+          classes: 'btn-group__btn',
+          attributes: {'type': 'button', 'title': label},
+          events: {'click': (_) => onTap()},
+        );
     return el('section', [
       el('div', [
         el('div', [
-          el('strong', [text('Organization chart')]),
+          el('h2', [
+            icon('network'),
+            text('Organization chart'),
+          ], classes: 'org-chart__title'),
           el('span', [
             text(
               '${profiles.length} agents · ${edges.length} reporting ${edges.length == 1 ? 'line' : 'lines'} · ${component.groups.length} groups',
             ),
           ], classes: 'org-chart__summary'),
         ], classes: 'org-chart__heading'),
-        el('div', [
-          button('Zoom out', () => zoomButton(-.15)),
-          badge('${(zoom * 100).round()}%'),
-          button('Zoom in', () => zoomButton(.15)),
-          button('Fit chart', fit),
-          button(
-            'Reset',
-            () => zoomAt(1, measuredWidth / 2, measuredHeight / 2),
-          ),
-        ], classes: 'org-chart__controls'),
+        el(
+          'div',
+          [
+            control('Zoom out', 'zoom-out', () => zoomButton(-.15)),
+            el(
+              'output',
+              [text('${(zoom * 100).round()}%')],
+              classes: 'btn-group__readout',
+              attributes: {'aria-live': 'polite', 'aria-label': 'Zoom level'},
+            ),
+            control('Zoom in', 'zoom-in', () => zoomButton(.15)),
+            control('Fit chart', 'scan', fit),
+            control(
+              'Reset',
+              'rotate-ccw',
+              () => zoomAt(1, measuredWidth / 2, measuredHeight / 2),
+            ),
+          ],
+          classes: 'btn-group org-chart__controls',
+          attributes: {'role': 'group', 'aria-label': 'Chart zoom'},
+        ),
       ], classes: 'org-chart__toolbar'),
       el(
         'div',
         [
           if (empty)
             el('div', [
-              icon('network'),
+              el('span', [icon('network')], classes: 'empty__icon'),
               el('strong', [text('Build your organization')]),
               el('p', [text('Hire your first agent to start the chart.')]),
             ], classes: 'org-chart__empty')

@@ -1,0 +1,267 @@
+/* ==========================================================================
+   Builds & deployments page (Phase 2 design, template css/builds.css).
+   builds_page.dart + build_timeline.dart + update_card.dart render:
+   page header, running build card (template next-build card), build
+   cadence strip (only when runs carry start times), vertical build
+   timeline (rail + build cards) and the dashboard updates card.
+   Tokens only. Containers: next-card, history, build (inline-size).
+   Shared pieces (card, pill, dot, dl, callout, legend, mono-chip, btn,
+   empty state) come from styles.css, components.css and composites.css.
+   ========================================================================== */
+
+.builds-page { gap: var(--space-6); }
+.builds-page > .page-header { margin-bottom: 0; }
+:where(.builds-page :is(.callout, .next-card, .history, .build-card, .cadence, .updates-card)) :is(h2, h3, p) { margin: 0; } /* (0,0,1): component margins win */
+
+/* ---- Action feedback (operations_support feedback(): Working… / message / error) */
+.builds-feedback:not(:has(p)) { display: none; }
+:is(.builds-feedback, .updates-card) [aria-live="polite"] { display: flex; flex-direction: column; gap: var(--space-2); }
+:is(.builds-feedback, .updates-card) [aria-live="polite"]:empty { display: none; }
+:is(.builds-feedback, .updates-card) [aria-live="polite"] > p {
+  margin: 0; padding: var(--space-2-5) var(--space-4); border-radius: var(--radius-md);
+  background: var(--color-info-bg); border: 1px solid color-mix(in srgb, var(--color-info) 40%, transparent);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text); overflow-wrap: anywhere;
+}
+:is(.builds-feedback, .updates-card) [aria-live="polite"] > p[role="status"] { padding: 0; background: none; border: 0; color: var(--color-text-secondary); }
+:is(.builds-feedback, .updates-card) [aria-live="polite"] > p.error {
+  background: var(--color-danger-bg); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); color: var(--color-danger-fg);
+}
+
+/* ---- Running build: the template's next-build card ------------------------
+   Header (accent rocket tile, overline, mono build id + mode pill, commit +
+   package meta, "Resolve source identity"). Body: build identity | deployment;
+   one column below 640px of card width.                                     */
+.next-card { container: next-card / inline-size; }
+.next-card__header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4); padding: var(--space-5); border-bottom: 1px solid var(--color-border); }
+.next-card__heading { flex: 1 1 240px; min-width: 0; }
+.next-card__title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); margin-top: var(--space-0-5); }
+.next-card__version {
+  min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono);
+  font-size: var(--text-xl-size); line-height: var(--text-xl-leading); font-weight: var(--weight-semibold);
+}
+.next-card__meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); margin-top: var(--space-1-5);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary);
+}
+.next-card__body { display: grid; grid-template-columns: minmax(0, 1fr); }
+.next-card__section { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-3); min-width: 0; padding: var(--space-5); }
+.next-card__section > :is(.dl, .callout) { align-self: stretch; }
+.next-card__section + .next-card__section { border-top: 1px solid var(--color-border); }
+.next-card__section-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+@container next-card (min-width: 640px) {
+  .next-card__body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .next-card__section + .next-card__section { border-top: 0; border-left: 1px solid var(--color-border); }
+}
+
+/* Mono commit chip (running build meta, build card head) */
+.sha-chip { gap: var(--space-1-5); }
+.sha-chip > .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); }
+.builds-page .dl .mono { font-size: var(--text-xs-size); line-height: var(--text-sm-leading); }
+
+/* ---- Cadence strip -------------------------------------------------------------
+   A time axis from the oldest start's day to the end of today. Items sit at
+   left: --x; Dart sets --row (label row), --shift (label kept inside the
+   axis) and --rows (axis height). The scroller is row-reverse, so a narrow
+   screen opens on the most recent builds.                                   */
+.cadence__header { flex-wrap: wrap; align-items: flex-start; padding-top: var(--space-4); }
+.cadence__scroll { display: flex; flex-direction: row-reverse; overflow-x: auto; padding: var(--space-2) var(--space-5) var(--space-5); scrollbar-width: thin; }
+.cadence__axis {
+  --line-y: 44px; --row-h: 20px;
+  position: relative; flex: 1 0 auto; min-width: 520px; margin-inline: var(--space-4);
+  height: calc(var(--line-y) + var(--space-3) + var(--rows, 1) * var(--row-h));
+}
+.cadence__tick { position: absolute; left: var(--x); top: 0; height: var(--line-y); }
+.cadence__tick::before { content: ""; position: absolute; left: 0; top: var(--space-5); bottom: 0; border-left: 1px solid var(--color-border); }
+.cadence__tick-label, .cadence__today-label {
+  position: absolute; top: 0; left: 0; transform: translateX(-50%); white-space: nowrap;
+  font-size: var(--text-2xs-size); line-height: var(--text-2xs-leading); color: var(--color-text-tertiary); font-variant-numeric: tabular-nums;
+}
+.cadence__line { position: absolute; left: 0; width: var(--today); top: calc(var(--line-y) - 1px); height: 2px; border-radius: var(--radius-full); background: var(--color-edge); }
+.cadence__line--future {
+  left: var(--today); right: 0; width: auto;
+  background: repeating-linear-gradient(to right, var(--color-edge) 0 var(--dash-len), transparent var(--dash-len) calc(2 * var(--dash-len)));
+}
+.cadence__today { position: absolute; left: var(--today); top: 0; height: calc(var(--line-y) + var(--space-3)); }
+.cadence__today::before { content: ""; position: absolute; left: -1px; top: var(--space-4); bottom: 0; border-left: 2px solid var(--color-text-secondary); border-radius: 1px; }
+.cadence__today-label { font-weight: var(--weight-semibold); color: var(--color-text); }
+.cadence__marks { position: absolute; inset: 0; }
+.cadence__item { position: absolute; left: var(--x); top: calc(var(--line-y) - var(--space-2)); }
+.cadence__mark { position: absolute; left: 0; top: 0; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%); }
+.cadence__dot { display: grid; place-items: center; width: var(--space-4); height: var(--space-4); border-radius: var(--radius-full); background: var(--color-surface); }
+.cadence__dot > .dot--hollow { border-width: 2px; }
+.cadence__stem { width: 1px; height: calc(var(--space-1) + var(--row, 0) * var(--row-h)); background: var(--color-border-strong); }
+.cadence__label {
+  transform: translateX(var(--shift, 0px)); padding: 1px var(--space-1); border-radius: var(--radius-xs);
+  font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); font-weight: var(--weight-medium);
+  color: var(--color-text-secondary); white-space: nowrap;
+}
+.cadence__mark[data-status="running"] .cadence__label { color: var(--color-accent-text); }
+
+/* ---- Build timeline ---------------------------------------------------------------
+   li.build-entry = [when] [rail + marker] [build card]; the rail line runs
+   through each li (its padding is the gap) and data-edge trims it to the
+   first and last markers. Without start times the when column folds away. */
+.history { container: history / inline-size; display: flex; flex-direction: column; gap: var(--space-4); }
+.history__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); }
+.history__title { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-lg-size); line-height: var(--text-lg-leading); font-weight: var(--weight-semibold); }
+.history__title > :is(.icon, .count) { align-self: center; }
+.history__title > .icon { color: var(--color-text-secondary); }
+.history__subtitle { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); }
+
+.build-timeline { --when-w: 84px; --rail-w: 20px; --marker-y: 28px; --gap: var(--space-4); display: flex; flex-direction: column; }
+.build-entry {
+  --dashes: repeating-linear-gradient(to bottom, var(--color-border-strong) 0 var(--dash-len), transparent var(--dash-len) calc(2 * var(--dash-len)));
+  position: relative; display: grid; grid-template-columns: var(--when-w) var(--rail-w) minmax(0, 1fr);
+  column-gap: var(--space-3); padding-bottom: var(--gap);
+}
+.build-entry:last-child { padding-bottom: 0; }
+.build-timeline--undated .build-entry { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+.build-entry__when { display: flex; flex-direction: column; align-items: flex-end; padding-top: calc(var(--marker-y) - var(--text-base-leading) / 2); text-align: right; }
+.build-entry__day { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.build-entry__time { font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.build-entry__rail { position: relative; display: flex; justify-content: center; }
+.build-entry__rail::before {
+  content: ""; position: absolute; left: calc(50% - 1px); width: 2px; top: 0; bottom: calc(-1 * var(--gap)); background: var(--color-border-strong);
+}
+.build-entry[data-status="queued"] > .build-entry__rail::before { background: var(--dashes); } /* not built yet */
+[data-edge~="first"] > .build-entry__rail::before { top: var(--marker-y); }
+[data-edge~="last"] > .build-entry__rail::before { bottom: auto; height: var(--marker-y); }
+[data-edge~="first"][data-edge~="last"] > .build-entry__rail::before { content: none; }
+.build-entry__marker {
+  position: relative; z-index: 1; display: grid; place-items: center; width: var(--rail-w); height: var(--rail-w);
+  margin-top: calc(var(--marker-y) - var(--rail-w) / 2); border-radius: var(--radius-full); background: var(--color-canvas);
+}
+.build-entry__marker > .dot--hollow { border-width: 2px; }
+.build-entry[data-status="running"] .build-entry__marker > .dot { box-shadow: 0 0 0 3px var(--color-accent-subtle); }
+
+/* Build card */
+.build-card {
+  --pad-x: var(--space-5);
+  container: build / inline-size; position: relative; min-width: 0; padding: var(--space-4) var(--pad-x);
+  background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs);
+}
+.build-card__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); min-height: var(--space-6); }
+.build-card__title { font-family: var(--font-mono); font-size: var(--text-md-size); line-height: var(--text-md-leading); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.build-card__sha { margin-left: auto; }
+.build-card__facts {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-5); margin-top: var(--space-3);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); font-variant-numeric: tabular-nums;
+}
+.build-card__fact { display: inline-flex; align-items: center; gap: var(--space-1-5); }
+.build-card__fact > .icon, .build-card__note > .icon { width: var(--icon-sm); height: var(--icon-sm); flex: none; color: var(--color-text-tertiary); }
+.build-card__fact[data-tone] > .icon { color: var(--tone-fg); }
+.build-card__failure {
+  display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--tone-solid) 40%, transparent); border-radius: var(--radius-md); background: var(--tone-bg);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); overflow-wrap: anywhere;
+}
+.build-card__failure > .icon { flex: none; width: var(--icon-sm); height: var(--icon-sm); margin-top: var(--space-0-5); color: var(--tone-fg); }
+.build-card__failure strong { font-weight: var(--weight-semibold); color: var(--tone-fg); }
+.build-card__note { display: flex; align-items: flex-start; gap: var(--space-1-5); margin-top: var(--space-3); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.build-card__note > .icon { margin-top: var(--space-0-5); }
+.build-card__evidence { margin-top: var(--space-4); }
+
+/* Validation steps (<details>, open for the newest build and any failure) */
+.build-card__steps { margin: var(--space-4) calc(-1 * var(--pad-x)) 0; border-top: 1px solid var(--color-border); }
+.build-card__summary {
+  display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--pad-x);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); font-weight: var(--weight-medium);
+}
+.build-card__steps[open] > .build-card__summary { margin-bottom: 0; }
+.build-card__summary:hover { background: var(--color-hover); }
+.build-card__summary:focus-visible { outline-offset: -2px; }
+.build-card__summary > .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); }
+.build-card__summary-hint { font-weight: var(--weight-regular); color: var(--color-text-tertiary); }
+.build-steps { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; column-gap: var(--space-5); }
+.build-step {
+  display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center;
+  padding: var(--space-2) var(--pad-x); border-top: 1px solid var(--color-border); font-size: var(--text-sm-size); line-height: var(--text-sm-leading);
+}
+.build-step__main { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; }
+.build-step__name { font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+.build-step__summary { font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.build-step__num { font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Download / deploy row: the card's footer */
+.build-card__actions {
+  display: flex; align-items: flex-end; gap: var(--space-2) var(--space-4);
+  margin: var(--space-4) calc(-1 * var(--pad-x)) calc(-1 * var(--space-4)); padding: var(--space-3) var(--pad-x);
+  border-top: 1px solid var(--color-border);
+}
+.build-card__steps + .build-card__actions { margin-top: 0; }
+.build-card__downloads { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.build-card__deploy { margin-left: auto; }
+.build-card__progress { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); }
+
+@container build (max-width: 599.98px) {
+  .build-steps { display: flex; flex-direction: column; }
+  .build-step { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1-5) var(--space-3); }
+  .build-step__main { flex-basis: 100%; }
+}
+@container build (max-width: 479.98px) {
+  .build-card .dl { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-0-5); }
+  .build-card .dl > div:not(:first-child) > dt { margin-top: var(--space-2); }
+  .build-card__actions { flex-direction: column; align-items: stretch; }
+  .build-card__downloads > .btn { flex: 1 1 auto; }
+  .build-card__deploy { margin-left: 0; }
+}
+/* Narrow timeline: the date column folds into the card (the date fact shows) */
+@container history (max-width: 599.98px) {
+  .build-entry, .build-timeline--undated .build-entry { grid-template-columns: var(--rail-w) minmax(0, 1fr); column-gap: var(--space-2-5); }
+  .build-entry__when { display: none; }
+  .build-card { --pad-x: var(--space-4); }
+}
+@container history (min-width: 600px) {
+  .build-card__date { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } /* the rail shows it */
+}
+
+/* ---- Dashboard updates ------------------------------------------------------------- */
+.updates-card .card__header { flex-wrap: wrap; }
+.updates-card .card__body { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-4); }
+.updates-card .card__body > * { margin: 0; }
+.updates-card__versions dd .mono { font-size: var(--text-sm-size); }
+.updates-card__notes {
+  max-height: 12rem; overflow: auto; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-surface-sunken); font-size: var(--text-sm-size); line-height: var(--text-sm-leading);
+  color: var(--color-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.updates-card .card__body > .overline + .updates-card__notes { margin-top: calc(-1 * var(--space-2)); }
+.updates-card .card__body > .updates-alpha { margin-inline: calc(-1 * var(--space-5)); padding: 0 var(--space-5); border-top: 1px solid var(--color-border); }
+.updates-alpha__summary { gap: var(--space-2); min-height: var(--space-12); font-weight: var(--weight-medium); }
+.updates-alpha[open] > .updates-alpha__summary { margin-bottom: 0; }
+.updates-alpha__summary > .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); }
+.updates-alpha__body { display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: var(--space-5); }
+.updates-alpha__list { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.updates-alpha__item { display: grid; grid-template-columns: var(--space-4) minmax(0, 1fr); align-items: center; gap: var(--space-0-5) var(--space-3); padding: var(--space-2-5) var(--space-3); }
+.updates-alpha__item + .updates-alpha__item { border-top: 1px solid var(--color-border); }
+.updates-alpha__item > .dot { grid-row: 1; justify-self: center; }
+.updates-alpha__item[data-selected="true"] { background: var(--color-selected); box-shadow: inset 2px 0 0 var(--color-accent); }
+.updates-alpha__head, .updates-alpha__notes { grid-column: 2; min-width: 0; }
+.updates-alpha__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.updates-alpha__head > .mono { font-size: var(--text-sm-size); font-weight: var(--weight-medium); color: var(--color-text); overflow-wrap: anywhere; }
+.updates-alpha__notes {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary); overflow-wrap: anywhere;
+}
+.updates-alpha__pick { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3); }
+.updates-alpha__pick > .field { flex: 1 1 240px; max-width: 360px; margin: 0; }
+
+/* ---- Phones -------------------------------------------------------------------------- */
+@media (max-width: 639.98px) {
+  .next-card__header > .btn { width: 100%; }
+  .next-card__header, .next-card__section { padding: var(--space-4); }
+  .cadence__scroll { padding-inline: var(--space-4); }
+  .updates-card .card__body > .updates-alpha { margin-inline: calc(-1 * var(--space-4)); padding-inline: var(--space-4); }
+  .updates-alpha__pick > :is(.field, .btn) { flex-basis: 100%; max-width: none; }
+  .updates-card .card__body > .actions > .btn { flex: 1 1 auto; }
+}
+
+/* ---- Forced colors: lines and markers drawn with backgrounds ----------------------- */
+@media (forced-colors: active) {
+  .cadence__line, .cadence__stem, .build-entry__rail::before { forced-color-adjust: none; background: CanvasText; }
+  .cadence__line--future { background: repeating-linear-gradient(to right, CanvasText 0 var(--dash-len), transparent var(--dash-len) calc(2 * var(--dash-len))); }
+  .build-entry { --dashes: repeating-linear-gradient(to bottom, CanvasText 0 var(--dash-len), transparent var(--dash-len) calc(2 * var(--dash-len))); }
+  .build-entry[data-status="queued"] > .build-entry__rail::before { background: var(--dashes); }
+  .cadence__dot, .build-entry__marker { forced-color-adjust: none; background: Canvas; }
+  .updates-alpha__item[data-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+}

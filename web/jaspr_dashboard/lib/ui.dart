@@ -20,43 +20,255 @@ Component el(
   children: children,
 );
 
+/// Phase 2 button. [variant] is primary, secondary, ghost or danger
+/// (`primary: true` is kept for existing callers). An [iconName] is drawn
+/// before the label; the label stays the button's whole text content.
 Component button(
   String label,
   void Function()? onClick, {
   bool disabled = false,
   bool primary = false,
   String? classes,
+  String? iconName,
+  String? variant,
+  bool small = false,
 }) => dom.button(
-  [text(label)],
+  [if (iconName != null) icon(iconName), text(label)],
   type: dom.ButtonType.button,
   disabled: disabled || onClick == null,
-  classes:
-      'btn ${primary ? 'btn--primary' : 'btn--secondary'} ${classes ?? ''}',
+  classes: [
+    'btn',
+    switch (variant ?? (primary ? 'primary' : 'secondary')) {
+      'danger' => 'btn--secondary btn--danger',
+      final name => 'btn--$name',
+    },
+    if (small) 'btn--sm',
+    ?classes,
+  ].join(' '),
   onClick: onClick,
 );
+
+/// Icon-only button; [label] is its accessible name, tooltip and text content.
+Component iconButton(
+  String label,
+  String iconName,
+  void Function()? onClick, {
+  bool disabled = false,
+  String? classes,
+  bool small = false,
+  Map<String, String> attributes = const {},
+}) => dom.button(
+  [
+    icon(iconName),
+    el('span', [text(label)], classes: 'visually-hidden'),
+  ],
+  type: dom.ButtonType.button,
+  disabled: disabled || onClick == null,
+  classes: [
+    'btn btn--ghost btn--icon',
+    if (small) 'btn--sm',
+    ?classes,
+  ].join(' '),
+  attributes: {'title': label, ...attributes},
+  onClick: onClick,
+);
+
+/// Phase 2 card: header with an optional icon, count and subtitle.
 Component card(
   String title,
   List<Component> children, {
   List<Component> actions = const [],
-}) => el('section', [
+  String? iconName,
+  Object? count,
+  String? subtitle,
+  String? classes,
+  String? id,
+}) => el(
+  'section',
+  [
+    el('div', [
+      el('div', [
+        el('h2', [
+          if (iconName != null) icon(iconName),
+          text(title),
+          if (count != null) el('span', [text(count)], classes: 'count'),
+        ], classes: 'card__title'),
+        if (subtitle != null)
+          el('p', [text(subtitle)], classes: 'card__subtitle'),
+      ], classes: 'card__heading'),
+      el('div', actions, classes: 'actions'),
+    ], classes: 'card__header'),
+    el('div', children, classes: 'card__body'),
+  ],
+  classes: ['card', ?classes].join(' '),
+  attributes: {'id': ?id},
+);
+
+/// Phase 2 page header: overline, H1, subtitle and right-aligned actions.
+Component pageHeader(
+  String title, {
+  String? overline,
+  String? subtitle,
+  List<Component> actions = const [],
+}) => el('header', [
   el('div', [
-    el('h2', [text(title)]),
-    el('div', actions, classes: 'actions'),
-  ], classes: 'card__header'),
-  el('div', children, classes: 'card__body'),
-], classes: 'card');
-Component badge(String label, {String tone = 'neutral'}) => el(
+    if (overline != null)
+      el('p', [text(overline)], classes: 'page-header__overline'),
+    el('h1', [text(title)], classes: 'page-header__title'),
+    if (subtitle != null)
+      el('p', [text(subtitle)], classes: 'page-header__subtitle'),
+  ], classes: 'page-header__text'),
+  if (actions.isNotEmpty) el('div', actions, classes: 'page-header__actions'),
+], classes: 'page-header');
+
+/// Status badge (Phase 2 pill with a tone dot drawn by CSS).
+/// [shape] repeats the state without color: filled (default), hollow,
+/// diamond, dash or none.
+Component badge(String label, {String tone = 'neutral', String? shape}) => el(
   'span',
   [text(label)],
   classes: 'status',
-  attributes: {'data-tone': tone},
+  attributes: {'data-tone': tone, 'data-shape': ?shape},
 );
-Component icon(String name) => el(
+
+/// Status dot whose shape repeats the state without color (WCAG 1.4.1):
+/// working = filled, idle = ring, attention = diamond, offline = dash.
+Component statusDot(String activity, {String? tone}) => el(
+  'span',
+  [],
+  classes: 'status-dot',
+  attributes: {
+    'data-tone':
+        tone ??
+        switch (activity) {
+          'working' => 'success',
+          'attention' => 'danger',
+          _ => 'neutral',
+        },
+    'data-shape': switch (activity) {
+      'working' => 'filled',
+      'attention' => 'diamond',
+      'offline' => 'dash',
+      _ => 'hollow',
+    },
+    'aria-hidden': 'true',
+  },
+);
+
+/// Maps a free-text agent role onto the seven Phase 2 role tints.
+String roleKey(Object? role) {
+  final value = '${role ?? ''}'.toLowerCase();
+  if (value.contains('lead') || value.contains('manager')) return 'lead';
+  if (value.contains('review')) return 'reviewer';
+  if (value.contains('qa') ||
+      value.contains('quality') ||
+      value.contains('test'))
+    return 'qa';
+  if (value.contains('coordinat')) return 'coordinator';
+  if (value.contains('integration')) return 'integration';
+  if (value.contains('worktree')) return 'worktree';
+  return 'developer';
+}
+
+String initials(Object? name) {
+  final words = '${name ?? ''}'
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((word) => word.isNotEmpty)
+      .toList();
+  if (words.isEmpty) return '?';
+  if (words.length == 1)
+    return words.first
+        .substring(0, words.first.length > 1 ? 2 : 1)
+        .toUpperCase();
+  return '${words[0][0]}${words[1][0]}'.toUpperCase();
+}
+
+/// Role-tinted initials tile; [live] draws the "working now" ring.
+Component roleTile(
+  Object? name, {
+  Object? role,
+  String size = '',
+  bool live = false,
+}) => el(
+  'span',
+  [text(initials(name))],
+  classes: [
+    'role-tile',
+    if (size.isNotEmpty) 'role-tile--$size',
+    'live-ring',
+  ].join(' '),
+  attributes: {
+    'data-role': roleKey(role ?? name),
+    'data-live': '$live',
+    'aria-hidden': 'true',
+  },
+);
+
+/// Phase 2 empty state: tinted icon, message and an optional action.
+Component emptyState(
+  String message, {
+  String iconName = 'inbox',
+  List<Component> actions = const [],
+}) => el('div', [
+  el('span', [icon(iconName)], classes: 'empty__icon'),
+  el('p', [text(message)], classes: 'empty__title'),
+  if (actions.isNotEmpty) el('div', actions, classes: 'actions'),
+], classes: 'empty empty-state');
+
+/// Stacked bar with a text legend; [segments] are (label, count, tone).
+Component stackbar(
+  List<(String, int, String)> segments, {
+  String? label,
+  bool legend = true,
+}) {
+  final shown = segments.where((segment) => segment.$2 > 0).toList();
+  return el('div', [
+    el(
+      'div',
+      [
+        for (final segment in shown)
+          el(
+            'span',
+            [],
+            classes: 'stackbar__seg',
+            attributes: {
+              'data-tone': segment.$3,
+              'style': '--seg: ${segment.$2}',
+            },
+          ),
+      ],
+      classes: 'stackbar',
+      attributes: {'aria-hidden': 'true'},
+    ),
+    if (legend)
+      el(
+        'ul',
+        [
+          for (final segment in segments)
+            el('li', [
+              el(
+                'span',
+                [],
+                classes: 'dot',
+                attributes: {'data-tone': segment.$3},
+              ),
+              text(segment.$1),
+              el('span', [text(segment.$2)], classes: 'legend__count'),
+            ], classes: 'legend__item'),
+        ],
+        classes: 'legend',
+        attributes: {'aria-label': ?label},
+      ),
+  ], classes: 'stackbar-block');
+}
+
+Component icon(String name, {String? classes}) => el(
   'svg',
   [
     el('use', [], attributes: {'href': 'icons.svg#i-$name'}),
   ],
-  classes: 'icon',
+  classes: ['icon', ?classes].join(' '),
   attributes: {
     'aria-hidden': 'true',
     'viewBox': '0 0 24 24',

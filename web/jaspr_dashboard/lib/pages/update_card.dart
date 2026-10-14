@@ -1,3 +1,4 @@
+import 'build_timeline.dart';
 import 'operations_support.dart';
 
 class UpdateCard extends StatefulComponent {
@@ -78,86 +79,180 @@ class _UpdateState extends OperationsState<UpdateCard> {
           error = 'No installable alpha builds are available.';
       });
   });
-  @override
-  Component build(BuildContext context) => card('Dashboard updates', [
-    paragraph(
-      'Stable releases from Ultarius/herdr_proxmox. Updates are installed when you choose.',
-    ),
-    if (info != null) ...[
-      paragraph(
-        'Installed: ${info!['installed']} · Latest: ${info!['latest'] ?? 'Unavailable'}',
-      ),
-      badge('${info!['state']}'),
-      if (info!['check_diagnostic'] != null)
-        paragraph(info!['check_diagnostic'])
-      else if (info!['check_error'] != null)
-        paragraph('Release lookup unavailable: ${info!['check_error']}'),
-      if (info!['check_error'] != null && info!['check_failures'] != null)
-        paragraph(
-          'Release lookup failed ${info!['check_failures']} times since ${info!['check_failed_since'] ?? 'the first failed check'}. Counts reset when the gateway restarts.',
+
+  /// Lookup, completion and capability messages as template callouts.
+  List<Component> _messages(Map<String, dynamic> info) => [
+    if (info['check_diagnostic'] != null || info['check_error'] != null)
+      callout('warning', 'triangle-alert', [
+        text(
+          info['check_diagnostic'] ??
+              'Release lookup unavailable: ${info['check_error']}',
         ),
-      if (info!['state'] == 'complete')
-        paragraph(
-          info!['check_error'] == null
-              ? 'Update complete. Reload to use the new dashboard.'
-              : 'The previous installation completed. The current release check failed.',
-        ),
-      if (info!['error'] != null) paragraph(info!['error']),
-      if (info!['deployment_mode'] == 'local')
-        paragraph(
-          'Release installation is disabled while a local build is deployed.',
-        )
-      else if (info!['supported'] != true)
-        paragraph(
-          'Install the updater service before using dashboard updates.',
-        ),
-      if ('${info!['notes'] ?? ''}'.isNotEmpty) paragraph(info!['notes']),
-    ],
-    actions([
-      button('Check for updates', () => check(force: true), disabled: busy),
-      button(
-        'Install update',
-        install,
-        primary: true,
-        disabled:
-            busy ||
-            info?['available'] != true ||
-            info?['supported'] != true ||
-            queued,
-      ),
-    ]),
-    disclosure('Alpha builds · feature branch testing', [
-      button('Browse alpha builds', loadAlphas, disabled: busy),
-      if (alphas.isNotEmpty) ...[
-        select(
-          'Feature branch alpha build',
-          alphaVersion ?? '',
-          {
-            '': 'Select build',
-            for (final release in alphas)
-              '${release['version']}': '${release['version']}',
-          },
-          (value) =>
-              setState(() => alphaVersion = value.isEmpty ? null : value),
-        ),
-        if (alphaVersion != null)
-          paragraph(
-            alphas
-                .where((r) => r['version'] == alphaVersion)
-                .firstOrNull?['notes'],
+        if (info['check_error'] != null && info['check_failures'] != null)
+          text(
+            'Release lookup failed ${info['check_failures']} times since ${info['check_failed_since'] ?? 'the first failed check'}. Counts reset when the gateway restarts.',
           ),
+      ]),
+    if (info['state'] == 'complete')
+      info['check_error'] == null
+          ? callout('success', 'circle-check', [
+              text('Update complete. Reload to use the new dashboard.'),
+            ])
+          : callout('info', 'info', [
+              text(
+                'The previous installation completed. The current release check failed.',
+              ),
+            ]),
+    if (info['error'] != null)
+      callout('danger', 'octagon-alert', [text(info['error'])]),
+    if (info['deployment_mode'] == 'local')
+      callout('info', 'info', [
+        text(
+          'Release installation is disabled while a local build is deployed.',
+        ),
+      ])
+    else if (info['supported'] != true)
+      callout('warning', 'triangle-alert', [
+        text('Install the updater service before using dashboard updates.'),
+      ]),
+  ];
+
+  /// Alpha channel: browse, a compact list of the builds, pick and install.
+  /// The <details> has no attributes, so refreshes never close it.
+  Component _alphaBuilds() => el('details', [
+    el('summary', [
+      icon('flask-conical'),
+      text('Alpha builds · feature branch testing'),
+    ], classes: 'updates-alpha__summary'),
+    el('div', [
+      actions([
         button(
-          'Install selected alpha',
-          () => install(alpha: true),
-          primary: true,
+          'Browse alpha builds',
+          loadAlphas,
+          disabled: busy,
+          iconName: 'search',
+          small: true,
+        ),
+      ]),
+      if (alphas.isNotEmpty) ...[
+        el('p', [
+          text(
+            '${alphas.length} alpha build${alphas.length == 1 ? '' : 's'} available',
+          ),
+        ], classes: 'overline'),
+        el(
+          'ol',
+          [
+            for (final release in alphas)
+              el(
+                'li',
+                [
+                  release['version'] == alphaVersion
+                      ? dot('accent', 'filled', size: 'md')
+                      : dot('neutral', 'hollow', size: 'md'),
+                  el('span', [
+                    mono(release['version']),
+                    if (release['version'] == alphaVersion)
+                      pill('Selected', 'accent'),
+                  ], classes: 'updates-alpha__head'),
+                  if ('${release['notes'] ?? ''}'.isNotEmpty)
+                    el('span', [
+                      text(release['notes']),
+                    ], classes: 'updates-alpha__notes'),
+                ],
+                classes: 'updates-alpha__item',
+                attributes: {
+                  'data-selected': '${release['version'] == alphaVersion}',
+                },
+              ),
+          ],
+          classes: 'updates-alpha__list',
+          attributes: {'role': 'list', 'aria-label': 'Alpha builds'},
+        ),
+        el('div', [
+          select(
+            'Feature branch alpha build',
+            alphaVersion ?? '',
+            {
+              '': 'Select build',
+              for (final release in alphas)
+                '${release['version']}': '${release['version']}',
+            },
+            (value) =>
+                setState(() => alphaVersion = value.isEmpty ? null : value),
+          ),
+          button(
+            'Install selected alpha',
+            () => install(alpha: true),
+            variant: 'primary',
+            iconName: 'download',
+            disabled:
+                busy ||
+                alphaVersion == null ||
+                info?['supported'] != true ||
+                queued,
+          ),
+        ], classes: 'updates-alpha__pick'),
+        if (alphaVersion != null)
+          el('p', [
+            text(
+              alphas
+                  .where((r) => r['version'] == alphaVersion)
+                  .firstOrNull?['notes'],
+            ),
+          ], classes: 'updates-card__notes'),
+      ],
+    ], classes: 'updates-alpha__body'),
+  ], classes: 'updates-alpha');
+
+  @override
+  Component build(BuildContext context) => card(
+    'Dashboard updates',
+    [
+      if (info != null) ...[
+        facts([
+          ('Installed', mono(info!['installed'])),
+          (
+            'Latest',
+            Component.fragment([
+              mono(info!['latest'] ?? 'Unavailable'),
+              if (info!['available'] == true)
+                pill('Update available', 'accent'),
+            ]),
+          ),
+        ], classes: 'updates-card__versions'),
+        ..._messages(info!),
+        if ('${info!['notes'] ?? ''}'.isNotEmpty) ...[
+          el('p', [text('Release notes')], classes: 'overline'),
+          el('p', [text(info!['notes'])], classes: 'updates-card__notes'),
+        ],
+      ],
+      actions([
+        button(
+          'Check for updates',
+          () => check(force: true),
+          disabled: busy,
+          iconName: 'refresh-cw',
+        ),
+        button(
+          'Install update',
+          install,
+          variant: 'primary',
+          iconName: 'download',
           disabled:
               busy ||
-              alphaVersion == null ||
+              info?['available'] != true ||
               info?['supported'] != true ||
               queued,
         ),
-      ],
-    ]),
-    feedback(),
-  ]);
+      ]),
+      _alphaBuilds(),
+      feedback(),
+    ],
+    iconName: 'package',
+    subtitle:
+        'Stable releases from Ultarius/herdr_proxmox. Updates are installed when you choose.',
+    actions: [if (info != null) statusPill(info!['state'])],
+    classes: 'updates-card',
+  );
 }

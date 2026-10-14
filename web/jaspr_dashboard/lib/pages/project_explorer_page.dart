@@ -1,5 +1,6 @@
 import 'operations_support.dart';
 import 'project_git_panel.dart';
+import 'ops_ui.dart';
 
 class ProjectExplorerPage extends StatefulComponent {
   const ProjectExplorerPage({super.key, this.initialPath = ''});
@@ -66,6 +67,23 @@ class _ExplorerState extends OperationsState<ProjectExplorerPage> {
     if (mounted) setState(() => message = result);
   }
 
+  Component viewTab(String label, String iconName, bool selected, String id) =>
+      el(
+        'button',
+        [icon(iconName), text(label)],
+        classes: 'tabs__tab',
+        attributes: {
+          'type': 'button',
+          'role': 'tab',
+          'id': id,
+          'aria-selected': '$selected',
+          'aria-controls': 'explorer-panel',
+        },
+        events: {
+          'click': (_) => setState(() => gitView = label == 'Git changes'),
+        },
+      );
+
   @override
   Component build(BuildContext context) {
     final entries = (directory?['entries'] as List? ?? [])
@@ -79,102 +97,197 @@ class _ExplorerState extends OperationsState<ProjectExplorerPage> {
         .split('/')
         .where((p) => p.isNotEmpty && p != '.')
         .toList();
-    return stack([
-      card('Project explorer', [
-        paragraph(
-          'Browse repositories and worktrees in the container. File previews are read-only.',
-        ),
-        actions([
-          button('Refresh folder', () => open(path), disabled: busy),
+    return opsPage([
+      pageHeader(
+        'Project explorer',
+        subtitle:
+            'Browse repositories and worktrees in the container. File previews are read-only.',
+        actions: [
           button(
-            'Files',
-            () => setState(() => gitView = false),
-            classes: !gitView ? 'selected' : '',
+            'Refresh folder',
+            () => open(path),
+            disabled: busy,
+            iconName: 'refresh-cw',
           ),
-          button(
-            'Git changes',
-            () => setState(() => gitView = true),
-            classes: gitView ? 'selected' : '',
-          ),
-        ]),
-        actions([
-          button('Projects', () => open(''), disabled: busy),
-          for (var i = 0; i < segments.length; i++)
-            button(
-              segments[i],
-              () => open(segments.take(i + 1).join('/')),
-              disabled: busy,
-            ),
-        ]),
-        if (directory != null)
-          codeText('${directory!['root']}${path.isEmpty ? '' : '/$path'}'),
-        field('Filter this folder', filter, (v) => setState(() => filter = v)),
-        toggle(
-          'Hidden files',
-          showHidden,
-          (v) => setState(() => showHidden = v),
-        ),
-        paragraph('${entries.length} items'),
-        if (directory?['limited'] == true)
-          paragraph(
-            'Listing limited to 1,000 items. Open a subfolder to explore further.',
-          ),
-        feedback(),
-      ]),
-      if (gitView)
-        ProjectGitPanel(
-          key: ValueKey(path),
-          path: path,
-          onOpen: (selected) {
-            setState(() => gitView = false);
-            open(selected);
-          },
-        )
-      else
-        el('div', [
-          card('Files', [
-            if (entries.isEmpty)
-              paragraph(
-                filter.isNotEmpty
-                    ? 'No entries match your filter.'
-                    : (directory?['entries'] as List? ?? []).isNotEmpty
-                    ? 'Only hidden entries are present. Enable Hidden files.'
-                    : 'This folder is empty.',
+        ],
+      ),
+      el(
+        'div',
+        [
+          viewTab('Files', 'folder', !gitView, 'explorer-tab-files'),
+          viewTab('Git changes', 'git-branch', gitView, 'explorer-tab-git'),
+        ],
+        classes: 'tabs explorer-tabs',
+        attributes: {'role': 'tablist', 'aria-label': 'Explorer view'},
+      ),
+      el('div', [
+        el(
+          'ol',
+          [
+            el('li', [
+              button(
+                'Projects',
+                () => open(''),
+                disabled: busy,
+                variant: 'ghost',
+                small: true,
+                iconName: 'folder-open',
               ),
-            table(
-              ['Name', 'Kind', 'Modified', 'Size'],
-              [
-                for (final entry in entries)
-                  [
-                    button(
-                      '${entry['name']}',
-                      () => open(entry['path'] as String),
-                      disabled:
-                          busy || !['folder', 'file'].contains(entry['kind']),
-                    ),
-                    text(entry['kind']),
-                    text(displayTime(entry['modified'])),
-                    text(size(entry['size'])),
-                  ],
-              ],
-            ),
-          ]),
-          if (preview != null)
-            card('${preview!['path']}', [
-              paragraph(size(preview!['size'])),
-              actions([
-                button('Copy file path', copyPath),
-                button('Close preview', () => setState(() => preview = null)),
-              ]),
-              if (preview!['binary'] == true)
-                paragraph('Preview unavailable for binary files.')
-              else ...[
-                if (preview!['truncated'] == true)
-                  paragraph('Showing the first 64 KB.'),
-                codeText(preview!['content']),
-              ],
             ]),
-        ], classes: 'explorer-grid'),
-    ]);
+            for (var i = 0; i < segments.length; i++)
+              el('li', [
+                button(
+                  segments[i],
+                  () => open(segments.take(i + 1).join('/')),
+                  disabled: busy,
+                  variant: 'ghost',
+                  small: true,
+                ),
+              ]),
+          ],
+          classes: 'explorer-crumbs',
+          attributes: {'role': 'list', 'aria-label': 'Folder path'},
+        ),
+        if (directory != null)
+          el('span', [
+            text('${directory!['root']}${path.isEmpty ? '' : '/$path'}'),
+          ], classes: 'mono-chip explorer-root'),
+      ], classes: 'explorer-location'),
+      feedback(),
+      el(
+        'div',
+        [
+          if (gitView)
+            ProjectGitPanel(
+              key: ValueKey(path),
+              path: path,
+              onOpen: (selected) {
+                setState(() => gitView = false);
+                open(selected);
+              },
+            )
+          else
+            el(
+              'div',
+              [
+                card(
+                  'Files',
+                  [
+                    el('div', [
+                      el('div', [
+                        icon('filter', classes: 'icon--sm search-field__icon'),
+                        field(
+                          'Filter this folder',
+                          filter,
+                          (v) => setState(() => filter = v),
+                          placeholder: 'Filter by name',
+                        ),
+                      ], classes: 'search-field explorer-filter'),
+                      switchField(
+                        'Hidden files',
+                        showHidden,
+                        (v) => setState(() => showHidden = v),
+                      ),
+                    ], classes: 'explorer-toolbar'),
+                    if (directory?['limited'] == true)
+                      callout([
+                        calloutText(
+                          'Listing limited to 1,000 items. Open a subfolder to explore further.',
+                        ),
+                      ]),
+                    if (entries.isEmpty)
+                      emptyState(
+                        filter.isNotEmpty
+                            ? 'No entries match your filter.'
+                            : (directory?['entries'] as List? ?? []).isNotEmpty
+                            ? 'Only hidden entries are present. Enable Hidden files.'
+                            : 'This folder is empty.',
+                        iconName: 'folder',
+                      )
+                    else
+                      el('div', [
+                        table(
+                          ['Name', 'Kind', 'Modified', 'Size'],
+                          [
+                            for (final entry in entries)
+                              [
+                                button(
+                                  '${entry['name']}',
+                                  () => open(entry['path'] as String),
+                                  disabled:
+                                      busy ||
+                                      ![
+                                        'folder',
+                                        'file',
+                                      ].contains(entry['kind']),
+                                  variant: 'ghost',
+                                  small: true,
+                                  iconName: entry['kind'] == 'folder'
+                                      ? 'folder'
+                                      : 'file-text',
+                                  classes: 'file-link',
+                                ),
+                                text(entry['kind']),
+                                mono(displayTime(entry['modified'])),
+                                mono(size(entry['size'])),
+                              ],
+                          ],
+                        ),
+                      ], classes: 'file-table'),
+                  ],
+                  iconName: 'folder-open',
+                  count: entries.length,
+                  classes: 'explorer-files',
+                ),
+                if (preview != null)
+                  card(
+                    '${preview!['path']}',
+                    [
+                      if (preview!['binary'] == true)
+                        emptyState(
+                          'Preview unavailable for binary files.',
+                          iconName: 'file-text',
+                        )
+                      else ...[
+                        if (preview!['truncated'] == true)
+                          callout([calloutText('Showing the first 64 KB.')]),
+                        codeText(preview!['content']),
+                      ],
+                    ],
+                    iconName: 'file-text',
+                    subtitle: size(preview!['size']),
+                    actions: [
+                      button(
+                        'Copy file path',
+                        copyPath,
+                        small: true,
+                        iconName: 'copy',
+                      ),
+                      button(
+                        'Close preview',
+                        () => setState(() => preview = null),
+                        small: true,
+                        variant: 'ghost',
+                        iconName: 'x',
+                      ),
+                    ],
+                    classes: 'explorer-preview',
+                  ),
+              ],
+              classes: preview == null
+                  ? 'explorer-panes'
+                  : 'explorer-panes explorer-panes--split',
+            ),
+        ],
+        classes: 'explorer-panel',
+        attributes: {
+          'id': 'explorer-panel',
+          'role': 'tabpanel',
+          'aria-labelledby': gitView
+              ? 'explorer-tab-git'
+              : 'explorer-tab-files',
+        },
+      ),
+    ], classes: 'explorer-page');
   }
 }

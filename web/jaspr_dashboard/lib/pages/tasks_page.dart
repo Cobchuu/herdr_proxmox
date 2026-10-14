@@ -5,6 +5,9 @@ import 'task_activity.dart';
 import 'task_timeline.dart';
 import 'task_workflow.dart';
 import 'task_clipboard.dart';
+import 'task_list.dart';
+import '../ui.dart' as ui;
+import '../overview.dart' show activityFor;
 
 /// Task lifecycle labels. The gateway owns these states; an unknown value is
 /// shown verbatim rather than guessed.
@@ -139,6 +142,7 @@ class _TasksPageState extends State<TasksPage> {
   Timer? timer;
   StreamSubscription? subscription;
   int generation = -1;
+  String liveActivity = '';
   // Keep the exact request across lost responses. Changing the selection gets
   // a new identity; retrying the same action reconciles the durable request.
   final Map<String, String> requests = {};
@@ -152,6 +156,9 @@ class _TasksPageState extends State<TasksPage> {
       if (!mounted) return;
       if (connection.state.connected != connected)
         setState(() => connected = connection.state.connected);
+      // Agent activity drives the live rings only; rebuild when it changes.
+      final live = '${activity}';
+      if (live != liveActivity) setState(() => liveActivity = live);
       if (generation != connection.generation) {
         generation = connection.generation;
         setState(() {
@@ -993,132 +1000,130 @@ class _TasksPageState extends State<TasksPage> {
 
   @override
   Component build(BuildContext context) {
-    final drafts = tasks.where((t) => t['state'] == 'draft').toList();
-    final started = tasks.where((t) => t['state'] != 'draft').toList();
-    return selectedId == null
-        ? ListView(
-            padding: const EdgeInsets.all(20),
-            children: [
-              Text('Tasks', style: Theme.of(context).textTheme.headlineLarge),
-              const SizedBox(height: 8),
-              const Text(
-                'Develop in a task branch, review the exact commit, publish and open a draft pull request. Merge on GitHub. Updating the base and deploying are separate operations.',
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  FilledButton.icon(
-                    onPressed: admin && !busy ? create : null,
-                    icon: const Icon('add'),
-                    label: const Text('Create task'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: admin && !busy ? configure : null,
-                    icon: const Icon('key'),
-                    label: const Text('GitHub publishing'),
-                  ),
-                  IconButton(
-                    onPressed: busy || refreshing ? null : refresh,
-                    tooltip: 'Refresh tasks',
-                    icon: const Icon('refresh'),
-                  ),
-                ],
-              ),
-              Text(
-                github['configured'] == true
-                    ? admin
-                          ? 'GitHub account: ${github['login']} \u00b7 ${github['repositories']}'
-                          : 'GitHub publishing is configured. Publishing requires an administrator.'
-                    : github['error'] != null
-                    ? 'GitHub publishing is unavailable: ${github['error']}'
-                    : 'GitHub publishing is not configured. Local task work is available.',
-              ),
-              if (admin && github['publication'] is Map)
-                for (final entry in (github['publication'] as Map).entries)
-                  if (entry.value is Map && entry.value['mode'] == 'fork')
-                    Text(
-                      publicationSummary('${entry.key}', entry.value as Map),
-                    ),
-              if (busy) const LinearProgressIndicator(),
-              if ((error ?? readError) != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Text(
-                    error ?? readError!,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ),
-              if (tasks.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Text(
-                    !connected
-                        ? 'Not connected to the gateway.'
-                        : readError != null
-                        ? 'Task list unavailable.'
-                        : refreshing
-                        ? 'Loading tasks…'
-                        : 'No development tasks yet.',
-                  ),
-                ),
-              TaskWorkflow(
-                tasks: tasks,
-                initialView: component.initialView,
-                profiles: [
-                  for (final profile
-                      in connection.organizationDirectory.value['profiles']
-                              as List? ??
-                          [])
-                    if (profile is Map<String, dynamic>) profile,
-                ],
-                onOpenTask: openTask,
-                executor: executor,
-                loading: refreshing,
-                listView: Column(
-                  children: [
-                    for (final task in started) _summary(task),
-                    // Drafts are proposals waiting on an operator, not work in flight.
-                    // Grouping them keeps the active list readable when a group has
-                    // proposed several follow-ups.
-                    if (drafts.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Row(
-                          children: [
-                            Text(
-                              'Drafts (${drafts.length})',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Work that has not started. Open a task for its next step.',
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(
-                                      color: Theme.of(
-                                        context,
-                                      ).colorScheme.onSurfaceVariant,
-                                    ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      for (final task in drafts) _summary(task),
-                    ],
-                  ],
-                ),
-              ),
-              DiscoveryPanel(coordinator: component.coordinator),
-            ],
-          )
-        : _detail();
+    if (selectedId != null) return _detail();
+    final open = tasks
+        .where((t) => !['merged', 'completed', 'closed'].contains(t['state']))
+        .length;
+    final queued = tasks
+        .where((t) => (t['assignment'] as Map?)?['state'] == 'queued')
+        .length;
+    final githubLine = github['configured'] == true
+        ? admin
+              ? 'GitHub account: ${github['login']} · ${github['repositories']}'
+              : 'GitHub publishing is configured. Publishing requires an administrator.'
+        : github['error'] != null
+        ? 'GitHub publishing is unavailable: ${github['error']}'
+        : 'GitHub publishing is not configured. Local task work is available.';
+    return ui.el('div', [
+      ui.pageHeader(
+        'Tasks',
+        subtitle: tasks.isEmpty
+            ? null
+            : [
+                '${tasks.length} ${tasks.length == 1 ? 'task' : 'tasks'}',
+                '$open open',
+                if (queued > 0) '$queued queued',
+              ].join(' · '),
+        actions: [
+          ui.button(
+            'GitHub publishing',
+            admin && !busy ? configure : null,
+            iconName: 'key-round',
+          ),
+          ui.button(
+            'Refresh tasks',
+            busy || refreshing ? null : refresh,
+            iconName: 'refresh-cw',
+          ),
+          ui.button(
+            'Create task',
+            admin && !busy ? create : null,
+            primary: true,
+            iconName: 'plus',
+          ),
+        ],
+      ),
+      ui.el('div', [
+        ui.el('p', [
+          ui.text(
+            'Develop in a task branch, review the exact commit, publish and open a draft pull request. Merge on GitHub. Updating the base and deploying are separate operations.',
+          ),
+        ], classes: 'task-page__intro'),
+        ui.el(
+          'p',
+          [
+            ui.icon(
+              github['configured'] == true
+                  ? 'circle-check'
+                  : github['error'] != null
+                  ? 'triangle-alert'
+                  : 'info',
+            ),
+            ui.text(githubLine),
+          ],
+          classes: 'task-page__status',
+          attributes: {
+            'data-tone': github['configured'] == true
+                ? 'success'
+                : github['error'] != null
+                ? 'warning'
+                : 'info',
+          },
+        ),
+        if (admin && github['publication'] is Map)
+          for (final entry in (github['publication'] as Map).entries)
+            if (entry.value is Map && entry.value['mode'] == 'fork')
+              ui.el('p', [
+                ui.icon('git-fork'),
+                ui.text(publicationSummary('${entry.key}', entry.value as Map)),
+              ], classes: 'task-page__status task-page__status--pre'),
+      ], classes: 'task-page__meta'),
+      if (busy) const LinearProgressIndicator(),
+      if ((error ?? readError) != null)
+        ui.notice(error ?? readError, error: true),
+      if (tasks.isEmpty)
+        ui.el('p', [
+          ui.text(
+            !connected
+                ? 'Not connected to the gateway.'
+                : readError != null
+                ? 'Task list unavailable.'
+                : refreshing
+                ? 'Loading tasks…'
+                : 'No development tasks yet.',
+          ),
+        ], classes: 'task-page__empty'),
+      TaskWorkflow(
+        tasks: tasks,
+        initialView: component.initialView,
+        profiles: [
+          for (final profile
+              in connection.organizationDirectory.value['profiles'] as List? ??
+                  [])
+            if (profile is Map<String, dynamic>) profile,
+        ],
+        activity: activity,
+        onOpenTask: openTask,
+        executor: executor,
+        loading: refreshing,
+        listView: taskList(
+          tasks: tasks,
+          stateLabel: taskState,
+          onOpen: openTask,
+          executor: executor,
+          activity: activity,
+        ),
+      ),
+      DiscoveryPanel(coordinator: component.coordinator),
+    ], classes: 'task-page task-index');
   }
+
+  /// Live agent activity by profile id, from the dashboard snapshot.
+  Map<String, String> get activity => {
+    for (final agent in connection.state.agents)
+      if (agent['profile_id'] != null)
+        '${agent['profile_id']}': activityFor(agent),
+  };
 
   Future<void> openTask(String id) async {
     if (component.coordinator != null) {
@@ -1147,31 +1152,6 @@ class _TasksPageState extends State<TasksPage> {
       if (mounted) await refresh();
     }
   }
-
-  Component _summary(Map<String, dynamic> task) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '${task['title']}',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          Text('${taskState(task)} \u00b7 ${task['repository']}'),
-          Text('${taskAgentName(task)}'),
-          Text(taskNextStep(task, executor: executor)),
-          if (task['updated_at'] != null)
-            Text('Last activity ${task['updated_at']}'),
-          TextButton.icon(
-            onPressed: () => openTask('${task['id']}'),
-            icon: const Icon('arrow_forward'),
-            label: const Text('Open task'),
-          ),
-        ],
-      ),
-    ),
-  );
 
   Future<void> showCommit(Map<String, dynamic> task, String sha) async {
     final epoch = connection.generation;
@@ -2258,50 +2238,99 @@ class _TasksPageState extends State<TasksPage> {
 
   Component _detail() {
     final task = tasks.isEmpty ? null : tasks.first;
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: backToTasks,
-            icon: const Icon('arrow_back'),
-            label: const Text('All tasks'),
+    final pull = task?['pull'];
+    return ui.el('div', [
+      ui.button(
+        'All tasks',
+        backToTasks,
+        variant: 'ghost',
+        small: true,
+        iconName: 'arrow-left',
+        classes: 'task-detail__back',
+      ),
+      ui.el('header', [
+        ui.el('div', [
+          ui.el('p', [
+            ui.icon('list-checks', classes: 'icon--sm'),
+            ui.text('Task'),
+            if (task != null)
+              ui.el(
+                'span',
+                [ui.text(shortSha(task['id']))],
+                classes: 'mono',
+                attributes: {'title': '${task['id']}'},
+              ),
+          ], classes: 'page-header__overline task-detail__overline'),
+          ui.el('h1', [
+            ui.text(task == null ? 'Task detail' : '${task['title']}'),
+          ], classes: 'page-header__title'),
+          if (task != null)
+            ui.el('div', [
+              ui.badge(taskState(task), tone: taskTone(task)),
+              ui.el('span', [
+                ui.icon('folder'),
+                ui.text('${task['repository']}'),
+              ], classes: 'type-tag'),
+              ui.el('span', [
+                ui.roleTile(
+                  taskAgentName(task, fallback: 'Identity unavailable'),
+                  role:
+                      (task['assigned_agent'] as Map?)?['role'] ??
+                      taskAgentName(task),
+                  size: 'xs',
+                  live: activity['${task['profile_id']}'] == 'working',
+                ),
+                ui.el('span', [
+                  ui.text(
+                    taskAgentName(task, fallback: 'Identity unavailable'),
+                  ),
+                ], classes: 'agent-label__name'),
+              ], classes: 'agent-label'),
+              if (pull is Map)
+                ui.el('span', [
+                  ui.icon('git-pull-request'),
+                  ui.text('#${pull['number']} · ${pullStatus(task)}'),
+                ], classes: 'type-tag'),
+            ], classes: 'task-detail__meta'),
+        ], classes: 'page-header__text'),
+        ui.el('div', [
+          ui.button(
+            'Refresh task',
+            busy ? null : refresh,
+            iconName: 'refresh-cw',
           ),
+        ], classes: 'page-header__actions'),
+      ], classes: 'page-header'),
+      if (busy || refreshing && task == null) const LinearProgressIndicator(),
+      if ((error ?? readError) != null)
+        ui.notice(error ?? readError, error: true),
+      if (task == null)
+        ui.emptyState(
+          'Task unavailable. Refresh to try again.',
+          iconName: 'list-checks',
         ),
-        if (busy || refreshing && task == null) const LinearProgressIndicator(),
-        if ((error ?? readError) != null)
-          Text(
-            error ?? readError!,
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
-        if (task == null) const Text('Task unavailable. Refresh to try again.'),
-        IconButton(
-          onPressed: busy ? null : refresh,
-          tooltip: 'Refresh task',
-          icon: const Icon('refresh'),
-        ),
-        if (task != null) ...[
-          Text(
-            '${task['title']}',
-            style: Theme.of(context).textTheme.headlineMedium,
-          ),
-          Text('${taskState(task)} \u00b7 ${task['repository']}'),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Text(
-              taskNextStep(task, executor: executor),
-              style: Theme.of(context).textTheme.titleMedium,
+      if (task != null) ...[
+        ui.el(
+          'section',
+          [
+            ui.icon(
+              taskNeedsAttention(task) ? 'triangle-alert' : 'arrow-right',
+              classes: 'callout__icon',
             ),
-          ),
-          if ((task['availability'] as Map?)?['checked_at'] != null)
-            Text(
-              'Availability checked ${task['availability']['checked_at']} · display checks may be cached for ${task['availability']['max_age_seconds']} seconds; starting work verifies it again.',
-            ),
-          Align(alignment: Alignment.centerLeft, child: _nextAction(task)),
-          Wrap(
-            spacing: 8,
-            children: [
+            ui.el('p', [
+              ui.text('Next step'),
+            ], classes: 'overline task-detail__eyebrow'),
+            ui.el('h2', [
+              ui.text(taskNextStep(task, executor: executor)),
+            ], classes: 'callout__title'),
+            if ((task['availability'] as Map?)?['checked_at'] != null)
+              ui.el('p', [
+                ui.text(
+                  'Availability checked ${task['availability']['checked_at']} · display checks may be cached for ${task['availability']['max_age_seconds']} seconds; starting work verifies it again.',
+                ),
+              ], classes: 'callout__text'),
+            ui.el('div', [
+              _nextAction(task),
               if (task['head_sha'] != null &&
                   !['completed', 'closed', 'merged'].contains(task['state']))
                 OutlinedButton(
@@ -2313,464 +2342,587 @@ class _TasksPageState extends State<TasksPage> {
                 icon: const Icon('groups'),
                 label: const Text('Discuss with group'),
               ),
-            ],
-          ),
-          if (task['completion'] is Map) ...[
-            Text(
-              'Done: ${completionOutcome(task)}',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            Text('Reason: ${task['completion']['reason']}'),
-            SelectableText(
-              'Candidate: ${task['completion']['candidate']}\nUpstream at completion: ${task['completion']['upstream']}',
-            ),
-            Text(
-              task['completion']['validation'] == 'not_applicable'
-                  ? 'No changes were made; candidate validation is not applicable.'
-                  : task['completion']['validation'] == 'verified'
-                  ? 'Required checks passed for this candidate. Deployment remains separate.'
-                  : 'No verified required checks for this candidate at completion. Done is not validation.',
-            ),
-            Text(
-              'Recorded by ${task['completion']['actor']} at ${task['completion']['at']}',
-            ),
+            ], classes: 'task-detail__actions'),
           ],
-          if (task['follow_up_tasks'] is Map)
+          classes: 'callout task-detail__next',
+          attributes: {
+            'data-tone': taskNeedsAttention(task)
+                ? 'danger'
+                : ['merged', 'completed'].contains(task['state'])
+                ? 'success'
+                : 'accent',
+          },
+        ),
+        if (task['completion'] is Map)
+          ui.el(
+            'section',
+            [
+              ui.icon('circle-check', classes: 'callout__icon'),
+              ui.el('h2', [
+                ui.text('Done: ${completionOutcome(task)}'),
+              ], classes: 'callout__title'),
+              ui.el('p', [
+                ui.text('Reason: ${task['completion']['reason']}'),
+              ], classes: 'callout__text'),
+              SelectableText(
+                'Candidate: ${task['completion']['candidate']}\nUpstream at completion: ${task['completion']['upstream']}',
+              ),
+              ui.el('p', [
+                ui.text(
+                  task['completion']['validation'] == 'not_applicable'
+                      ? 'No changes were made; candidate validation is not applicable.'
+                      : task['completion']['validation'] == 'verified'
+                      ? 'Required checks passed for this candidate. Deployment remains separate.'
+                      : 'No verified required checks for this candidate at completion. Done is not validation.',
+                ),
+              ], classes: 'callout__text'),
+              ui.el('p', [
+                ui.text(
+                  'Recorded by ${task['completion']['actor']} at ${task['completion']['at']}',
+                ),
+              ], classes: 'callout__text'),
+            ],
+            classes: 'callout task-detail__done',
+            attributes: {'data-tone': 'success'},
+          ),
+        if (task['follow_up_tasks'] is Map &&
+            (task['follow_up_tasks'] as Map).isNotEmpty)
+          ui.el('div', [
             for (final id in (task['follow_up_tasks'] as Map).values)
               TextButton.icon(
                 onPressed: () => openTask('$id'),
                 icon: const Icon('task_alt'),
                 label: const Text('Open follow-up draft'),
               ),
-          if (task['review_error'] != null)
-            Text('Group review waiting: ${task['review_error']}'),
-          if (task['pull_notice'] != null) Text('${task['pull_notice']}'),
-
-          if (github['configured'] != true)
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
+          ], classes: 'actions'),
+        if (task['review_error'] != null)
+          ui.el(
+            'p',
+            [
+              ui.icon('clock'),
+              ui.text('Group review waiting: ${task['review_error']}'),
+            ],
+            classes: 'task-page__status',
+            attributes: {'data-tone': 'warning'},
+          ),
+        if (task['pull_notice'] != null)
+          ui.el(
+            'p',
+            [ui.icon('info'), ui.text('${task['pull_notice']}')],
+            classes: 'task-page__status',
+            attributes: {'data-tone': 'info'},
+          ),
+        if (github['configured'] != true)
+          ui.el('div', [
+            ui.el(
+              'p',
+              [
+                ui.icon('info'),
+                ui.text(
                   'GitHub publishing is not configured. Local group review and validation remain available. Publishing requires GitHub setup.',
                 ),
-                TextButton.icon(
-                  onPressed: admin && !busy ? configure : null,
-                  icon: const Icon('key'),
-                  label: const Text('Set up GitHub publishing'),
-                ),
               ],
+              classes: 'task-page__status',
+              attributes: {'data-tone': 'info'},
             ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final label in [
-                'Overview',
-                'Activity & agents',
-                'Changes',
-                'Checks & builds',
-              ])
-                ChoiceChip(
-                  label: Text(label),
-                  selected: section == label,
-                  onSelected: (_) => setState(() => section = label),
-                ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          if (section == 'Overview') ...[
-            _groupReviewStatus(task),
-            if (task['availability']?['state'] == 'decision') _decision(task),
-            if (task['source'] is Map) ...[
-              Text(
-                'Follow-up proposed by group ${task['source']['group_id']} in meeting ${task['source']['meeting_id']}',
-              ),
-              TextButton(
-                onPressed: () => openTask('${task['source']['task_id']}'),
-                child: const Text('Open originating task'),
-              ),
-            ],
-            if (task['outcome_notice'] is Map)
-              _outcomeNotice(task['outcome_notice'] as Map),
-            if (task['acceptance'] is Map)
-              Text(_acceptanceText(task['acceptance'] as Map)),
-            if (task['outcome_error'] != null)
-              Text('Outcome review waiting: ${task['outcome_error']}'),
-            const Text('Task description & acceptance criteria'),
-            SelectableText(
-              '${task['description'] ?? 'No description recorded.'}',
+            ui.button(
+              'Set up GitHub publishing',
+              admin && !busy ? configure : null,
+              small: true,
+              iconName: 'key-round',
             ),
-            const SizedBox(height: 12),
-            Text(
-              'Assigned agent: ${taskAgentName(task, fallback: 'Identity unavailable')}',
-            ),
-            if (task['execution'] is Map)
-              Text(
-                'Execution: parallel instance of ${(task['execution'] as Map)['template_name'] ?? 'a template'}',
+          ], classes: 'task-detail__github'),
+        ui.el(
+          'div',
+          [
+            for (final (label, name) in [
+              ('Overview', 'layout-dashboard'),
+              ('Activity & agents', 'activity'),
+              ('Changes', 'git-compare'),
+              ('Checks & builds', 'circle-check'),
+            ])
+              ui.el(
+                'button',
+                [ui.icon(name), ui.text(label)],
+                classes: 'tabs__tab task-detail__tab',
+                attributes: {
+                  'type': 'button',
+                  'role': 'tab',
+                  'aria-selected': '${section == label}',
+                  'aria-controls': 'task-detail-panel',
+                },
+                events: {'click': (_) => setState(() => section = label)},
               ),
-            for (final consult in task['consultations'] as List? ?? [])
-              if (consult is Map)
-                ExpansionTile(
-                  title: Text(
-                    'Consultation \u00b7 ${consult['name'] ?? ''} \u00b7 ${consult['state']}',
-                  ),
-                  subtitle: Text(
-                    '${consult['question'] ?? ''}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  children: [
-                    SelectableText(
-                      '${consult['answer'] ?? ''}${(consult['error'] as String? ?? '').isNotEmpty ? '\n${consult['error']}' : ''}',
+          ],
+          classes: 'tabs task-detail__tabs',
+          attributes: {'role': 'tablist', 'aria-label': 'Task sections'},
+        ),
+        ui.el(
+          'div',
+          [
+            if (section == 'Overview') ...[
+              _groupReviewStatus(task),
+              if (task['availability']?['state'] == 'decision') _decision(task),
+              if (task['source'] is Map)
+                ui.el('div', [
+                  ui.el('p', [
+                    ui.icon('git-branch'),
+                    ui.text(
+                      'Follow-up proposed by group ${task['source']['group_id']} in meeting ${task['source']['meeting_id']}',
                     ),
-                  ],
-                ),
-            if (task['error'] != null) Text('Task issue: ${task['error']}'),
-            if (task['automation_error'] != null)
-              Text('Automation waiting: ${task['automation_error']}'),
-            if (task['completion_receipt'] is Map)
-              SelectableText(
-                'Completion receipt recorded for ${task['completion_receipt']['commit']}. Worker reports are separate from validation.',
+                  ], classes: 'task-page__status'),
+                  TextButton(
+                    onPressed: () => openTask('${task['source']['task_id']}'),
+                    child: const Text('Open originating task'),
+                  ),
+                ], classes: 'task-detail__source'),
+              if (task['outcome_notice'] is Map)
+                _outcomeNotice(task['outcome_notice'] as Map),
+              if (task['acceptance'] is Map)
+                Text(_acceptanceText(task['acceptance'] as Map)),
+              if (task['outcome_error'] != null)
+                Text('Outcome review waiting: ${task['outcome_error']}'),
+              ui.card(
+                'Task description & acceptance criteria',
+                [
+                  ui.el('p', [
+                    ui.text(
+                      '${task['description'] ?? 'No description recorded.'}',
+                    ),
+                  ], classes: 'task-detail__description'),
+                ],
+                iconName: 'file-text',
+                classes: 'task-detail__card',
               ),
-            if ((task['source'] as Map?)?['task_id'] != null)
-              Text(
-                (task['source'] as Map)['auto_queued'] is Map
-                    ? 'Auto-queued from group review of task ${(task['source'] as Map)['task_id']}.'
-                    : 'Follow-up of task ${(task['source'] as Map)['task_id']}.',
-              ),
-            ExpansionTile(
-              title: const Text('Automation settings'),
-              children: [
-                SwitchListTile(
-                  title: const Text('Automatically capture and validate'),
-                  subtitle: Text(
-                    executor == 'service'
-                        ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
-                        : 'Install the durable build service to enable automation.',
-                  ),
-                  value: task['auto_validate'] == true,
-                  onChanged:
-                      admin &&
-                          !busy &&
-                          ![
-                            'merged',
-                            'closed',
-                            'completed',
-                          ].contains(task['state']) &&
-                          (task['auto_validate'] == true ||
-                              executor == 'service')
-                      ? (value) => act('policy', {
-                          'task_id': task['id'],
-                          'auto_validate': value,
-                          if (!value) 'auto_publish': false,
-                        })
-                      : null,
-                ),
-                SwitchListTile(
-                  title: const Text(
-                    'Automatically publish a validated draft PR',
-                  ),
-                  subtitle: const Text(
-                    'Checks current GitHub account access and the direct/fork destination before enabling. Authorizes pushing verified commits and publishing generated task/check details. Token write access is only proven by successful writes. The agent stays reserved until it reviews the results. Merge and deployment remain manual.',
-                  ),
-                  value: task['auto_publish'] == true,
-                  onChanged:
-                      admin &&
-                          !busy &&
-                          executor == 'service' &&
-                          (task['auto_publish'] == true ||
-                              github['configured'] == true) &&
-                          ![
-                            'merged',
-                            'closed',
-                            'completed',
-                          ].contains(task['state'])
-                      ? (value) => act('policy', {
-                          'task_id': task['id'],
-                          'auto_validate':
-                              value || task['auto_validate'] == true,
-                          'auto_publish': value,
-                        })
-                      : null,
-                ),
-                if (task['delivery_workflow'] is Map) ...[
-                  ListTile(
-                    title: Text(
-                      'Delivery: ${task['delivery_workflow']['state']}',
+              ui.card(
+                'Assignment',
+                [
+                  ui.el('div', [
+                    ui.roleTile(
+                      taskAgentName(task, fallback: 'Identity unavailable'),
+                      role:
+                          (task['assigned_agent'] as Map?)?['role'] ??
+                          taskAgentName(task),
+                      size: 'sm',
+                      live: activity['${task['profile_id']}'] == 'working',
                     ),
-                    subtitle: Text(
-                      '${task['delivery_workflow']['error'] ?? ''}\n${task['delivery_workflow']['notification_error'] ?? ''}\n${task['delivery_workflow']['agent_report']?['summary'] ?? ''}',
-                    ),
-                  ),
-                  if (task['await_verification'] == true ||
-                      task['auto_publish'] == true)
-                    TextButton(
-                      onPressed: admin && !busy
-                          ? () => act('policy', {
-                              'task_id': task['id'],
-                              'auto_validate': false,
-                              'auto_publish': false,
-                            })
-                          : null,
-                      child: const Text('Stop delivery automation'),
-                    ),
-                  if (task['delivery_workflow']['state'] == 'attention')
-                    TextButton(
-                      onPressed: admin && !busy && task['auto_validate'] == true
-                          ? () => act('policy', {
-                              'task_id': task['id'],
-                              'auto_validate': true,
-                              'auto_publish': task['auto_publish'] == true,
-                              'retry_delivery': true,
-                            })
-                          : null,
-                      child: const Text(
-                        'Retry verification and delivery inspection',
+                    ui.el('p', [
+                      ui.text(
+                        'Assigned agent: ${taskAgentName(task, fallback: 'Identity unavailable')}',
                       ),
+                    ]),
+                  ], classes: 'task-detail__assignee'),
+                  if (task['execution'] is Map)
+                    Text(
+                      'Execution: parallel instance of ${(task['execution'] as Map)['template_name'] ?? 'a template'}',
+                    ),
+                  for (final consult in task['consultations'] as List? ?? [])
+                    if (consult is Map)
+                      ExpansionTile(
+                        title: Text(
+                          'Consultation · ${consult['name'] ?? ''} · ${consult['state']}',
+                        ),
+                        subtitle: Text(
+                          '${consult['question'] ?? ''}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        children: [
+                          SelectableText(
+                            '${consult['answer'] ?? ''}${(consult['error'] as String? ?? '').isNotEmpty ? '\n${consult['error']}' : ''}',
+                          ),
+                        ],
+                      ),
+                  if (task['error'] != null)
+                    ui.notice('Task issue: ${task['error']}', error: true),
+                  if (task['automation_error'] != null)
+                    ui.notice(
+                      'Automation waiting: ${task['automation_error']}',
+                      error: true,
+                    ),
+                  if (task['completion_receipt'] is Map)
+                    SelectableText(
+                      'Completion receipt recorded for ${task['completion_receipt']['commit']}. Worker reports are separate from validation.',
+                    ),
+                  if ((task['source'] as Map?)?['task_id'] != null)
+                    Text(
+                      (task['source'] as Map)['auto_queued'] is Map
+                          ? 'Auto-queued from group review of task ${(task['source'] as Map)['task_id']}.'
+                          : 'Follow-up of task ${(task['source'] as Map)['task_id']}.',
                     ),
                 ],
-                if (task['organization_id'] != null)
-                  ListTile(
-                    title: const Text('Organization follow-up automation'),
+                iconName: 'bot',
+                classes: 'task-detail__card',
+              ),
+              ExpansionTile(
+                title: const Text('Automation settings'),
+                children: [
+                  SwitchListTile(
+                    title: const Text('Automatically capture and validate'),
+                    subtitle: Text(
+                      executor == 'service'
+                          ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
+                          : 'Install the durable build service to enable automation.',
+                    ),
+                    value: task['auto_validate'] == true,
+                    onChanged:
+                        admin &&
+                            !busy &&
+                            ![
+                              'merged',
+                              'closed',
+                              'completed',
+                            ].contains(task['state']) &&
+                            (task['auto_validate'] == true ||
+                                executor == 'service')
+                        ? (value) => act('policy', {
+                            'task_id': task['id'],
+                            'auto_validate': value,
+                            if (!value) 'auto_publish': false,
+                          })
+                        : null,
+                  ),
+                  SwitchListTile(
+                    title: const Text(
+                      'Automatically publish a validated draft PR',
+                    ),
                     subtitle: const Text(
-                      'Shared limits and queueing are managed by the organization.',
+                      'Checks current GitHub account access and the direct/fork destination before enabling. Authorizes pushing verified commits and publishing generated task/check details. Token write access is only proven by successful writes. The agent stays reserved until it reviews the results. Merge and deployment remain manual.',
                     ),
-                    trailing: TextButton(
-                      onPressed: admin && !busy && component.coordinator != null
-                          ? () {
-                              connection.selectedOrganization.value =
-                                  task['organization_id'] as String;
-                              component.coordinator?.navigate(
-                                OrganizationRoute('automation'),
-                              );
-                            }
-                          : null,
-                      child: const Text('Organization settings'),
-                    ),
+                    value: task['auto_publish'] == true,
+                    onChanged:
+                        admin &&
+                            !busy &&
+                            executor == 'service' &&
+                            (task['auto_publish'] == true ||
+                                github['configured'] == true) &&
+                            ![
+                              'merged',
+                              'closed',
+                              'completed',
+                            ].contains(task['state'])
+                        ? (value) => act('policy', {
+                            'task_id': task['id'],
+                            'auto_validate':
+                                value || task['auto_validate'] == true,
+                            'auto_publish': value,
+                          })
+                        : null,
                   ),
-                if (admin)
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      TextButton.icon(
-                        onPressed: busy ? null : () => consultTask(task),
-                        icon: const Icon('support_agent'),
-                        label: const Text('Ask a consultant'),
+                  if (task['delivery_workflow'] is Map) ...[
+                    ListTile(
+                      title: Text(
+                        'Delivery: ${task['delivery_workflow']['state']}',
                       ),
-                      TextButton.icon(
-                        onPressed: busy ? null : () => acceptanceTask(task),
-                        icon: const Icon('verified_outlined'),
-                        label: const Text('Acceptance review'),
+                      subtitle: Text(
+                        '${task['delivery_workflow']['error'] ?? ''}\n${task['delivery_workflow']['notification_error'] ?? ''}\n${task['delivery_workflow']['agent_report']?['summary'] ?? ''}',
                       ),
-                      if (_archivedRun(task) != null)
+                    ),
+                    if (task['await_verification'] == true ||
+                        task['auto_publish'] == true)
+                      TextButton(
+                        onPressed: admin && !busy
+                            ? () => act('policy', {
+                                'task_id': task['id'],
+                                'auto_validate': false,
+                                'auto_publish': false,
+                              })
+                            : null,
+                        child: const Text('Stop delivery automation'),
+                      ),
+                    if (task['delivery_workflow']['state'] == 'attention')
+                      TextButton(
+                        onPressed:
+                            admin && !busy && task['auto_validate'] == true
+                            ? () => act('policy', {
+                                'task_id': task['id'],
+                                'auto_validate': true,
+                                'auto_publish': task['auto_publish'] == true,
+                                'retry_delivery': true,
+                              })
+                            : null,
+                        child: const Text(
+                          'Retry verification and delivery inspection',
+                        ),
+                      ),
+                  ],
+                  if (task['organization_id'] != null)
+                    ListTile(
+                      title: const Text('Organization follow-up automation'),
+                      subtitle: const Text(
+                        'Shared limits and queueing are managed by the organization.',
+                      ),
+                      trailing: TextButton(
+                        onPressed:
+                            admin && !busy && component.coordinator != null
+                            ? () {
+                                connection.selectedOrganization.value =
+                                    task['organization_id'] as String;
+                                component.coordinator?.navigate(
+                                  OrganizationRoute('automation'),
+                                );
+                              }
+                            : null,
+                        child: const Text('Organization settings'),
+                      ),
+                    ),
+                  if (admin)
+                    Wrap(
+                      spacing: 8,
+                      children: [
                         TextButton.icon(
-                          onPressed: busy ? null : () => handoverTask(task),
-                          icon: const Icon('swap_horiz'),
-                          label: const Text('Hand over to another agent'),
+                          onPressed: busy ? null : () => consultTask(task),
+                          icon: const Icon('support_agent'),
+                          label: const Text('Ask a consultant'),
                         ),
-                    ],
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _actions(task),
-          ],
-          if (section == 'Activity & agents') _conflictRepair(task),
-          if (section == 'Activity & agents')
-            TaskActivity(
-              task: task,
-              onOpen: (value) => setState(() => section = value),
-            ),
-          if (section == 'Activity & agents')
-            for (final meeting in task['meeting_results'] as List? ?? [])
-              if (meeting is Map)
-                Card(
-                  key: ValueKey('meeting-${meeting['job_id']}'),
-                  child: ExpansionTile(
-                    initiallyExpanded: expandedMeetings.contains(
-                      '${meeting['job_id']}',
-                    ),
-                    onExpansionChanged: (value) {
-                      if (value)
-                        expandedMeetings.add('${meeting['job_id']}');
-                      else
-                        expandedMeetings.remove('${meeting['job_id']}');
-                    },
-                    title: Text(
-                      '${meeting['group_name']} ${meeting['outcome'] == true ? 'outcome review' : 'review'}',
-                    ),
-                    subtitle: Text('${meeting['state']}'),
-                    children: [
-                      if (component.coordinator != null)
-                        TextButton(
-                          onPressed: () => component.coordinator!.push(
-                            GroupRoute('${meeting['group_id']}'),
+                        TextButton.icon(
+                          onPressed: busy ? null : () => acceptanceTask(task),
+                          icon: const Icon('verified_outlined'),
+                          label: const Text('Acceptance review'),
+                        ),
+                        if (_archivedRun(task) != null)
+                          TextButton.icon(
+                            onPressed: busy ? null : () => handoverTask(task),
+                            icon: const Icon('swap_horiz'),
+                            label: const Text('Hand over to another agent'),
                           ),
-                          child: const Text('Open group discussion'),
-                        ),
-                      if (meeting['error'] != null &&
-                          '${meeting['error']}'.isNotEmpty)
-                        Text('${meeting['error']}'),
-                      SelectableText(
-                        '${meeting['result'] ?? 'Waiting for discussion output.'}',
+                      ],
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              _actions(task),
+            ],
+            if (section == 'Activity & agents') _conflictRepair(task),
+            if (section == 'Activity & agents')
+              TaskActivity(
+                task: task,
+                onOpen: (value) => setState(() => section = value),
+              ),
+            if (section == 'Activity & agents')
+              for (final meeting in task['meeting_results'] as List? ?? [])
+                if (meeting is Map)
+                  Card(
+                    key: ValueKey('meeting-${meeting['job_id']}'),
+                    child: ExpansionTile(
+                      initiallyExpanded: expandedMeetings.contains(
+                        '${meeting['job_id']}',
                       ),
-                      if ((task['auto_queue'] as Map?)?[meeting['job_id']]
-                          is Map)
-                        Text(
-                          _automationOutcome(
-                            (task['auto_queue'] as Map)[meeting['job_id']]
-                                as Map,
-                          ),
-                        ),
-                      for (final proposal
-                          in meeting['proposals'] as List? ?? [])
-                        if (proposal is Map)
-                          ListTile(
-                            title: Text('${proposal['title']}'),
-                            subtitle: Text(
-                              'Assigned: ${proposal['assignee'] ?? proposal['profile_id']}\n${proposal['description']}',
+                      onExpansionChanged: (value) {
+                        if (value)
+                          expandedMeetings.add('${meeting['job_id']}');
+                        else
+                          expandedMeetings.remove('${meeting['job_id']}');
+                      },
+                      title: Text(
+                        '${meeting['group_name']} ${meeting['outcome'] == true ? 'outcome review' : 'review'}',
+                      ),
+                      subtitle: Text('${meeting['state']}'),
+                      children: [
+                        if (component.coordinator != null)
+                          TextButton(
+                            onPressed: () => component.coordinator!.push(
+                              GroupRoute('${meeting['group_id']}'),
                             ),
-                            trailing: Wrap(
-                              spacing: 4,
-                              children: [
-                                TextButton(
-                                  onPressed:
-                                      admin &&
-                                          !busy &&
-                                          (task['follow_up_tasks']
-                                                  as Map?)?[proposal['key']] ==
-                                              null
-                                      ? () => act('proposal', {
-                                          'task_id': task['id'],
-                                          'meeting_id': meeting['job_id'],
-                                          'proposal_key': proposal['key'],
-                                        })
-                                      : null,
-                                  child: Text(
-                                    (task['follow_up_tasks']
-                                                as Map?)?[proposal['key']] ==
-                                            null
-                                        ? 'Create draft'
-                                        : 'Draft created',
-                                  ),
-                                ),
-                                if ((task['follow_up_tasks']
-                                        as Map?)?[proposal['key']] ==
-                                    null)
+                            child: const Text('Open group discussion'),
+                          ),
+                        if (meeting['error'] != null &&
+                            '${meeting['error']}'.isNotEmpty)
+                          Text('${meeting['error']}'),
+                        SelectableText(
+                          '${meeting['result'] ?? 'Waiting for discussion output.'}',
+                        ),
+                        if ((task['auto_queue'] as Map?)?[meeting['job_id']]
+                            is Map)
+                          Text(
+                            _automationOutcome(
+                              (task['auto_queue'] as Map)[meeting['job_id']]
+                                  as Map,
+                            ),
+                          ),
+                        for (final proposal
+                            in meeting['proposals'] as List? ?? [])
+                          if (proposal is Map)
+                            ListTile(
+                              title: Text('${proposal['title']}'),
+                              subtitle: Text(
+                                'Assigned: ${proposal['assignee'] ?? proposal['profile_id']}\n${proposal['description']}',
+                              ),
+                              trailing: Wrap(
+                                spacing: 4,
+                                children: [
                                   TextButton(
-                                    onPressed: admin && !busy
+                                    onPressed:
+                                        admin &&
+                                            !busy &&
+                                            (task['follow_up_tasks']
+                                                    as Map?)?[proposal['key']] ==
+                                                null
                                         ? () => act('proposal', {
                                             'task_id': task['id'],
                                             'meeting_id': meeting['job_id'],
                                             'proposal_key': proposal['key'],
-                                            'queue': true,
                                           })
                                         : null,
-                                    child: const Text('Create and queue'),
-                                  )
-                                else
-                                  TextButton(
-                                    onPressed: admin && !busy
-                                        ? () => act('assignment', {
-                                            'task_id':
-                                                '${(task['follow_up_tasks'] as Map?)?[proposal['key']]}',
-                                            'mode': 'queue',
-                                          })
-                                        : null,
-                                    child: const Text('Queue'),
+                                    child: Text(
+                                      (task['follow_up_tasks']
+                                                  as Map?)?[proposal['key']] ==
+                                              null
+                                          ? 'Create draft'
+                                          : 'Draft created',
+                                    ),
                                   ),
-                              ],
+                                  if ((task['follow_up_tasks']
+                                          as Map?)?[proposal['key']] ==
+                                      null)
+                                    TextButton(
+                                      onPressed: admin && !busy
+                                          ? () => act('proposal', {
+                                              'task_id': task['id'],
+                                              'meeting_id': meeting['job_id'],
+                                              'proposal_key': proposal['key'],
+                                              'queue': true,
+                                            })
+                                          : null,
+                                      child: const Text('Create and queue'),
+                                    )
+                                  else
+                                    TextButton(
+                                      onPressed: admin && !busy
+                                          ? () => act('assignment', {
+                                              'task_id':
+                                                  '${(task['follow_up_tasks'] as Map?)?[proposal['key']]}',
+                                              'mode': 'queue',
+                                            })
+                                          : null,
+                                      child: const Text('Queue'),
+                                    ),
+                                ],
+                              ),
                             ),
-                          ),
-                    ],
-                  ),
-                ),
-          if (section == 'Changes') ...[
-            SelectableText(
-              'Branch: ${task['branch']}\nBase: ${task['base_ref']} \u00b7 ${task['base_sha']}\nCandidate: ${task['head_sha'] ?? 'Not captured'}',
-            ),
-            if (task['github_repository'] != null)
-              SelectableText(
-                'Publish branch to: ${task['publishing_repository'] ?? task['github_repository']}\n'
-                'Open draft PR into: ${task['github_repository']}',
-              ),
-            if (task['pull'] is Map) ...[
-              SelectableText(
-                'PR #${task['pull']['number']} \u00b7 ${pullStatus(task)}\n${task['pull']['url']}',
-              ),
-              if (task['pull']['mergeable'] == false &&
-                  !['merged', 'closed', 'completed'].contains(task['state']))
-                const Text('GitHub reports merge conflicts.'),
-            ],
-            if (task['merge_sha'] != null)
-              SelectableText('Merged result: ${task['merge_sha']}'),
-            const SizedBox(height: 12),
-            TaskTimeline(
-              task: task,
-              onSelect: (sha) => showCommit(task, sha),
-              onRefresh: refresh,
-            ),
-            ExpansionTile(
-              title: const Text('Candidate diff'),
-              children: [
-                SelectableText(
-                  '${task['diff_stat'] ?? ''}\n${task['diff'] ?? 'Capture a candidate to view its changes.'}',
-                ),
-                if (task['diff_truncated'] == true)
-                  const Text(
-                    'Diff truncated; download the candidate patch for the full change.',
-                  ),
-              ],
-            ),
-            _actions(task),
-          ],
-          if (section == 'Checks & builds') ...[
-            Builder(
-              builder: (context) {
-                final target = task['merge_sha'] ?? task['head_sha'];
-                final build = (task['builds'] as Map?)?[target];
-                final label = build is! Map
-                    ? 'not run'
-                    : build['state'] == 'complete'
-                    ? (build['target'] == target &&
-                              build['required_checks_verified'] == true
-                          ? 'verified'
-                          : 'finished without verified required checks')
-                    : '${build['state']}';
-                return Text('Current candidate validation: $label');
-              },
-            ),
-            if (task['builds'] is Map)
-              for (final entry in (task['builds'] as Map).entries)
-                if (entry.value is Map)
-                  if (entry.key == (task['merge_sha'] ?? task['head_sha']))
-                    _buildEvidence('${entry.key}', entry.value)
-                  else
-                    ExpansionTile(
-                      title: Text(
-                        'Previous candidate build \u00b7 ${entry.key}',
-                      ),
-                      subtitle: const Text(
-                        'Does not validate the current candidate.',
-                      ),
-                      children: [_buildEvidence('${entry.key}', entry.value)],
+                      ],
                     ),
-            for (final check in task['checks'] as List? ?? [])
-              if (check is Map)
-                Text(
-                  '${check['name']}: ${check['conclusion'] ?? check['status']}',
-                ),
-            for (final check in task['statuses'] as List? ?? [])
-              if (check is Map) Text('${check['context']}: ${check['state']}'),
-            for (final review in task['reviews'] as List? ?? [])
-              if (review is Map)
-                Text('${review['user']?['login']}: ${review['state']}'),
-            _actions(task),
+                  ),
+            if (section == 'Changes') ...[
+              ui.card(
+                'Branch & publication',
+                [
+                  SelectableText(
+                    'Branch: ${task['branch']}\nBase: ${task['base_ref']} \u00b7 ${task['base_sha']}\nCandidate: ${task['head_sha'] ?? 'Not captured'}',
+                  ),
+                  if (task['github_repository'] != null)
+                    SelectableText(
+                      'Publish branch to: ${task['publishing_repository'] ?? task['github_repository']}\n'
+                      'Open draft PR into: ${task['github_repository']}',
+                    ),
+                  if (task['pull'] is Map) ...[
+                    SelectableText(
+                      'PR #${task['pull']['number']} \u00b7 ${pullStatus(task)}\n${task['pull']['url']}',
+                    ),
+                    if (task['pull']['mergeable'] == false &&
+                        ![
+                          'merged',
+                          'closed',
+                          'completed',
+                        ].contains(task['state']))
+                      const Text('GitHub reports merge conflicts.'),
+                  ],
+                  if (task['merge_sha'] != null)
+                    SelectableText('Merged result: ${task['merge_sha']}'),
+                ],
+                iconName: 'git-branch',
+                classes: 'task-detail__card',
+              ),
+              ui.card(
+                'Commit history',
+                [
+                  TaskTimeline(
+                    task: task,
+                    onSelect: (sha) => showCommit(task, sha),
+                    onRefresh: refresh,
+                  ),
+                ],
+                iconName: 'git-commit-horizontal',
+                classes: 'task-detail__card',
+              ),
+              ExpansionTile(
+                title: const Text('Candidate diff'),
+                children: [
+                  SelectableText(
+                    '${task['diff_stat'] ?? ''}\n${task['diff'] ?? 'Capture a candidate to view its changes.'}',
+                  ),
+                  if (task['diff_truncated'] == true)
+                    const Text(
+                      'Diff truncated; download the candidate patch for the full change.',
+                    ),
+                ],
+              ),
+              _actions(task),
+            ],
+            if (section == 'Checks & builds') ...[
+              ui.card(
+                'Validation evidence',
+                iconName: 'circle-check',
+                classes: 'task-detail__card',
+                [
+                  Builder(
+                    builder: (context) {
+                      final target = task['merge_sha'] ?? task['head_sha'];
+                      final build = (task['builds'] as Map?)?[target];
+                      final label = build is! Map
+                          ? 'not run'
+                          : build['state'] == 'complete'
+                          ? (build['target'] == target &&
+                                    build['required_checks_verified'] == true
+                                ? 'verified'
+                                : 'finished without verified required checks')
+                          : '${build['state']}';
+                      return Text('Current candidate validation: $label');
+                    },
+                  ),
+                  if (task['builds'] is Map)
+                    for (final entry in (task['builds'] as Map).entries)
+                      if (entry.value is Map)
+                        if (entry.key ==
+                            (task['merge_sha'] ?? task['head_sha']))
+                          _buildEvidence('${entry.key}', entry.value)
+                        else
+                          ExpansionTile(
+                            title: Text(
+                              'Previous candidate build \u00b7 ${entry.key}',
+                            ),
+                            subtitle: const Text(
+                              'Does not validate the current candidate.',
+                            ),
+                            children: [
+                              _buildEvidence('${entry.key}', entry.value),
+                            ],
+                          ),
+                  for (final check in task['checks'] as List? ?? [])
+                    if (check is Map)
+                      Text(
+                        '${check['name']}: ${check['conclusion'] ?? check['status']}',
+                      ),
+                  for (final check in task['statuses'] as List? ?? [])
+                    if (check is Map)
+                      Text('${check['context']}: ${check['state']}'),
+                  for (final review in task['reviews'] as List? ?? [])
+                    if (review is Map)
+                      Text('${review['user']?['login']}: ${review['state']}'),
+                ],
+              ),
+              _actions(task),
+            ],
           ],
-        ],
+          classes: 'task-detail__panel',
+          attributes: {
+            'id': 'task-detail-panel',
+            'role': 'tabpanel',
+            'aria-label': section,
+          },
+        ),
       ],
-    );
+    ], classes: 'task-page task-detail');
   }
 
   Component _conflictRepair(Map<String, dynamic> task) {

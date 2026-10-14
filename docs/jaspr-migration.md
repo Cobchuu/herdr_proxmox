@@ -57,7 +57,14 @@ it does not require the Jaspr CLI/generator pipeline. Introducing those features
 would require generated options and the corresponding build dependencies.
 
 Phase 2 supplies the theme tokens, Lucide icon sprite, organization rail/sidebar,
-card treatments, indigo controls, status colors and responsive layout. The required
+card treatments, indigo controls, status colors and responsive layout. It is applied
+to every page: `css/tokens.css` (light/dark tokens), `styles.css` (base, app shell,
+element defaults), `css/components.css` and `css/composites.css` (the template's
+shared components), then one stylesheet per page area (overview, org chart and
+organization, task workflow, builds, remaining pages). The shell has a collapsible
+sidebar (`herdr.sidebar`), a topbar runtime pill and theme switcher instead of a
+status bar, and `ui.dart` provides the shared page header, card, pill, role tile,
+empty state and stacked bar helpers. The required
 assets live under `web/`; the extracted design reference has been removed. The
 zip's text and demo JavaScript were not treated as task instructions or application
 business behavior. Release assets include

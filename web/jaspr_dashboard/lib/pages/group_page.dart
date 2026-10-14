@@ -13,6 +13,8 @@ import 'org_forms.dart';
 
 import 'organization_automation.dart';
 
+import 'org_ui.dart';
+
 /// Job states that keep a group conversation live. Shared so the poll interval
 
 /// and the live-streaming guard cannot drift apart.
@@ -440,169 +442,616 @@ class _GroupPageState extends State<GroupPage> {
     }
   }
 
+  Json? profileOf(Object? id) =>
+      profiles.where((p) => p['id'] == id).firstOrNull;
+
+  /// One agent message in a discussion: role tile lead, name and round in
+  /// the summary, the message itself behind the disclosure.
+  Component contribution(Json part) => el('li', [
+    agentTile(
+      part['name'],
+      role: profileOf(part['profile_id'])?['role'],
+      size: 'xs',
+    ),
+    disclosure('${part['name']} · Round ${part['round']}', [
+      textBlock(part['content'], classes: 'collab-contribution'),
+    ], classes: 'group-message'),
+  ], classes: 'timeline__item');
+
   Component liveDiscussion(Json job) {
     final data = live[job['id']] ?? <String, dynamic>{};
 
-    return details('Live discussion', [
-      if (data['inspection_error'] != null)
-        prose('Live output unavailable: ${data['inspection_error']}'),
+    return disclosure(
+      'Live discussion',
+      [
+        if (data['inspection_error'] != null)
+          errorLine('Live output unavailable: ${data['inspection_error']}'),
 
-      for (final part in records(data['contributions']))
-        card('${part['name']} · Round ${part['round']}', [
-          pre(part['content']),
-        ]),
-
-      if ('${data['artifact_draft'] ?? ''}'.isNotEmpty)
-        details('Artifact draft · Not finalized', [
-          pre(data['artifact_draft']),
-        ]),
-
-      for (final stream in records(data['streams']))
-        details('${stream['name']} · ${stream['status']}', [
-          SnapshotTerminal(
-            '${stream['error'] ?? stream['output'] ?? ''}',
-            key: ValueKey('${job['id']}-${stream['profile_id']}'),
+        if (records(data['contributions']).isNotEmpty)
+          el(
+            'ol',
+            [
+              for (final part in records(data['contributions']))
+                contribution(part),
+            ],
+            classes: 'timeline timeline--trail',
+            attributes: {'role': 'list'},
           ),
 
-          if (stream['input_result'] is Map)
-            prose(
-              'Terminal response: ${stream['input_result']['state']} ${stream['input_result']['error'] ?? ''}',
+        if ('${data['artifact_draft'] ?? ''}'.isNotEmpty)
+          disclosure('Artifact draft · Not finalized', [
+            pre(data['artifact_draft']),
+          ], iconName: 'file-text'),
+
+        for (final stream in records(data['streams']))
+          disclosure('${stream['name']} · ${stream['status']}', [
+            SnapshotTerminal(
+              '${stream['error'] ?? stream['output'] ?? ''}',
+              key: ValueKey('${job['id']}-${stream['profile_id']}'),
             ),
 
-          if (stream['status'] == 'blocked')
-            row([
-              if (stream['console_token'] != null)
-                button(
-                  'Respond to permission or question',
-                  () => respondToBlock(stream),
-                  disabled: busy || pending != null,
-                ),
+            if (stream['input_result'] is Map)
+              note(
+                'Terminal response: ${stream['input_result']['state']} ${stream['input_result']['error'] ?? ''}',
+              ),
 
-              for (final key in ['up', 'down', 'tab', 'enter', 'esc', 'ctrl+c'])
-                button(
-                  key,
-                  () => submit('input', {
-                    'profile_id': stream['profile_id'],
-                    'key': key,
-                    if (stream['console_token'] != null)
-                      'console_token': stream['console_token'],
-                  }),
-                  disabled: busy || pending != null,
+            if (stream['status'] == 'blocked')
+              el('div', [
+                if (stream['console_token'] != null)
+                  button(
+                    'Respond to permission or question',
+                    () => respondToBlock(stream),
+                    disabled: busy || pending != null,
+                    small: true,
+                    primary: true,
+                  ),
+                el(
+                  'div',
+                  [
+                    for (final key in [
+                      'up',
+                      'down',
+                      'tab',
+                      'enter',
+                      'esc',
+                      'ctrl+c',
+                    ])
+                      el(
+                        'button',
+                        [text(key)],
+                        classes: 'btn-group__btn collab-keys__key',
+                        attributes: {
+                          'type': 'button',
+                          if (busy || pending != null) 'disabled': '',
+                        },
+                        events: {
+                          'click': (_) => submit('input', {
+                            'profile_id': stream['profile_id'],
+                            'key': key,
+                            if (stream['console_token'] != null)
+                              'console_token': stream['console_token'],
+                          }),
+                        },
+                      ),
+                  ],
+                  classes: 'btn-group',
+                  attributes: {'role': 'group', 'aria-label': 'Terminal keys'},
                 ),
-            ]),
-        ]),
-    ]);
+              ], classes: 'collab-keys'),
+          ], iconName: 'terminal'),
+      ],
+      iconName: 'activity',
+      classes: 'group-live',
+    );
   }
 
-  Component discussion(Json job) => card('Discussion · ${job['created_at']}', [
-    badge('${job['state']}'),
-    prose(job['prompt'] ?? 'Started a discussion with the group.'),
-
-    details('Discussion context', [
-      pre(job['group']?['description'] ?? ''),
-      prose(
-        'Members: ${(job['runs'] as List? ?? []).map((r) => r['profile']?['name'] ?? r['profile_id']).join(', ')}',
+  Component discussion(Json job) {
+    final admin = connection.operator.value['role'] == 'admin';
+    return el('li', [
+      el(
+        'span',
+        [icon('users')],
+        classes: 'icon-tile icon-tile--sm',
+        attributes: {'aria-hidden': 'true'},
       ),
-    ]),
+      el('div', [
+        el('div', [
+          el('h3', [text('Discussion')], classes: 'collab-record__title'),
+          statePill(job['state']),
+          el('span', [timeStamp(job['created_at'])], classes: 'org-run__time'),
+        ], classes: 'collab-record__head'),
+        if (job['prompt'] != null)
+          el('div', [textBlock(job['prompt'])], classes: 'collab-bubble')
+        else
+          note('Started a discussion with the group.'),
 
-    if (job['progress'] != null) prose(job['progress']),
-    if (job['error'] != null) prose(job['error']),
+        disclosure('Discussion context', [
+          textBlock(job['group']?['description'] ?? ''),
+          el('div', [
+            for (final r in (job['runs'] as List? ?? []))
+              memberChip(
+                r['profile']?['name'] ?? r['profile_id'],
+                role: r['profile']?['role'],
+              ),
+          ], classes: 'org-chips'),
+        ], iconName: 'info'),
 
-    for (final mismatch in records(job['project_mismatches']))
-      card('${mismatch['name']}: project mismatch', [
-        pre(
-          'Session: ${mismatch['session_project']}\nConfigured: ${mismatch['configured_project']}\nGroup target: ${mismatch['expected_project']}',
-        ),
+        if (job['progress'] != null) note(job['progress']),
+        if (job['error'] != null) errorLine(job['error']),
 
-        if (mismatch['recovery_pending'] == true)
-          prose(
-            'Archived session awaits relaunch: ${mismatch['recovery_error'] ?? ''}',
+        for (final mismatch in records(job['project_mismatches']))
+          callout(
+            'warning',
+            'triangle-alert',
+            [
+              factList([
+                ('Session', mono(mismatch['session_project'])),
+                ('Configured', mono(mismatch['configured_project'])),
+                ('Group target', mono(mismatch['expected_project'])),
+              ]),
+
+              if (mismatch['recovery_pending'] == true)
+                note(
+                  'Archived session awaits relaunch: ${mismatch['recovery_error'] ?? ''}',
+                ),
+
+              if (mismatch['repairable'] != true)
+                note(
+                  'Update agent/group settings first. Task-owned or starting sessions require inspection.',
+                ),
+
+              if (admin &&
+                  mismatch['repairable'] == true &&
+                  ['needs_attention', 'uncertain'].contains(job['state']))
+                row([
+                  button(
+                    'Archive and relaunch in current project',
+                    () => realignSession(job, mismatch, false),
+                    disabled: busy || pending != null,
+                    small: true,
+                  ),
+                  button(
+                    'Force realign session',
+                    () => realignSession(job, mismatch, true),
+                    disabled: busy || pending != null,
+                    small: true,
+                    variant: 'ghost',
+                    classes: 'btn--danger',
+                  ),
+                ]),
+            ],
+            title: '${mismatch['name']}: project mismatch',
           ),
 
-        if (mismatch['repairable'] != true)
-          prose(
-            'Update agent/group settings first. Task-owned or starting sessions require inspection.',
-          ),
-
-        if (connection.operator.value['role'] == 'admin' &&
-            mismatch['repairable'] == true &&
-            ['needs_attention', 'uncertain'].contains(job['state']))
+        if (admin &&
+            job['preparation_version'] == 1 &&
+            job['discussion_submitted_at'] == null &&
+            [
+              'waiting_for_members',
+              'queued',
+              'needs_attention',
+              'uncertain',
+            ].contains(job['state']))
           row([
+            if (['needs_attention', 'uncertain'].contains(job['state']))
+              button(
+                'Retry inspected preparation',
+                () => managePreparation(job, true),
+                disabled: busy || pending != null,
+                small: true,
+                iconName: 'rotate-ccw',
+              ),
             button(
-              'Archive and relaunch in current project',
-              () => realignSession(job, mismatch, false),
+              'Cancel waiting meeting',
+              () => managePreparation(job, false),
               disabled: busy || pending != null,
-            ),
-            button(
-              'Force realign session',
-              () => realignSession(job, mismatch, true),
-              disabled: busy || pending != null,
+              small: true,
+              iconName: 'x',
             ),
           ]),
-      ]),
 
-    if (connection.operator.value['role'] == 'admin' &&
-        job['preparation_version'] == 1 &&
-        job['discussion_submitted_at'] == null &&
-        [
-          'waiting_for_members',
-          'queued',
-          'needs_attention',
-          'uncertain',
-        ].contains(job['state']))
-      row([
-        if (['needs_attention', 'uncertain'].contains(job['state']))
-          button(
-            'Retry inspected preparation',
-            () => managePreparation(job, true),
-            disabled: busy || pending != null,
+        if (['needs_attention', 'uncertain'].contains(job['state']) &&
+            (job['discussion_submitted_at'] != null ||
+                job['preparation_version'] == null))
+          row([
+            button(
+              'Recover saved artifact',
+              () => submit('recover', {'job_id': job['id']}),
+              disabled: busy || pending != null,
+              small: true,
+              iconName: 'history',
+            ),
+          ]),
+
+        if (job == jobs.firstOrNull && _activeJobStates.contains(job['state']))
+          liveDiscussion(job),
+
+        if (records(job['contributions']).isNotEmpty)
+          el(
+            'ol',
+            [
+              for (final part in records(job['contributions']))
+                contribution(part),
+            ],
+            classes: 'timeline timeline--trail',
+            attributes: {'role': 'list'},
           ),
-        button(
-          'Cancel waiting meeting',
-          () => managePreparation(job, false),
-          disabled: busy || pending != null,
+
+        if ('${job['result'] ?? ''}'.isNotEmpty)
+          row([
+            button(
+              'View artifact',
+              () => setState(() {
+                tab = 'artifacts';
+                artifact = '${job['id']}';
+              }),
+              small: true,
+              iconName: 'file-text',
+            ),
+          ]),
+      ], classes: 'collab-record__body'),
+    ], classes: 'collab-record');
+  }
+
+  Component onOff(bool on) =>
+      statePill(on ? 'on' : 'off', label: on ? 'On' : 'Off');
+
+  List<Component> postsPanel(bool archived, bool disabled) => [
+    if (!archived)
+      card(
+        'Message the group',
+        [
+          textarea(
+            'Ask the group agent to coordinate its members',
+            message,
+            (v) => message = v,
+          ),
+          el('div', [
+            button(
+              'Send to group',
+              () {
+                final value = message.trim();
+                if (value.isNotEmpty && value.length <= 8000)
+                  submit('discuss', {
+                    'group_id': component.id,
+                    'prompt': value,
+                  });
+              },
+              disabled: disabled,
+              primary: true,
+              iconName: 'send',
+            ),
+          ], classes: 'collab-send'),
+        ],
+        iconName: 'send',
+        classes: 'group-composer',
+      ),
+    card(
+      'Discussions',
+      [
+        if (jobs.isEmpty)
+          emptyState('No discussions yet.', iconName: 'message-square')
+        else
+          el(
+            'ol',
+            [for (final job in jobs) discussion(job)],
+            classes: 'collab-records',
+            attributes: {'role': 'list'},
+          ),
+        if (nextBefore != null)
+          el('div', [
+            button(
+              'Load older discussions',
+              loadOlder,
+              disabled: loading,
+              small: true,
+              iconName: 'history',
+            ),
+          ], classes: 'org-more'),
+      ],
+      iconName: 'history',
+      count: jobs.length,
+    ),
+  ];
+
+  List<Component> artifactsPanel() {
+    final shown = jobs
+        .where(
+          (j) =>
+              '${j['result'] ?? ''}'.isNotEmpty &&
+              (artifact == null || j['id'] == artifact),
+        )
+        .toList();
+    return [
+      if (artifact != null)
+        el('div', [
+          button(
+            'Show all artifacts',
+            () => setState(() => artifact = null),
+            small: true,
+            iconName: 'arrow-left',
+          ),
+        ], classes: 'org-more org-more--start'),
+
+      if (!jobs.any((j) => '${j['result'] ?? ''}'.isNotEmpty))
+        card('Artifacts', [
+          emptyState(
+            'Artifacts appear here after a discussion completes.',
+            iconName: 'file-text',
+          ),
+        ], iconName: 'file-text'),
+
+      for (final job in shown)
+        card(
+          'Discussion artifact',
+          [
+            pre(job['result']),
+            row([
+              if (job['task_id'] != null)
+                button(
+                  'Review task and follow-up proposals',
+                  () => navigate('/tasks/${job['task_id']}'),
+                  small: true,
+                  primary: true,
+                  iconName: 'list-checks',
+                ),
+              button(
+                'Copy Markdown',
+                () => export(job, false),
+                small: true,
+                iconName: 'copy',
+              ),
+              button(
+                'Download Markdown',
+                () => export(job, true),
+                small: true,
+                iconName: 'download',
+              ),
+              button(
+                'Download discussion.json',
+                () => downloadTranscript(job),
+                small: true,
+                iconName: 'download',
+              ),
+              button(
+                'Back to posts',
+                () => setState(() => tab = 'posts'),
+                small: true,
+                variant: 'ghost',
+                iconName: 'arrow-left',
+              ),
+            ]),
+          ],
+          iconName: 'file-text',
+          subtitle: stamp(job['created_at']),
+          classes: 'group-artifact',
         ),
-      ]),
+    ];
+  }
 
-    if (['needs_attention', 'uncertain'].contains(job['state']) &&
-        (job['discussion_submitted_at'] != null ||
-            job['preparation_version'] == null))
-      button(
-        'Recover saved artifact',
-        () => submit('recover', {'job_id': job['id']}),
-        disabled: busy || pending != null,
+  Component membersPanel(List<String> members, bool archived) => card(
+    'Members',
+    [
+      el(
+        'div',
+        [
+          el('table', [
+            el('caption', [text('Group members')], classes: 'visually-hidden'),
+            el('thead', [
+              el('tr', [
+                for (final (label, name) in [
+                  ('Member', 'user'),
+                  ('Status', 'activity'),
+                ])
+                  el(
+                    'th',
+                    [
+                      el('span', [
+                        icon(name, classes: 'icon--sm'),
+                        text(label),
+                      ], classes: 'th'),
+                    ],
+                    attributes: {'scope': 'col'},
+                  ),
+                el(
+                  'th',
+                  [
+                    el('span', [text('Action')], classes: 'visually-hidden'),
+                  ],
+                  classes: 'org-team__actions',
+                  attributes: {'scope': 'col'},
+                ),
+              ]),
+            ]),
+            el('tbody', [
+              for (final id in members)
+                el('tr', [
+                  el(
+                    'th',
+                    [
+                      agentIdentity(
+                        profileOf(id)?['name'] ?? id,
+                        role: profileOf(id)?['role'],
+                        meta: '${profileOf(id)?['role'] ?? ''}',
+                        live: memberStates[id]?['status'] == 'working',
+                      ),
+                    ],
+                    attributes: {'scope': 'row'},
+                  ),
+                  el('td', [
+                    statePill(memberStates[id]?['status'] ?? 'unknown'),
+                  ]),
+                  el('td', [
+                    button(
+                      memberStates[id]?['active'] == true ? 'On' : 'Turn on',
+                      () async {
+                        final run = memberStates[id]?['run_id'];
+                        if (run != null) {
+                          await submit('release', {'job_id': run});
+                          if (pending != null || !mounted) return;
+                        }
+                        await submit('launch', {'profile_id': id});
+                      },
+                      disabled:
+                          busy ||
+                          archived ||
+                          pending != null ||
+                          memberStates[id]?['active'] == true ||
+                          ![
+                            'off',
+                            'stopped',
+                            'exited',
+                          ].contains(memberStates[id]?['status']),
+                      small: true,
+                      iconName: 'power',
+                    ),
+                  ], classes: 'org-team__actions'),
+                ]),
+            ]),
+          ], classes: 'table org-members'),
+        ],
+        classes: 'table-scroll',
+        attributes: {'role': 'region', 'aria-label': 'Group members'},
       ),
+    ],
+    iconName: 'users',
+    count: members.length,
+    subtitle:
+        'Turn on an offline member to launch its saved persona. Active members are on. Uncertain runs need inspection from the organization chart.',
+  );
 
-    if (job == jobs.firstOrNull && _activeJobStates.contains(job['state']))
-      liveDiscussion(job),
+  List<Component> settingsPanel(bool archived) => [
+    card(
+      'Group settings',
+      [
+        factList([
+          ('Automatic queueing', onOff(group!['create_tasks'] == true)),
+          ('Outcome reviews', onOff(group!['notify_outcomes'] != false)),
+          ('Read-only discussion', onOff(group!['read_only'] != false)),
+          ('Scope', text(humanize(group!['review_scope'] ?? 'topic'))),
+        ], classes: 'org-policy__list'),
+        note('Members retain individual permissions.'),
+      ],
+      iconName: 'settings',
+      actions: [
+        button(
+          'Edit group settings',
+          edit,
+          disabled: busy || archived || pending != null,
+          small: true,
+          iconName: 'pencil',
+        ),
+      ],
+    ),
+    OrganizationAutomation(organizationId: '${group!['organization_id']}'),
+  ];
 
-    for (final contribution in records(job['contributions']))
-      details('${contribution['name']} · Round ${contribution['round']}', [
-        pre(contribution['content']),
-      ]),
-
-    if ('${job['result'] ?? ''}'.isNotEmpty)
-      button(
-        'View artifact',
-        () => setState(() {
-          tab = 'artifacts';
-          artifact = '${job['id']}';
-        }),
-      ),
-  ]);
+  Component proposalsPanel() {
+    final proposals = [
+      for (final job in jobs)
+        for (final p in records(job['proposal_details'])) (job, p),
+    ];
+    return card(
+      'Proposals',
+      [
+        if (proposals.isEmpty)
+          emptyState('No proposals yet.', iconName: 'list-checks')
+        else
+          el(
+            'ul',
+            [
+              for (final (job, p) in proposals)
+                el('li', [
+                  el('div', [
+                    el('h3', [
+                      text('${p['title']}'),
+                    ], classes: 'collab-record__title'),
+                    statePill(p['status'] ?? 'Awaiting evaluation'),
+                  ], classes: 'collab-record__head'),
+                  el('p', [
+                    text('Discussion '),
+                    mono(job['id']),
+                    text(
+                      ' · Assignee: ${profileOf(p['profile_id'])?['name'] ?? p['profile_id']}',
+                    ),
+                  ], classes: 'org-note'),
+                  if ('${p['reason'] ?? ''}'.isNotEmpty) note(p['reason']),
+                  if ([
+                    'true',
+                    'yes',
+                  ].contains('${p['needs_review']}'.toLowerCase()))
+                    callout('warning', 'triangle-alert', [
+                      note('Operator review required before execution.'),
+                    ]),
+                  disclosure(
+                    'Acceptance criteria and required checks',
+                    [textBlock(p['description'])],
+                    iconName: 'list-checks',
+                  ),
+                  if (p['task_id'] != null)
+                    row([
+                      button(
+                        'Open created task',
+                        () => navigate('/tasks/${p['task_id']}'),
+                        small: true,
+                        iconName: 'arrow-right',
+                      ),
+                    ]),
+                ], classes: 'group-proposal'),
+            ],
+            classes: 'group-proposals',
+            attributes: {'role': 'list'},
+          ),
+        if (nextBefore != null)
+          el('div', [
+            button(
+              'Load older proposals',
+              loadOlder,
+              disabled: loading,
+              small: true,
+              iconName: 'history',
+            ),
+          ], classes: 'org-more'),
+      ],
+      iconName: 'list-checks',
+      count: proposals.length,
+      actions: [
+        button(
+          'View limits',
+          () => setState(() => tab = 'settings'),
+          small: true,
+          variant: 'ghost',
+          iconName: 'settings',
+        ),
+      ],
+      subtitle:
+          'Creation and queueing outcomes are recorded per discussion. Skipped proposals have not become tasks.',
+    );
+  }
 
   @override
   Component build(BuildContext context) {
     if (!connection.state.connected)
-      return card('Group', [
-        button('Connect on the dashboard', () => navigate('/')),
-      ]);
+      return el('div', [
+        card('Group', [
+          emptyState(
+            'The dashboard is not connected.',
+            iconName: 'wifi-off',
+            actions: [button('Connect on the dashboard', () => navigate('/'))],
+          ),
+        ], iconName: 'message-square'),
+      ], classes: 'group-page');
 
     if (group == null)
-      return card('Group', [
-        prose(error ?? (loaded ? 'Group not found.' : 'Loading group…')),
-        button('Refresh', refresh),
-      ]);
+      return el('div', [
+        card('Group', [
+          emptyState(
+            error ?? (loaded ? 'Group not found.' : 'Loading group…'),
+            iconName: 'message-square',
+            actions: [button('Refresh', refresh, iconName: 'refresh-cw')],
+          ),
+        ], iconName: 'message-square'),
+      ], classes: 'group-page');
 
     final archived = group!['removed_at'] != null;
 
@@ -619,229 +1068,128 @@ class _GroupPageState extends State<GroupPage> {
     final disabled = busy || pending != null || occupied || archived;
 
     return el('div', [
-      card('# ${group!['name']}', [
-        details('Purpose and instructions', [pre(group!['description'])]),
-        badge('${members.length} members'),
-
-        button(
-          'Project knowledge',
-          () => navigate('/knowledge/${group!['organization_id']}'),
-        ),
-
-        row([
+      pageHeader(
+        '${group!['name']}',
+        overline: 'Discussion group',
+        actions: [
+          button(
+            'Project knowledge',
+            () => navigate('/knowledge/${group!['organization_id']}'),
+            iconName: 'book-open',
+          ),
           button(
             'Edit group',
             edit,
             disabled: busy || pending != null || archived,
+            iconName: 'pencil',
           ),
-          button('Remove group', () async {
-            final epoch = connection.generation;
-            if (await confirm(
-                  'Remove ${group!['name']}?',
-                  'Removes this group and closes its facilitator terminal. Member agents remain. History, artifacts and worktree files are preserved.',
-                ) &&
-                mounted &&
-                epoch == connection.generation)
-              await submit('remove_group', {'group_id': component.id});
-          }, disabled: disabled),
+          button(
+            'Remove group',
+            () async {
+              final epoch = connection.generation;
+              if (await confirm(
+                    'Remove ${group!['name']}?',
+                    'Removes this group and closes its facilitator terminal. Member agents remain. History, artifacts and worktree files are preserved.',
+                  ) &&
+                  mounted &&
+                  epoch == connection.generation)
+                await submit('remove_group', {'group_id': component.id});
+            },
+            disabled: disabled,
+            variant: 'danger',
+            iconName: 'trash-2',
+          ),
           button(
             'Start discussion',
             () => submit('discuss', {'group_id': component.id}),
             disabled: disabled,
             primary: true,
+            iconName: 'play',
           ),
-        ]),
+        ],
+      ),
 
+      el('section', [
+        el('div', [
+          el('span', [
+            text('${members.length} members'),
+          ], classes: 'group-summary__count'),
+          el('div', [
+            for (final id in members)
+              memberChip(
+                profileOf(id)?['name'] ?? id,
+                role: profileOf(id)?['role'],
+                status: '${memberStates[id]?['status'] ?? 'unknown'}',
+              ),
+          ], classes: 'org-chips'),
+        ], classes: 'group-summary__members'),
+        disclosure('Purpose and instructions', [
+          textBlock(group!['description']),
+        ], iconName: 'file-text'),
         if (archived)
-          prose(
-            'Archived group · Saved discussions and downloads remain available.',
-          ),
-      ]),
+          callout('neutral', 'archive', [
+            note(
+              'Archived group · Saved discussions and downloads remain available.',
+            ),
+          ]),
+      ], classes: 'card group-summary'),
 
-      row([
-        for (final item in {
-          'posts': 'Posts',
-          'artifacts': 'Artifacts',
-          'proposals': 'Proposals',
-          'settings': 'Settings',
-          'members': 'Members',
-          'about': 'About',
-        }.entries)
-          button(
-            item.value,
-            () => setState(() {
-              tab = item.key;
-              artifact = null;
-            }),
-            primary: tab == item.key,
-          ),
-      ]),
+      el('div', [
+        viewTabs(
+          'group-view',
+          'Group sections',
+          {
+            'posts': ('Posts', 'message-square'),
+            'artifacts': ('Artifacts', 'file-text'),
+            'proposals': ('Proposals', 'list-checks'),
+            'settings': ('Settings', 'settings'),
+            'members': ('Members', 'users'),
+            'about': ('About', 'info'),
+          },
+          tab,
+          (value) => setState(() {
+            tab = value;
+            artifact = null;
+          }),
+        ),
+      ], classes: 'org-tabsrow'),
 
-      if (error != null) prose(error),
+      if (error != null) errorLine(error),
       if (pending != null && !busy)
-        row([
-          button(
-            'Retry same request',
-            () => submit(pending!.action, const {}, retry: true),
-          ),
-          button(
-            'Dismiss request',
-            () => setState(() {
-              pending = null;
-              error = null;
-            }),
-          ),
-        ]),
-
-      if (tab == 'posts') ...[
-        if (!archived)
-          card('Message the group', [
-            textarea(
-              'Ask the group agent to coordinate its members',
-              message,
-              (v) => message = v,
+        el('div', [
+          icon('history', classes: 'icon--sm'),
+          row([
+            button(
+              'Retry same request',
+              () => submit(pending!.action, const {}, retry: true),
+              small: true,
             ),
             button(
-              'Send to group',
-              () {
-                final value = message.trim();
-                if (value.isNotEmpty && value.length <= 8000)
-                  submit('discuss', {
-                    'group_id': component.id,
-                    'prompt': value,
-                  });
-              },
-              disabled: disabled,
-              primary: true,
+              'Dismiss request',
+              () => setState(() {
+                pending = null;
+                error = null;
+              }),
+              small: true,
+              variant: 'ghost',
             ),
           ]),
+        ], classes: 'org-retry'),
 
-        if (jobs.isEmpty) prose('No discussions yet.'),
-        for (final job in jobs) discussion(job),
-
-        if (nextBefore != null)
-          button('Load older discussions', loadOlder, disabled: loading),
-      ],
-
-      if (tab == 'artifacts') ...[
-        if (artifact != null)
-          button('Show all artifacts', () => setState(() => artifact = null)),
-
-        if (!jobs.any((j) => '${j['result'] ?? ''}'.isNotEmpty))
-          prose('Artifacts appear here after a discussion completes.'),
-
-        for (final job in jobs.where(
-          (j) =>
-              '${j['result'] ?? ''}'.isNotEmpty &&
-              (artifact == null || j['id'] == artifact),
-        ))
-          card('Discussion artifact · ${job['created_at']}', [
-            pre(job['result']),
-            row([
-              if (job['task_id'] != null)
-                button(
-                  'Review task and follow-up proposals',
-                  () => navigate('/tasks/${job['task_id']}'),
-                ),
-              button('Copy Markdown', () => export(job, false)),
-              button('Download Markdown', () => export(job, true)),
-              button('Download discussion.json', () => downloadTranscript(job)),
-              button('Back to posts', () => setState(() => tab = 'posts')),
-            ]),
-          ]),
-      ],
-
-      if (tab == 'members') ...[
-        prose(
-          'Turn on an offline member to launch its saved persona. Active members are on. Uncertain runs need inspection from the organization chart.',
-        ),
-
-        for (final id in members)
-          card(
-            '${profiles.where((p) => p['id'] == id).firstOrNull?['name'] ?? id}',
-            [
-              prose(
-                '${profiles.where((p) => p['id'] == id).firstOrNull?['role'] ?? ''} · ${memberStates[id]?['status'] ?? 'unknown'}',
-              ),
-
-              button(
-                memberStates[id]?['active'] == true ? 'On' : 'Turn on',
-                () async {
-                  final run = memberStates[id]?['run_id'];
-                  if (run != null) {
-                    await submit('release', {'job_id': run});
-                    if (pending != null || !mounted) return;
-                  }
-                  await submit('launch', {'profile_id': id});
-                },
-                disabled:
-                    busy ||
-                    archived ||
-                    pending != null ||
-                    memberStates[id]?['active'] == true ||
-                    ![
-                      'off',
-                      'stopped',
-                      'exited',
-                    ].contains(memberStates[id]?['status']),
-              ),
-            ],
-          ),
-      ],
-
-      if (tab == 'settings') ...[
-        card('Group settings', [
-          prose(
-            'Automatic queueing: ${group!['create_tasks'] == true ? 'on' : 'off'}. Outcome reviews: ${group!['notify_outcomes'] != false ? 'on' : 'off'}. Read-only discussion: ${group!['read_only'] != false ? 'on' : 'off'}. Scope: ${group!['review_scope'] ?? 'topic'}. Members retain individual permissions.',
-          ),
-          button(
-            'Edit group settings',
-            edit,
-            disabled: busy || archived || pending != null,
-          ),
-        ]),
-        OrganizationAutomation(organizationId: '${group!['organization_id']}'),
-      ],
-
-      if (tab == 'proposals') ...[
-        prose(
-          'Creation and queueing outcomes are recorded per discussion. Skipped proposals have not become tasks.',
-        ),
-
-        for (final job in jobs)
-          for (final p in records(job['proposal_details']))
-            card('${p['title']}', [
-              badge('${p['status'] ?? 'Awaiting evaluation'}'),
-              prose(
-                'Discussion: ${job['id']} · Assignee: ${profiles.where((profile) => profile['id'] == p['profile_id']).firstOrNull?['name'] ?? p['profile_id']}',
-              ),
-              if ('${p['reason'] ?? ''}'.isNotEmpty) prose(p['reason']),
-              if ([
-                'true',
-                'yes',
-              ].contains('${p['needs_review']}'.toLowerCase()))
-                prose('Operator review required before execution.'),
-              details('Acceptance criteria and required checks', [
-                pre(p['description']),
-              ]),
-              if (p['task_id'] != null)
-                button(
-                  'Open created task',
-                  () => navigate('/tasks/${p['task_id']}'),
-                ),
-            ]),
-        if (nextBefore != null)
-          button('Load older proposals', loadOlder, disabled: loading),
-        button('View limits', () => setState(() => tab = 'settings')),
-      ],
-
-      if (tab == 'about')
-        card('About this group', [
-          pre(group!['description']),
-          prose(
-            'This group has its own Herdr conversation. Its agent coordinates members and synthesizes discussion artifacts, choosing rounds and follow-ups. Posts and artifacts preserve the description and members used for that discussion. Review recommendations before action.',
-          ),
-        ]),
-    ]);
+      tabPanel('group-view', tab, [
+        if (tab == 'posts') ...postsPanel(archived, disabled),
+        if (tab == 'artifacts') ...artifactsPanel(),
+        if (tab == 'members') membersPanel(members, archived),
+        if (tab == 'settings') ...settingsPanel(archived),
+        if (tab == 'proposals') proposalsPanel(),
+        if (tab == 'about')
+          card('About this group', [
+            textBlock(group!['description']),
+            note(
+              'This group has its own Herdr conversation. Its agent coordinates members and synthesizes discussion artifacts, choosing rounds and follow-ups. Posts and artifacts preserve the description and members used for that discussion. Review recommendations before action.',
+            ),
+          ], iconName: 'info'),
+      ]),
+    ], classes: 'group-page');
   }
 }

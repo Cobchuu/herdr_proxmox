@@ -36,7 +36,7 @@
   /* ---- Borders ---------------------------------------------------------- */
   --color-border:          light-dark(#E4E7EC, #222934); /* dividers, card edges */
   --color-border-strong:   light-dark(#CDD2DA, #2F3746); /* buttons, chips */
-  --color-border-input:    light-dark(#8C94A3, #5E6779); /* form fields — 3:1 vs surface */
+  --color-border-input:    light-dark(#838B9A, #5E6779); /* form fields, switch tracks: >= 3:1 on surface, canvas, sunken, hover (light) */
 
   /* ---- Text ------------------------------------------------------------- */
   --color-text:            light-dark(#0E1320, #E8EBF1);
@@ -72,9 +72,9 @@
   --color-danger-fg:  light-dark(#B42318, #FF8E88);
   --color-danger-bg:  light-dark(#FDECEB, #2C1416);
   --color-danger:     light-dark(#E5484D, #F2555A);
-  --color-info-fg:    light-dark(#1D64B0, #7DB9F7);
-  --color-info-bg:    light-dark(#E8F2FC, #102033);
-  --color-info:       light-dark(#3B82F6, #4C9AFF);
+  --color-info-fg:    light-dark(#0369A1, #7DD3FC); /* sky, kept apart from the indigo accent ("Ready to merge") */
+  --color-info-bg:    light-dark(#E0F2FE, #0C2536);
+  --color-info:       light-dark(#0284C7, #38BDF8); /* dots, hotfix markers: >= 3.5:1 vs white, canvas, sunken, tint */
   --color-neutral-fg: light-dark(#485164, #A9B1C0);
   --color-neutral-bg: light-dark(#EEF0F3, #1C222C);
   --color-neutral:    light-dark(#838B9A, #6B7486); /* nudged: status dots >= 3:1 */
@@ -132,7 +132,7 @@
   --text-md-size:  1rem;      --text-md-leading:  1.5rem;   /* 16/24 card titles */
   --text-lg-size:  1.125rem;  --text-lg-leading:  1.625rem; /* 18/26 */
   --text-xl-size:  1.375rem;  --text-xl-leading:  1.75rem;  /* 22/28 */
-  --text-2xl-size: 1.75rem;   --text-2xl-leading: 2.125rem; /* 28/34 H1, KPI values */
+  --text-2xl-size: 1.75rem;   --text-2xl-leading: 2.125rem; /* 28/34 H1 */
   --text-3xl-size: 2.125rem;  --text-3xl-leading: 2.5rem;   /* 34/40 */
   --text-wordmark-size: 1.0625rem;                          /* 17px "Herdr" wordmark */
 
@@ -165,8 +165,8 @@
   --radius-xs: 4px;
   --radius-sm: 6px;     /* badges, kbd */
   --radius-md: 10px;    /* buttons, inputs, nav items */
-  --radius-lg: 14px;    /* cards */
-  --radius-xl: 20px;    /* runtime banner, dialogs */
+  --radius-lg: 14px;    /* cards, runtime banner */
+  --radius-xl: 20px;    /* dialogs */
   --radius-full: 9999px;/* pills, avatars */
 
   /* ---- Sizes ------------------------------------------------------------ */
@@ -176,12 +176,17 @@
   --content-max: 1440px;
   --inspector-width: 360px; /* workflow inspector side panel (xl and up) */
   --dialog-width: 560px;    /* default modal dialog width */
+  --size-tile-sm: 28px;     /* small role / icon tiles, attention icons */
+  --size-count-sm: 18px;    /* compact count badge (tabs, chips, group titles) */
   --control-sm: 30px;
   --control-md: 36px;
   --control-lg: 42px;
   --icon-sm: 16px;
   --icon-md: 18px;
   --icon-lg: 20px;
+
+  --dash-len: 4px;          /* dash + gap of drawn dashed lines (repeating gradients) */
+  --opacity-dim: .42;       /* items outside a highlighted chain / agent */
 
   /* ---- Motion ----------------------------------------------------------- */
   --duration-fast: 120ms;

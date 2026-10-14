@@ -28,6 +28,8 @@ class _DashboardAppState extends State<DashboardApp> {
   late final JSFunction hashListener;
   bool restoring = true;
   bool drawer = false;
+  bool agentsOpen = true;
+  bool sidebarCollapsed = themeStorage.readSidebarCollapsed();
   bool loadingDirectory = false;
   bool polling = false;
   int noticeGeneration = -1;
@@ -332,14 +334,83 @@ class _DashboardAppState extends State<DashboardApp> {
 
   Component _nav(String label, String name, String route) => el(
     'a',
-    [icon(name), text(label)],
-    classes: 'nav-item',
+    [
+      icon(name),
+      el('span', [text(label)], classes: 'nav__label'),
+    ],
+    classes: 'nav__item nav-item',
     attributes: {
       'href': '#$route',
       'aria-current': currentRoute.path == Uri.parse(route).path
           ? 'page'
           : 'false',
     },
+  );
+
+  Component _section(String label) =>
+      el('p', [text(label)], classes: 'nav__section');
+
+  void toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    if (sidebarCollapsed)
+      web.document.documentElement?.setAttribute('data-sidebar', 'collapsed');
+    else
+      web.document.documentElement?.removeAttribute('data-sidebar');
+    themeStorage.writeSidebarCollapsed(sidebarCollapsed);
+    rebuild();
+  }
+
+  /// Topbar runtime pill: connection + Herdr state in one place.
+  Component _runtimePill(DashboardState state) {
+    final running = state.connected && state.serverStatus == 'running';
+    final label = !state.connected
+        ? 'Disconnected'
+        : 'Herdr ${state.serverStatus}';
+    return el(
+      'span',
+      [
+        icon(
+          state.connected ? 'wifi' : 'wifi-off',
+          classes: 'runtime-pill__icon',
+        ),
+        el('span', [text(label)], classes: 'runtime-pill__label'),
+      ],
+      classes: 'runtime-pill',
+      attributes: {
+        'data-tone': running
+            ? 'success'
+            : state.connected
+            ? 'warning'
+            : 'neutral',
+        'role': 'status',
+      },
+    );
+  }
+
+  Component _themeSwitch() => el(
+    'div',
+    [
+      for (final (mode, iconName, label) in [
+        ('light', 'sun', 'Light theme'),
+        ('system', 'monitor', 'System theme'),
+        ('dark', 'moon', 'Dark theme'),
+      ])
+        el(
+          'button',
+          [icon(iconName)],
+          classes: 'segmented__btn',
+          attributes: {
+            'type': 'button',
+            'role': 'radio',
+            'aria-checked': '${theme == mode}',
+            'aria-label': label,
+            'title': label,
+          },
+          events: {'click': (_) => applyTheme(mode)},
+        ),
+    ],
+    classes: 'segmented theme-switch',
+    attributes: {'role': 'radiogroup', 'aria-label': 'Color theme'},
   );
   Component _signIn() => el('div', [
     logo(),
@@ -410,6 +481,18 @@ class _DashboardAppState extends State<DashboardApp> {
       directory['archived_groups'] ?? [],
     ).where((item) => item['organization_id'] == org?['id']).toList();
     final needle = navSearch.trim().toLowerCase();
+    String activityOf(Map<String, dynamic> profile) => activityFor(
+      connection.state.agents
+              .where((a) => a['profile_id'] == profile['id'])
+              .firstOrNull ??
+          {},
+    );
+    final working = profiles
+        .where((profile) => activityOf(profile) == 'working')
+        .length;
+    final updated = state.refreshed == null
+        ? 'Waiting for first update'
+        : 'Updated ${state.refreshed!.toLocal().toString().substring(11, 19)}';
     return el('div', [
       el(
         'a',
@@ -431,47 +514,69 @@ class _DashboardAppState extends State<DashboardApp> {
             'a',
             [logo()],
             attributes: {'href': '#/', 'aria-label': 'Herdr home'},
-            classes: 'rail-brand',
+            classes: 'rail__brand',
           ),
-          for (final item in orgs)
-            el(
-              'button',
-              [
-                text(
-                  '${item['name']}'.trim().isEmpty
-                      ? '?'
-                      : '${item['name']}'.trim().substring(0, 1).toUpperCase(),
+          el(
+            'ul',
+            [
+              for (final item in orgs)
+                el('li', [
+                  el(
+                    'button',
+                    [
+                      text(
+                        '${item['name']}'.trim().isEmpty
+                            ? '?'
+                            : '${item['name']}'
+                                  .trim()
+                                  .substring(0, 1)
+                                  .toUpperCase(),
+                      ),
+                    ],
+                    classes: 'rail__tile',
+                    attributes: {
+                      'type': 'button',
+                      'title': '${item['name']}',
+                      'aria-label': 'Select ${item['name']}',
+                      'aria-current': '${item['id'] == org?['id']}',
+                    },
+                    events: {
+                      'click': (_) {
+                        connection.selectedOrganization.value =
+                            item['id'] as String;
+                        navigate('/organization');
+                      },
+                    },
+                  ),
+                ]),
+              el('li', [
+                el(
+                  'a',
+                  [icon('plus')],
+                  classes: 'rail__add',
+                  attributes: {
+                    'href': '#/organization',
+                    'aria-label': 'Manage organizations',
+                    'title': 'Manage organizations',
+                  },
                 ),
-              ],
-              classes:
-                  'rail-tile ${item['id'] == org?['id'] ? 'is-selected' : ''}',
+              ]),
+            ],
+            classes: 'rail__list',
+            attributes: {'role': 'list'},
+          ),
+          el('div', [
+            el(
+              'a',
+              [icon('settings')],
+              classes: 'rail__btn',
               attributes: {
-                'type': 'button',
-                'title': '${item['name']}',
-                'aria-label': 'Select ${item['name']}',
-              },
-              events: {
-                'click': (_) {
-                  connection.selectedOrganization.value = item['id'] as String;
-                  navigate('/organization');
-                },
+                'href': '#/configuration',
+                'aria-label': 'Settings',
+                'title': 'Settings',
               },
             ),
-          el(
-            'a',
-            [icon('plus')],
-            classes: 'rail-add',
-            attributes: {
-              'href': '#/organization',
-              'aria-label': 'Manage organizations',
-            },
-          ),
-          el(
-            'a',
-            [icon('settings')],
-            classes: 'rail-settings',
-            attributes: {'href': '#/configuration', 'aria-label': 'Settings'},
-          ),
+          ], classes: 'rail__footer'),
         ],
         classes: 'rail',
         attributes: {'aria-label': 'Organizations'},
@@ -480,109 +585,169 @@ class _DashboardAppState extends State<DashboardApp> {
         'aside',
         [
           el('div', [
-            el('strong', [text('Herdr')], classes: 'wordmark'),
-            button(
-              'Close',
+            el('span', [logo()], classes: 'sidebar__mark'),
+            el('span', [text('Herdr')], classes: 'wordmark'),
+            iconButton(
+              'Close navigation',
+              'x',
               () => setState(() => drawer = false),
-              classes: 'drawer-close',
+              small: true,
+              classes: 'sidebar__close drawer-close',
             ),
-          ], classes: 'sidebar-brand'),
+          ], classes: 'sidebar__brand'),
           el('div', [
             if (org != null)
-              select(
-                'Organization',
-                '${org['id']}',
-                {for (final item in orgs) '${item['id']}': '${item['name']}'},
-                (value) {
-                  connection.selectedOrganization.value = value;
-                  navigate('/organization');
-                },
+              el('div', [
+                roleTile(org['name'], role: 'lead', size: 'sm'),
+                select(
+                  'Organization',
+                  '${org['id']}',
+                  {for (final item in orgs) '${item['id']}': '${item['name']}'},
+                  (value) {
+                    connection.selectedOrganization.value = value;
+                    navigate('/organization');
+                  },
+                ),
+              ], classes: 'team-switcher'),
+            el('div', [
+              icon('search', classes: 'icon--sm search-field__icon'),
+              field(
+                'Search navigation',
+                navSearch,
+                (value) => setState(() => navSearch = value),
+                placeholder: 'Search agents or groups',
               ),
-            field(
-              'Search navigation',
-              navSearch,
-              (value) => setState(() => navSearch = value),
-              placeholder: 'Agent or group',
-            ),
+            ], classes: 'nav-search search-field'),
             el(
               'nav',
               [
-                _nav('Overview', 'layout-dashboard', '/'),
-                _nav('Org chart', 'network', '/organization'),
-                _nav('Tasks', 'list-checks', '/tasks'),
-                _nav('Project knowledge', 'book-open', '/knowledge'),
-                _nav('Agent activity', 'activity', '/agents'),
-                el('h3', [text('Workspace')]),
-                _nav('Project explorer', 'folder', '/explorer'),
-                _nav('Terminal logs', 'terminal', '/logs'),
-                _nav('CLI accounts', 'key-round', '/configuration'),
-                _nav('Builds & deployments', 'rocket', '/builds'),
-                el('h3', [text('Agents')]),
-                if (profiles.isEmpty)
-                  el('p', [text('Hire your first agent')], classes: 'muted'),
-                for (final profile in profiles.where(
-                  (p) => '$p'.toLowerCase().contains(needle),
-                ))
+                el('div', [
+                  _nav('Overview', 'layout-dashboard', '/'),
+                  _nav('Org chart', 'network', '/organization'),
+                  _nav('Tasks', 'list-checks', '/tasks'),
+                  _nav('Builds & deployments', 'rocket', '/builds'),
+                  _nav('Project knowledge', 'book-open', '/knowledge'),
+                  _nav('Agent activity', 'activity', '/agents'),
+                ], classes: 'nav'),
+                _section('Workspace'),
+                el('div', [
+                  _nav('Project explorer', 'folder', '/explorer'),
+                  _nav('Terminal logs', 'terminal', '/logs'),
+                  _nav('CLI accounts', 'key-round', '/configuration'),
+                ], classes: 'nav'),
+                el('div', [
                   el(
-                    'a',
-                    [
-                      el(
-                        'span',
-                        [],
-                        classes: 'status-dot',
-                        attributes: {
-                          'data-tone': toneFor(
-                            activityFor(
-                              connection.state.agents
-                                      .where(
-                                        (a) => a['profile_id'] == profile['id'],
-                                      )
-                                      .firstOrNull ??
-                                  {},
-                            ),
-                          ),
-                        },
-                      ),
-                      text(profile['name']),
-                    ],
-                    classes: 'nav-item',
+                    'button',
+                    [icon('chevron-down'), text('Agents')],
+                    classes: 'nav-group__toggle',
                     attributes: {
-                      'href':
-                          '#/agents/${Uri.encodeComponent('${profile['id']}')}',
+                      'type': 'button',
+                      'aria-expanded': '$agentsOpen',
+                      'aria-controls': 'nav-agents',
+                    },
+                    events: {
+                      'click': (_) => setState(() => agentsOpen = !agentsOpen),
                     },
                   ),
-                el('h3', [text('Groups')]),
-                if (groups.isEmpty)
-                  el('p', [text('No discussion groups yet')], classes: 'muted'),
-                for (final group in groups.where(
-                  (g) => '$g'.toLowerCase().contains(needle),
-                ))
-                  _nav(
-                    '${group['name']}',
-                    'message-square',
-                    '/groups/${Uri.encodeComponent('${group['id']}')}',
-                  ),
-                if (archived.isNotEmpty) el('h3', [text('Archived groups')]),
-                for (final group in archived.where(
-                  (g) => '$g'.toLowerCase().contains(needle),
-                ))
-                  _nav(
-                    '${group['name']}',
-                    'archive',
-                    '/groups/${Uri.encodeComponent('${group['id']}')}',
-                  ),
+                  if (profiles.isNotEmpty)
+                    el('span', [
+                      text('$working working'),
+                    ], classes: 'nav-group__meta'),
+                ], classes: 'nav__section'),
+                el(
+                  'div',
+                  [
+                    if (profiles.isEmpty)
+                      el('p', [
+                        text('Hire your first agent'),
+                      ], classes: 'nav__empty'),
+                    for (final profile in profiles.where(
+                      (p) => '$p'.toLowerCase().contains(needle),
+                    ))
+                      el(
+                        'a',
+                        [
+                          statusDot(activityOf(profile)),
+                          el('span', [
+                            text(profile['name']),
+                          ], classes: 'nav__label'),
+                          el('span', [
+                            text(activityOf(profile)),
+                          ], classes: 'visually-hidden'),
+                        ],
+                        classes: 'nav__item nav-item',
+                        attributes: {
+                          'href':
+                              '#/agents/${Uri.encodeComponent('${profile['id']}')}',
+                          'aria-current':
+                              currentRoute.path == '/agents/${profile['id']}'
+                              ? 'page'
+                              : 'false',
+                        },
+                      ),
+                  ],
+                  classes: 'nav',
+                  attributes: {
+                    'id': 'nav-agents',
+                    if (!agentsOpen) 'hidden': '',
+                  },
+                ),
+                _section('Groups'),
+                el('div', [
+                  if (groups.isEmpty)
+                    el('p', [
+                      text('No discussion groups yet'),
+                    ], classes: 'nav__empty'),
+                  for (final group in groups.where(
+                    (g) => '$g'.toLowerCase().contains(needle),
+                  ))
+                    _nav(
+                      '${group['name']}',
+                      'message-square',
+                      '/groups/${Uri.encodeComponent('${group['id']}')}',
+                    ),
+                ], classes: 'nav'),
+                if (archived.isNotEmpty) _section('Archived groups'),
+                if (archived.isNotEmpty)
+                  el('div', [
+                    for (final group in archived.where(
+                      (g) => '$g'.toLowerCase().contains(needle),
+                    ))
+                      _nav(
+                        '${group['name']}',
+                        'archive',
+                        '/groups/${Uri.encodeComponent('${group['id']}')}',
+                      ),
+                  ], classes: 'nav'),
               ],
               attributes: {'aria-label': 'Main navigation'},
             ),
-          ], classes: 'sidebar-scroll'),
+          ], classes: 'sidebar__scroll'),
           if (state.connected)
             el('div', [
-              el('strong', [text(connection.operator.value['name'])]),
-              el('span', [
-                text(connection.operator.value['role']),
-              ], classes: 'muted'),
-              button('Sign out', connection.disconnect),
-            ], classes: 'sidebar-user'),
+              el('div', [
+                el(
+                  'span',
+                  [text(initials(connection.operator.value['name']))],
+                  classes: 'avatar',
+                  attributes: {'aria-hidden': 'true'},
+                ),
+                el('span', [
+                  el('span', [
+                    text(connection.operator.value['name']),
+                  ], classes: 'user-card__name'),
+                  el('span', [
+                    text(connection.operator.value['role']),
+                  ], classes: 'user-card__meta'),
+                ], classes: 'user-card__text'),
+                iconButton(
+                  'Sign out',
+                  'log-out',
+                  connection.disconnect,
+                  small: true,
+                ),
+              ], classes: 'user-card'),
+            ], classes: 'sidebar__footer'),
         ],
         classes: 'sidebar ${drawer ? 'is-open' : ''}',
         attributes: {'aria-label': 'Sidebar'},
@@ -591,50 +756,109 @@ class _DashboardAppState extends State<DashboardApp> {
         el(
           'button',
           [],
-          classes: 'drawer-scrim',
-          attributes: {'aria-label': 'Close navigation'},
+          classes: 'scrim drawer-scrim',
+          attributes: {'aria-label': 'Close navigation', 'type': 'button'},
           events: {'click': (_) => setState(() => drawer = false)},
         ),
       el('div', [
         el('header', [
-          button(
-            'Menu',
+          iconButton(
+            'Open navigation',
+            'menu',
             () => setState(() => drawer = !drawer),
-            classes: 'drawer-toggle',
+            classes: 'topbar__menu drawer-toggle',
+            attributes: {'aria-expanded': '$drawer'},
           ),
-          el('div', [
-            if (org != null) text('${org['name']} / '),
-            el('strong', [text(title)]),
-          ], classes: 'breadcrumb'),
-          badge(
-            state.connected ? 'Connected' : 'Disconnected',
-            tone: state.connected ? 'success' : 'neutral',
+          iconButton(
+            sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar',
+            'panel-left',
+            toggleSidebar,
+            classes: 'topbar__collapse',
+            attributes: {'aria-expanded': '${!sidebarCollapsed}'},
           ),
-          el('div', [
-            for (final mode in ['light', 'system', 'dark'])
-              button(
-                mode,
-                () => applyTheme(mode),
-                classes: theme == mode ? 'is-selected' : null,
+          el(
+            'nav',
+            [
+              el(
+                'ol',
+                [
+                  if (org != null)
+                    el('li', [
+                      el(
+                        'a',
+                        [text('${org['name']}')],
+                        classes: 'breadcrumb__link',
+                        attributes: {'href': '#/organization'},
+                      ),
+                    ], classes: 'breadcrumb__item'),
+                  el('li', [
+                    el(
+                      'span',
+                      [text(title)],
+                      attributes: {'aria-current': 'page'},
+                    ),
+                  ], classes: 'breadcrumb__item'),
+                ],
+                classes: 'breadcrumb__list',
+                attributes: {'role': 'list'},
               ),
-          ], classes: 'theme-switch'),
-          if (notices.isNotEmpty)
-            button(
-              '${notices.length} integration notices',
-              showNotices,
-              classes: 'notice-button',
-            ),
+            ],
+            classes: 'breadcrumb',
+            attributes: {'aria-label': 'Breadcrumb'},
+          ),
+          el('div', [
+            el('span', [text(updated)], classes: 'updated topbar__updated'),
+            _runtimePill(state),
+            if (state.connected)
+              iconButton(
+                'Refresh',
+                'refresh-cw',
+                () => connection.send(DashboardCommand('refresh')),
+                disabled: state.busy,
+                classes: state.busy ? 'is-spinning' : null,
+              ),
+            _themeSwitch(),
+            if (state.connected)
+              el(
+                'button',
+                [
+                  icon('bell'),
+                  el('span', [
+                    text(
+                      notices.isEmpty
+                          ? 'Integration notices'
+                          : '${notices.length} integration notices',
+                    ),
+                  ], classes: 'visually-hidden'),
+                  if (notices.isNotEmpty) el('span', [], classes: 'notif__dot'),
+                ],
+                classes: 'btn btn--ghost btn--icon notif notice-button',
+                attributes: {
+                  'type': 'button',
+                  'title': notices.isEmpty
+                      ? 'Integration notices'
+                      : '${notices.length} integration notices',
+                },
+                events: {'click': (_) => showNotices()},
+              ),
+          ], classes: 'topbar__actions'),
         ], classes: 'topbar'),
         el(
           'main',
           [
-            if (state.error != null) notice(state.error, error: true),
-            if (messages.value != null)
-              el('div', [
-                notice(messages.value),
-                button('Dismiss', () => messages.value = null),
-              ], classes: 'toast'),
-            if (state.connected) _page() else _signIn(),
+            el('div', [
+              if (state.error != null) notice(state.error, error: true),
+              if (messages.value != null)
+                el('div', [
+                  notice(messages.value),
+                  button(
+                    'Dismiss',
+                    () => messages.value = null,
+                    variant: 'ghost',
+                  ),
+                ], classes: 'toast'),
+              if (state.connected) _page() else _signIn(),
+            ], classes: 'page-frame'),
           ],
           classes: 'main-content',
           attributes: {
@@ -643,18 +867,7 @@ class _DashboardAppState extends State<DashboardApp> {
             'aria-busy': '${state.busy}',
           },
         ),
-        el('footer', [
-          text(
-            'Herdr: ${state.serverStatus} · ${state.refreshed == null ? 'Waiting for first update' : 'Updated ${state.refreshed!.toLocal().toString().substring(11, 19)}'}',
-          ),
-          if (state.connected)
-            button(
-              'Refresh',
-              () => connection.send(DashboardCommand('refresh')),
-              disabled: state.busy,
-            ),
-        ], classes: 'statusbar'),
-      ], classes: 'workspace'),
+      ], classes: 'workspace app__column'),
       buildDialogs(),
     ], classes: 'app');
   }

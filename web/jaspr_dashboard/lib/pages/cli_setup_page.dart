@@ -1,4 +1,5 @@
 import 'operations_support.dart';
+import 'ops_ui.dart';
 import '../terminal.dart';
 import 'setup_links.dart';
 import 'ssh_access_card.dart';
@@ -211,6 +212,13 @@ class _CliState extends OperationsState<CliSetupPage> {
     return 'Herdr integration: $connected of $tracked installed agents current${parts.isEmpty ? '' : ' — ${parts.join('; ')}'}. Agents without a current integration cannot report state or resume sessions.';
   }
 
+  String statusLabel(Object? status) {
+    final words = '${status ?? ''}'.replaceAll('_', ' ');
+    return words.isEmpty
+        ? words
+        : '${words[0].toUpperCase()}${words.substring(1)}';
+  }
+
   Component account(Map<String, dynamic> cli) {
     final active = session != null && selected == cli['id'];
     final ready = [
@@ -218,93 +226,172 @@ class _CliState extends OperationsState<CliSetupPage> {
       'credentials_detected',
     ].contains(cli['status']);
     final integration = cli['integration'] as Map?;
-    return card('${cli['name']}', [
-      badge(active ? 'Setup open' : '${cli['status']}'.replaceAll('_', ' ')),
-      paragraph(cli['detail']),
-      button(
-        active
-            ? 'Setup in progress'
-            : cli['installed'] != true
-            ? 'CLI not installed'
-            : ready
-            ? 'Manage account'
-            : 'Connect account',
-        () => start(cli['id'] as String),
-        primary: true,
-        disabled: busy || session != null || cli['installed'] != true,
-      ),
-      if (cli['id'] == 'claude' && cli['installed'] == true)
-        button(
-          'Test account',
-          () => cliAction('verify', cli['id'] as String),
-          disabled: busy || session != null,
-        ),
-      if (cli['installed'] == true && integration?['current'] == true)
-        paragraph(
-          'Herdr integration ${integration?['version'] ?? ''} — connected',
-        ),
-      if (cli['installed'] == true && integration?['current'] != true) ...[
-        paragraph(
-          integration?['installed'] == true
-              ? 'Herdr integration is outdated, needs repair or could not be verified. Until current, this agent cannot report state or resume finished sessions.'
-              : 'Herdr integration missing. Without it this agent cannot report state or resume finished sessions.',
-        ),
-        button(
-          integration?['installed'] == true
-              ? 'Update Herdr integration'
-              : 'Install Herdr integration',
-          () => cliAction('install_integration', cli['id'] as String),
-          disabled: busy || session != null,
-        ),
-      ],
-      if (session != null && !active)
-        paragraph('Close the active setup to switch accounts.'),
-    ]);
-  }
-
-  @override
-  Component build(BuildContext context) => stack([
-    card('CLI accounts', [
-      paragraph(
-        'Connect your coding agents to their providers. Choose an account to open its sign-in terminal.',
-      ),
-      button('Refresh status', refresh, disabled: busy),
-      if (integrations != null && (integrations!['total'] ?? 0) > 0)
-        paragraph(integrationSummary(integrations!)),
-      feedback(),
-    ]),
-    el('div', [for (final cli in clis) account(cli)], classes: 'summary'),
-    if (session != null)
-      card(
-        '${clis.where((c) => c['id'] == selected).firstOrNull?['name'] ?? selected} setup · ${running ? 'Active' : 'Finished'}',
-        [
-          actions([
-            button('Ctrl+C', () => sendInput('\x03'), disabled: !running),
-            button('Close terminal', stop),
-            button('Copy terminal text', () => copy(terminal.getText())),
-            button(
-              'Select terminal text',
-              () => showDialog<void>(
-                'Terminal text',
-                (close) => stack([
-                  codeText(terminal.getText()),
-                  button('Close', () => close(null)),
-                ]),
-              ),
+    final installed = cli['installed'] == true;
+    final tone = active
+        ? 'info'
+        : ready
+        ? 'success'
+        : 'neutral';
+    return el(
+      'section',
+      [
+        el('div', [
+          iconTile('bot', tone: ready ? 'success' : null),
+          el('div', [
+            el('h2', [text(cli['name'])], classes: 'provider-card__name'),
+            el('p', [text(cli['detail'])], classes: 'provider-card__detail'),
+          ], classes: 'provider-card__text'),
+          pill(
+            active ? 'Setup open' : statusLabel(cli['status']),
+            tone: tone,
+            shape: !installed
+                ? 'dash'
+                : ready || active
+                ? 'filled'
+                : 'hollow',
+          ),
+        ], classes: 'provider-card__head'),
+        if (installed && integration?['current'] == true)
+          facts([
+            (
+              'Herdr integration',
+              el('span', [
+                text('${integration?['version'] ?? ''} — connected'),
+              ], classes: 'provider-card__ok'),
             ),
           ]),
-          paragraph(
-            'Open the sign-in link shown below. Use the controls or click the terminal to type.',
+        if (installed && integration?['current'] != true)
+          callout(
+            [
+              calloutText(
+                integration?['installed'] == true
+                    ? 'Herdr integration is outdated, needs repair or could not be verified. Until current, this agent cannot report state or resume finished sessions.'
+                    : 'Herdr integration missing. Without it this agent cannot report state or resume finished sessions.',
+              ),
+            ],
+            tone: 'warning',
+            iconName: 'link',
+            actions: [
+              button(
+                integration?['installed'] == true
+                    ? 'Update Herdr integration'
+                    : 'Install Herdr integration',
+                () => cliAction('install_integration', cli['id'] as String),
+                disabled: busy || session != null,
+                small: true,
+              ),
+            ],
           ),
-          for (final link in setupLinks(terminal.getText()))
+        if (session != null && !active)
+          meta('Close the active setup to switch accounts.', iconName: 'info'),
+        actions([
+          button(
+            active
+                ? 'Setup in progress'
+                : !installed
+                ? 'CLI not installed'
+                : ready
+                ? 'Manage account'
+                : 'Connect account',
+            () => start(cli['id'] as String),
+            primary: true,
+            disabled: busy || session != null || !installed,
+            iconName: ready ? 'settings' : 'key-round',
+          ),
+          if (cli['id'] == 'claude' && installed)
+            button(
+              'Test account',
+              () => cliAction('verify', cli['id'] as String),
+              disabled: busy || session != null,
+              iconName: 'circle-check',
+            ),
+        ]),
+      ],
+      classes: 'card provider-card',
+      attributes: {'aria-label': '${cli['name']}'},
+    );
+  }
+
+  Component setupPanel() {
+    final name =
+        clis.where((c) => c['id'] == selected).firstOrNull?['name'] ?? selected;
+    return terminalPanel(
+      title: '$name setup',
+      iconName: 'key-round',
+      status: [
+        pill(
+          running ? 'Active' : 'Finished',
+          tone: running ? 'success' : 'neutral',
+          shape: running ? 'filled' : 'hollow',
+        ),
+      ],
+      actions: [
+        button(
+          'Ctrl+C',
+          () => sendInput('\x03'),
+          disabled: !running,
+          small: true,
+          variant: 'ghost',
+          classes: 'console-key',
+        ),
+        button(
+          'Copy terminal text',
+          () => copy(terminal.getText()),
+          small: true,
+          variant: 'ghost',
+          iconName: 'copy',
+        ),
+        button(
+          'Select terminal text',
+          () => showDialog<void>(
+            'Terminal text',
+            (close) => stack([
+              codeText(terminal.getText()),
+              button('Close', () => close(null)),
+            ]),
+          ),
+          small: true,
+          variant: 'ghost',
+          iconName: 'file-text',
+        ),
+        button(
+          'Close terminal',
+          stop,
+          small: true,
+          variant: 'danger',
+          iconName: 'x',
+        ),
+      ],
+      body: [
+        meta(
+          'Open the sign-in link shown below. Use the controls or click the terminal to type.',
+          iconName: 'info',
+          classes: 'setup-hint',
+        ),
+        for (final link in setupLinks(terminal.getText()))
+          el('div', [
+            icon('link', classes: 'icon--sm'),
+            el('span', [
+              text(link.toString()),
+            ], classes: 'mono setup-link__url'),
             actions([
               button(
                 'Open link · ${link.host}',
                 () => openExternal(link.toString()),
+                small: true,
+                primary: true,
+                iconName: 'external-link',
               ),
-              button('Copy link', () => copy(link.toString())),
+              button(
+                'Copy link',
+                () => copy(link.toString()),
+                small: true,
+                iconName: 'copy',
+              ),
             ]),
-          TerminalView(terminal, height: 340),
+          ], classes: 'setup-link'),
+        TerminalView(terminal, height: 340),
+        el('div', [
           actions([
             for (final key in {
               '↑ Up': '\x1b[A',
@@ -313,29 +400,83 @@ class _CliState extends OperationsState<CliSetupPage> {
               'Tab': '\t',
               'Escape': '\x1b',
             }.entries)
-              button(key.key, () => sendInput(key.value), disabled: !running),
+              button(
+                key.key,
+                () => sendInput(key.value),
+                disabled: !running,
+                small: true,
+                classes: 'console-key',
+              ),
           ]),
-          field(
-            'Authorization code or API key',
-            paste,
-            (value) => paste = value,
-            password: true,
-          ),
+          el('div', [
+            field(
+              'Authorization code or API key',
+              paste,
+              (value) => paste = value,
+              password: true,
+            ),
+            button(
+              'Send to terminal',
+              () {
+                sendInput('$paste\r');
+                setState(() => paste = '');
+              },
+              primary: true,
+              disabled: !running,
+              iconName: 'send',
+            ),
+          ], classes: 'setup-send'),
+        ], classes: 'setup-controls'),
+      ],
+      footer: [
+        meta(
+          'Send the hidden input only when asked. The CLI controls input echo. Output stays in memory and clears when closed. Closing the page stops setup; abandoned sessions expire after 10 minutes without activity.',
+          iconName: 'lock',
+        ),
+      ],
+      classes: 'setup-panel',
+    );
+  }
+
+  @override
+  Component build(BuildContext context) {
+    final summary = integrations != null && (integrations!['total'] ?? 0) > 0
+        ? integrationSummary(integrations!)
+        : '';
+    final connected =
+        integrations != null &&
+        integrations!['connected'] ==
+            (integrations!['connected'] ?? 0) +
+                (integrations!['outdated'] ?? 0) +
+                (integrations!['missing'] ?? 0);
+    return opsPage([
+      pageHeader(
+        'CLI accounts',
+        subtitle:
+            'Connect your coding agents to their providers. Choose an account to open its sign-in terminal.',
+        actions: [
           button(
-            'Send to terminal',
-            () {
-              sendInput('$paste\r');
-              setState(() => paste = '');
-            },
-            primary: true,
-            disabled: !running,
-          ),
-          paragraph(
-            'Send the hidden input only when asked. The CLI controls input echo. Output stays in memory and clears when closed. Closing the page stops setup; abandoned sessions expire after 10 minutes without activity.',
+            'Refresh status',
+            refresh,
+            disabled: busy,
+            iconName: 'refresh-cw',
           ),
         ],
       ),
-    const SshAccessCard(),
-    const ToolchainCard(),
-  ]);
+      if (summary.isNotEmpty)
+        callout(
+          [calloutText(summary)],
+          tone: connected ? 'success' : 'warning',
+          iconName: 'link',
+        ),
+      feedback(),
+      if (clis.isNotEmpty)
+        el('div', [
+          for (final cli in clis) account(cli),
+        ], classes: 'provider-grid'),
+      if (session != null) setupPanel(),
+      const SshAccessCard(),
+      const ToolchainCard(),
+    ], classes: 'cli-page');
+  }
 }

@@ -1,0 +1,469 @@
+/* ==========================================================================
+   Herdr composites — multi-part patterns shared by more than one page,
+   ported from the Phase 2 design system (template css/composites.css).
+   Loaded after components.css. Tokens only; same conventions
+   (BEM-lite, state in ARIA / data attributes, JS binds to data-* hooks).
+   Sections: runtime pill · updated meta · tabs · dialog · form rows (+
+   inline error) · stat strip · stacked bar + legend · type tag · task chip
+   + task ref + build ref · live ring + live indicator · agent chip + agent
+   bar · callout · attention list · toolbar · switch · select · button
+   group · disabled action + reason · inspector + definition list · task
+   groups + mini list · merge status + type summary + cut line · overline ·
+   timeline (+ trail) · inline code · dot grid · phone rules · forced colors.
+   ========================================================================== */
+
+/* ---- Runtime pill (topbar) -------------------------------------------------
+   One pill for runtime + connection. data-tone success (Running · 24 ms,
+   wifi) or neutral (Stopped, wifi-off); shell.js keeps it in sync.          */
+.runtime-pill {
+  display: inline-flex; align-items: center; gap: var(--space-2); height: var(--control-md); padding: 0 var(--space-3);
+  border: 1px solid var(--color-border); border-radius: var(--radius-full); background: var(--color-surface);
+  color: var(--color-text-secondary); font-size: var(--text-sm-size); font-weight: var(--weight-medium);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+  transition: background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+a.runtime-pill:hover { background: var(--color-hover); border-color: var(--color-border-strong); color: var(--color-text); }
+.runtime-pill__icon { color: var(--tone-fg); }
+
+/* ---- Updated meta (page header) -------------------------------------------- */
+.updated {
+  display: inline-flex; align-items: center; gap: var(--space-1); margin-right: var(--space-2);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* ---- Tabs ------------------------------------------------------------------
+   [role=tablist].tabs > button[role=tab].tabs__tab[aria-selected] ;
+   [role=tabpanel].tabpanel (hidden when not selected). --pill = segmented
+   look for dialogs and cards; --fill stretches the tabs to the full width. */
+.tabs {
+  display: flex; gap: var(--space-1); overflow-x: auto; scrollbar-width: none;
+  box-shadow: inset 0 -1px 0 var(--color-border); /* inset, so the selected underline paints over it */
+}
+.tabs__tab {
+  position: relative; display: inline-flex; align-items: center; gap: var(--space-2); flex: none;
+  height: 40px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: transparent; color: var(--color-text-secondary);
+  font-size: var(--text-base-size); font-weight: var(--weight-medium); white-space: nowrap;
+  transition: color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard);
+}
+.tabs__tab .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); }
+.tabs__tab .count { height: var(--size-count-sm); min-width: var(--size-count-sm); }
+.tabs__tab:hover { background: var(--color-hover); color: var(--color-text); }
+.tabs__tab:focus-visible { outline-offset: -2px; }
+.tabs__tab[aria-selected="true"] { color: var(--color-text); font-weight: var(--weight-semibold); }
+.tabs__tab[aria-selected="true"] .icon { color: var(--color-accent-text); }
+.tabs__tab[aria-selected="true"]::after {
+  content: ""; position: absolute; left: var(--space-2); right: var(--space-2); bottom: 0;
+  height: 2px; border-radius: 2px 2px 0 0; background: var(--color-accent);
+}
+.tabs--pill {
+  display: inline-flex; gap: var(--space-0-5); padding: var(--space-0-5); max-width: 100%;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-sunken); box-shadow: none;
+}
+.tabs--pill .tabs__tab { height: var(--control-sm); padding: 0 var(--space-3); border-radius: calc(var(--radius-md) - 3px); font-size: var(--text-sm-size); }
+.tabs--pill .tabs__tab[aria-selected="true"] { /* same as the theme switcher: accent ring >= 3:1 on the track */
+  background: var(--color-accent-subtle); color: var(--color-accent-text); box-shadow: inset 0 0 0 1.5px var(--color-accent);
+}
+.tabs--pill .tabs__tab[aria-selected="true"]::after { content: none; }
+.tabs--fill { display: flex; }
+.tabs--fill .tabs__tab { flex: 1 1 0; justify-content: center; }
+.tabpanel:focus-visible { outline-offset: var(--space-1); border-radius: var(--radius-sm); }
+
+/* ---- Dialog ------------------------------------------------------------------
+   The dashboard renders its own modal layer (ui.dart buildDialogs:
+   .dialog-layer > section.dialog[role=dialog] > .dialog__header + content).
+   Its Phase 2 look lives in styles.css next to the layering rules.          */
+
+/* ---- Form rows (inside dialogs and cards) ---------------------------------- */
+.form-field { display: flex; flex-direction: column; }
+.form-hint { margin-top: var(--space-1-5); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); }
+/* Inline field error: <p class="form-error" id="x-error" aria-live="polite"> (referenced by the
+   input's aria-describedby) holding a circle-x icon + message; empty = collapsed.
+   The input gets aria-invalid="true" while the error shows.                     */
+.form-error {
+  display: flex; align-items: flex-start; gap: var(--space-1-5); margin-top: var(--space-1-5);
+  font-size: var(--text-sm-size); line-height: var(--text-sm-leading); font-weight: var(--weight-medium); color: var(--color-danger-fg);
+}
+.form-error:empty { margin: 0; }
+.form-error .icon { margin-top: var(--space-0-5); }
+.input[aria-invalid="true"] { border-color: var(--color-danger); }
+.input[aria-invalid="true"]:focus-visible { outline-color: var(--color-danger); }
+.input-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.input-row > .input { flex: 1 1 200px; }
+
+/* ---- Stat strip (one rounded container, linked segments) -------------------
+   div.stat-strip-wrap > ul.stat-strip > li > a.stat-strip__item. Columns
+   follow the wrapper's width (container query), not the viewport: stacked
+   < 560px · 2 × 2 from 560px · 4 across from 800px (chevrons drop and the
+   padding tightens below 1000px). Dividers are the 1px grid gap over the
+   border-colored track. Accessible name: put a ' ' text node between
+   __value and __label and a visually hidden ', ' before __meta, or the
+   link reads "3/7agents working1 needs attention". Without the wrapper the
+   strip falls back to viewport breakpoints (2 × 2 from 768, 4 from 1280).  */
+.stat-strip-wrap { container: stat-strip / inline-size; }
+.stat-strip {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; overflow: hidden;
+  background: var(--color-border); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs);
+}
+@media (min-width: 768px) { .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { .stat-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container stat-strip (max-width: 559.98px) { .stat-strip { grid-template-columns: minmax(0, 1fr); } }
+@container stat-strip (min-width: 560px) { .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container stat-strip (min-width: 800px) { .stat-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container stat-strip (min-width: 800px) and (max-width: 999.98px) {
+  .stat-strip__item { padding-inline: var(--space-4) var(--space-3); }
+  .stat-strip__chevron { display: none; }
+}
+.stat-strip > li { display: flex; min-width: 0; }
+.stat-strip__item {
+  display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0; min-height: 64px;
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5); background: var(--color-surface); color: var(--color-text);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+a.stat-strip__item:hover { background: var(--color-hover); }
+.stat-strip__item:focus-visible { outline-offset: -2px; }
+.stat-strip__icon { color: var(--color-text-tertiary); }
+.stat-strip__text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-1-5); flex: 1; min-width: 0; }
+.stat-strip__value {
+  font-size: var(--text-lg-size); line-height: var(--text-lg-leading); font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.stat-strip__label { color: var(--color-text-secondary); }
+.stat-strip__meta {
+  display: inline-flex; align-items: center; gap: var(--space-1-5); flex-basis: 100%;
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary);
+}
+.stat-strip__meta[data-tone] { color: var(--tone-fg); }
+.stat-strip__chevron { color: var(--color-text-tertiary); transition: transform var(--duration-fast) var(--ease-standard); }
+a.stat-strip__item:hover .stat-strip__chevron { transform: translateX(2px); color: var(--color-text); }
+
+/* ---- Stacked bar + legend --------------------------------------------------
+   .stackbar > .stackbar__seg[data-tone] style="--seg: <count>": segments
+   grow by count with 2px gaps and a minimum width. data-shade="1..6" gives
+   neutral shades (change types). Always pair with text counts (.legend).   */
+.stackbar { display: flex; gap: 2px; height: 8px; min-width: 0; }
+.stackbar--lg { height: 12px; }
+.stackbar--thin { height: 4px; }
+.stackbar__seg { flex: var(--seg, 1) 1 0%; min-width: 6px; border-radius: 2px; background: var(--tone-solid); }
+.stackbar__seg:first-child { border-top-left-radius: var(--radius-full); border-bottom-left-radius: var(--radius-full); }
+.stackbar__seg:last-child { border-top-right-radius: var(--radius-full); border-bottom-right-radius: var(--radius-full); }
+/* Shades run from text-secondary to border-input, so even the lightest is >= 3:1 on the card */
+.stackbar__seg[data-shade], .legend__swatch[data-shade] { background: color-mix(in srgb, var(--color-text-secondary) var(--shade), var(--color-border-input)); }
+[data-shade="1"] { --shade: 100%; } [data-shade="2"] { --shade: 80%; } [data-shade="3"] { --shade: 60%; }
+[data-shade="4"] { --shade: 40%; } [data-shade="5"] { --shade: 20%; } [data-shade="6"] { --shade: 0%; }
+.legend { display: flex; flex-wrap: wrap; gap: var(--space-1-5) var(--space-4); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); }
+.legend__item { display: inline-flex; align-items: center; gap: var(--space-1-5); color: var(--color-text-secondary); white-space: nowrap; }
+.legend__item > .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); }
+.legend__count { font-weight: var(--weight-semibold); color: var(--color-text); font-variant-numeric: tabular-nums; }
+.legend__swatch { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.legend--rows { display: grid; gap: var(--space-1-5); }
+.legend--rows .legend__item { display: flex; }
+.legend--rows .legend__count { margin-left: auto; }
+
+/* ---- Type tag (change type: monochrome icon + text; color is for status) ---- */
+.type-tag {
+  display: inline-flex; align-items: center; gap: var(--space-1); flex: none; height: 20px; padding: 0 var(--space-1-5);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface);
+  color: var(--color-text-secondary); font-size: var(--text-xs-size); font-weight: var(--weight-medium); line-height: 1; white-space: nowrap;
+}
+.type-tag > .icon { width: calc(var(--icon-sm) - var(--space-0-5)); height: calc(var(--icon-sm) - var(--space-0-5)); color: var(--color-text-tertiary); }
+.type-tag--muted { border-style: dashed; border-color: var(--color-border-strong); background: transparent; } /* "Not shipped" */
+
+/* ---- Task chip (mono id + title, usually a link) + inline task / build ref --
+   .task-ref = mono task id link (HRD-130); .build-ref = mono version link
+   (alpha.14; HerdrUI.buildRef). Both accent text, underline on hover.     */
+.task-chip { display: inline-flex; align-items: baseline; gap: var(--space-1-5); min-width: 0; max-width: 100%; color: var(--color-text); }
+.task-chip__id {
+  flex: none; padding: 0 var(--space-1); border-radius: var(--radius-xs);
+  background: var(--color-surface-sunken); box-shadow: inset 0 0 0 1px var(--color-border);
+  font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary);
+}
+.task-chip__title { /* two lines, then ellipsis; put the full title in title="" */
+  min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+.task-chip--nowrap .task-chip__title { display: block; white-space: nowrap; text-overflow: ellipsis; }
+a.task-chip:hover .task-chip__title { color: var(--color-accent-text); text-decoration: underline; text-underline-offset: 3px; }
+.task-ref, .build-ref { font-family: var(--font-mono); font-size: 0.92em; font-weight: var(--weight-medium); color: var(--color-accent-text); white-space: nowrap; }
+a.task-ref:hover, a.build-ref:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* ---- Agent label (tile + name) and empty value (— + hidden "None") -------- */
+.agent-label { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; color: var(--color-text); }
+.agent-label__name { min-width: 0; overflow-wrap: anywhere; }
+/* A live ring sits 2px outside its tile: keep it clear of the name and the row edge */
+:is(.agent-label, .inspector__row, .mini-list__row) > .live-ring[data-live="true"] { margin-inline: var(--space-1); }
+.none { color: var(--color-text-tertiary); }
+
+/* ---- Live ring + live indicator --------------------------------------------
+   .live-ring on a role tile (data-live="true") draws a success ring 2px out
+   that breathes while the agent works; static under reduced motion.
+   .live = "Working now" text with a pulsing dot (node and inspector).      */
+.live-ring { position: relative; }
+.live-ring::after {
+  content: ""; position: absolute; inset: calc(-1 * var(--space-1)); pointer-events: none;
+  border: 2px solid var(--color-success); border-radius: calc(var(--tile-radius, var(--radius-md)) + var(--space-1)); opacity: 0;
+}
+.live-ring[data-live="true"]::after { opacity: 1; }
+.live { display: inline-flex; align-items: center; gap: var(--space-1-5); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); font-weight: var(--weight-medium); color: var(--color-success-fg); white-space: nowrap; }
+.live__dot { flex: none; width: 6px; height: 6px; border-radius: var(--radius-full); background: var(--color-success); box-shadow: 0 0 0 2px var(--color-success-bg); }
+@media (prefers-reduced-motion: no-preference) {
+  .live-ring[data-live="true"]::after { animation: live-breathe var(--duration-pulse) var(--ease-standard) infinite; }
+  .live__dot { animation: live-dot var(--duration-pulse) var(--ease-standard) infinite; }
+}
+/* The ring stays opaque (>= 3:1); a soft halo outside it breathes */
+@keyframes live-breathe { 50% { box-shadow: 0 0 0 var(--space-0-5) color-mix(in srgb, var(--color-success) 35%, transparent); } }
+@keyframes live-dot { 0%, 100% { box-shadow: 0 0 0 2px var(--color-success-bg); } 50% { box-shadow: 0 0 0 4px var(--color-success-bg); } }
+
+/* ---- Agent chip + agent bar ------------------------------------------------
+   button.agent-chip[aria-pressed] (or a static span): live-ring role tile,
+   name, then "<dot> Working · HRD-128 · 1h 12m". .agent-bar is the
+   scrollable row (role="group") that holds them.                           */
+.agent-bar { position: relative; display: flex; gap: var(--space-2); overflow-x: auto; padding: var(--space-1); margin: calc(-1 * var(--space-1)); scrollbar-width: thin; } /* relative: contains the chips' visually hidden text */
+.agent-chip {
+  display: inline-flex; align-items: center; gap: var(--space-3); flex: none; min-height: 52px;
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface);
+  color: var(--color-text); text-align: left; box-shadow: var(--shadow-xs);
+  transition: background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+button.agent-chip:hover { background: var(--color-hover); border-color: var(--color-border-strong); }
+.agent-chip[aria-pressed="true"] { background: var(--color-selected); border-color: var(--color-accent); box-shadow: inset 0 0 0 1px var(--color-accent); }
+.agent-chip > .role-tile { margin: var(--space-0-5); }
+.agent-chip__text { display: flex; flex-direction: column; min-width: 0; }
+.agent-chip__name { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); font-weight: var(--weight-semibold); white-space: nowrap; }
+.agent-chip__meta {
+  display: flex; align-items: center; gap: var(--space-1-5); white-space: nowrap;
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary); font-variant-numeric: tabular-nums;
+}
+.agent-chip__task { font-family: var(--font-mono); color: var(--color-text); }
+.agent-chip[aria-pressed="true"] .agent-chip__task { color: var(--color-accent-text); }
+
+/* ---- Callout (one message with an action) -----------------------------------
+   Icon in column 1 next to the title; every other child (title, any number
+   of .callout__text lines, an .agent-label row, the action) stacks in
+   column 2. HerdrUI.blockedCallout(task) renders the "Blocking the cut" one. */
+.callout {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) var(--space-2-5);
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-md);
+  background: var(--tone-bg); border: 1px solid color-mix(in srgb, var(--tone-solid) 40%, transparent);
+}
+.callout > :not(.callout__icon) { grid-column: 2; }
+.callout__icon { grid-row: 1; margin-top: var(--space-0-5); width: var(--icon-sm); height: var(--icon-sm); color: var(--tone-fg); }
+.callout__title { font-weight: var(--weight-semibold); color: var(--color-text); }
+.callout__text { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.callout > .agent-label { margin-top: var(--space-1); font-size: var(--text-sm-size); }
+.callout__action { justify-self: start; margin-top: var(--space-1); }
+.callout > p { margin: 0; }
+
+/* ---- Attention list ("Needs attention") ------------------------------------- */
+.attention { display: flex; flex-direction: column; }
+.attention__item {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-5); border-top: 1px solid var(--color-border);
+}
+.attention__icon { display: grid; place-items: center; flex: none; width: var(--size-tile-sm); height: var(--size-tile-sm); border-radius: var(--radius-md); background: var(--tone-bg); color: var(--tone-fg); }
+.attention__icon > .icon { width: var(--icon-sm); height: var(--icon-sm); }
+.attention__text { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.attention__agent { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm-size); color: var(--color-text-secondary); white-space: nowrap; }
+.attention__action { margin-left: auto; white-space: nowrap; }
+
+/* ---- Toolbar (labelled controls in a row) ----------------------------------- */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+.toolbar__group { display: inline-flex; align-items: center; gap: var(--space-2); }
+.toolbar__label { font-size: var(--text-sm-size); font-weight: var(--weight-medium); color: var(--color-text-secondary); white-space: nowrap; }
+.toolbar__spacer { flex: 1; }
+.toolbar__divider { align-self: stretch; width: 1px; background: var(--color-border); }
+
+/* ---- Switch: <label class="switch"><input type="checkbox" role="switch"> ---- */
+.switch {
+  display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--control-sm); cursor: pointer;
+  font-size: var(--text-sm-size); font-weight: var(--weight-medium); color: var(--color-text-secondary); white-space: nowrap;
+}
+.switch:hover, .switch__input:checked + .switch__label { color: var(--color-text); }
+.switch__input {
+  appearance: none; position: relative; flex: none; width: 32px; height: 18px; margin: 0; cursor: pointer;
+  border-radius: var(--radius-full); background: var(--color-border-input); /* >= 3:1 on surface, both themes */
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+.switch__input::before {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: var(--radius-full);
+  background: var(--color-surface); box-shadow: var(--shadow-xs); transition: transform var(--duration-fast) var(--ease-standard);
+}
+.switch__input:checked { background: var(--color-accent); }
+.switch__input:checked::before { transform: translateX(14px); background: var(--color-on-accent); }
+.switch__input:disabled { cursor: not-allowed; opacity: .5; }
+
+/* ---- Select: <span class="select"><select class="select__input"> + chevron --- */
+.select { position: relative; display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
+.select__input {
+  appearance: none; max-width: 100%; height: var(--control-sm); padding: 0 calc(var(--space-3) + var(--icon-sm)) 0 var(--space-3);
+  border: 1px solid var(--color-border-input); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-text);
+  font-size: var(--text-sm-size); font-weight: var(--weight-medium); text-overflow: ellipsis; cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+.select__input:hover { border-color: var(--color-text-tertiary); }
+.select__input:focus-visible { outline-offset: 1px; border-color: var(--color-focus); }
+.select__chevron { position: absolute; right: var(--space-2); width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); pointer-events: none; }
+.select--md .select__input { height: var(--control-md); font-size: var(--text-base-size); }
+
+/* ---- Button group (zoom: out · readout · in · fit) -------------------------- */
+.btn-group {
+  display: inline-flex; align-items: stretch; height: var(--control-sm); overflow: hidden;
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-md); background: var(--color-surface-raised); box-shadow: var(--shadow-xs);
+}
+.btn-group > :not(:first-child) { border-left: 1px solid var(--color-border); } /* beats .btn-group__btn { border: 0 } */
+.btn-group__btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1-5); min-width: var(--control-sm); padding: 0 var(--space-2);
+  border: 0; background: transparent; color: var(--color-text-secondary); font-size: var(--text-sm-size); font-weight: var(--weight-medium);
+  transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.btn-group__btn .icon { width: var(--icon-sm); height: var(--icon-sm); }
+.btn-group__btn:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); }
+.btn-group__btn:disabled { color: var(--color-text-disabled); cursor: not-allowed; }
+.btn-group__btn:focus-visible { outline-offset: -2px; }
+.btn-group__readout {
+  display: inline-grid; place-items: center; min-width: 52px; padding: 0 var(--space-2);
+  font-family: var(--font-mono); font-size: var(--text-xs-size); color: var(--color-text); font-variant-numeric: tabular-nums;
+}
+
+/* ---- Disabled action + visible reason ("Cut alpha.15") ---------------------
+   <button class="btn btn--primary" aria-disabled="true" aria-describedby="r">
+   + <span class="action-reason" id="r">…</span>. Script ignores the click. */
+.btn[aria-disabled="true"] {
+  cursor: not-allowed; box-shadow: none;
+  background: var(--color-surface-sunken); border-color: var(--color-border); color: var(--color-text-tertiary);
+}
+.action-reason { display: inline-flex; align-items: center; gap: var(--space-1-5); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); }
+.action-reason > .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-danger-fg); }
+/* In the page header the reason takes its own line under the buttons, right-aligned */
+.page-header__actions > .action-reason { flex-basis: 100%; justify-content: flex-end; }
+
+/* ---- Inspector (side panel) + definition list --------------------------------
+   aside.inspector > .inspector__header + .inspector__body > .inspector__section*
+   (+ optional .inspector__footer). Width comes from the page layout; use
+   var(--inspector-width) at xl and up.                                      */
+.inspector {
+  display: flex; flex-direction: column; min-width: 0;
+  background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs);
+}
+.inspector__header { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-border); }
+.inspector__heading { flex: 1; min-width: 0; }
+.inspector__eyebrow { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
+.inspector__title { font-size: var(--text-md-size); line-height: var(--text-md-leading); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.inspector__meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1-5); margin-top: var(--space-2); }
+.inspector__body { position: relative; flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; } /* relative: clips visually hidden row text */
+.inspector__section { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4) var(--space-5); }
+.inspector__section + .inspector__section { border-top: 1px solid var(--color-border); }
+.inspector__section-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.inspector__list, .mini-list { display: flex; flex-direction: column; gap: var(--space-0-5); }
+.inspector__row, .mini-list__row {
+  display: flex; align-items: center; gap: var(--space-2); min-height: var(--control-sm); width: calc(100% + var(--space-4));
+  margin-inline: calc(-1 * var(--space-2)); padding: var(--space-1) var(--space-2); border: 0; border-radius: var(--radius-md);
+  background: transparent; color: var(--color-text); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); text-align: left;
+}
+:is(a, button):is(.inspector__row, .mini-list__row):hover { background: var(--color-hover); }
+:is(.inspector__row, .mini-list__row) > .task-chip { flex: 1; }
+.inspector__footer { padding: var(--space-3) var(--space-5); border-top: 1px solid var(--color-border); }
+.dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); }
+.dl > div { display: contents; }
+.dl dt { color: var(--color-text-tertiary); }
+.dl dd { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1-5); min-width: 0; margin: 0; color: var(--color-text); overflow-wrap: anywhere; }
+
+/* ---- Task groups + mini list ---------------------------------------------------
+   Compact task lists ("Waiting to merge" by status, "Merged so far"):
+   ul.mini-list > li > (button|a).mini-list__row, or li.mini-list__row holding
+   a task chip link (same rules as .inspector__list / .inspector__row).
+   Grouped: HerdrUI.taskGroups(D.groupByStatus(tasks), renderList) gives
+   ul.task-groups > li.task-group > p.task-group__label (dot, label, count).  */
+.task-groups { display: flex; flex-direction: column; gap: var(--space-2); }
+.task-group__label {
+  display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-1);
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); font-weight: var(--weight-medium); color: var(--color-text-secondary);
+}
+.task-group__count { color: var(--color-text-tertiary); font-variant-numeric: tabular-nums; }
+
+/* ---- Merge status + type summary + cut line (next build, 3 pages) -------------
+   HerdrUI.mergeStatus(summary), HerdrUI.typeSummary(byType), HerdrUI.cutPlanned(build). */
+.merge-status, .type-summary { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.type-summary { gap: var(--space-2-5); }
+.merge-status__figure { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); color: var(--color-text-secondary); }
+.merge-status__figure strong {
+  font-size: var(--text-xl-size); line-height: var(--text-xl-leading); font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight); color: var(--color-text); font-variant-numeric: tabular-nums;
+}
+.cut-planned { display: inline-flex; align-items: center; gap: var(--space-1-5); font-variant-numeric: tabular-nums; }
+.cut-planned > .icon { color: var(--color-text-tertiary); }
+
+/* ---- Overline (uppercase micro-label; write it in sentence case) ----------- */
+.overline {
+  font-size: var(--text-2xs-size); line-height: var(--text-2xs-leading); font-weight: var(--weight-semibold);
+  color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: var(--tracking-overline);
+}
+
+/* ---- Timeline (activity feed) + trail variant (agent events per task) ------
+   ol.timeline > li.timeline__item: 28px lead (role tile or icon tile) +
+   .timeline__text (strong names, code paths, .task-ref ids) + .timeline__time.
+   .timeline--trail: 24px leads, tighter rows, no outer padding.           */
+.timeline { --timeline-tile: var(--size-tile-sm); --timeline-pad: var(--space-2-5); padding: 0 var(--space-5) var(--space-2); }
+.timeline--trail { --timeline-tile: 24px; --timeline-pad: var(--space-1-5); padding: 0; }
+.timeline__item {
+  position: relative; display: grid; grid-template-columns: var(--timeline-tile) minmax(0, 1fr);
+  gap: var(--space-3); padding-block: var(--timeline-pad);
+}
+.timeline--trail .timeline__item { gap: var(--space-2-5); }
+.timeline__item:not(:last-child)::before { /* connector between lead tiles */
+  content: ""; position: absolute; left: calc(var(--timeline-tile) / 2 - 0.5px);
+  top: calc(var(--timeline-pad) + var(--timeline-tile) + var(--space-1)); bottom: calc(var(--space-1) - var(--timeline-pad));
+  width: 1px; background: var(--color-border);
+}
+/* Icon leads share the role tiles' soft, borderless shape */
+.timeline__item > .icon-tile--sm { border-radius: var(--radius-md); border-color: transparent; background: var(--color-neutral-bg); color: var(--color-neutral-fg); }
+.timeline__text { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.timeline__text strong { font-weight: var(--weight-semibold); color: var(--color-text); }
+.timeline__time { display: flex; align-items: center; gap: var(--space-1-5); margin-top: var(--space-0-5); font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
+.timeline__flag { font-family: var(--font-sans); font-weight: var(--weight-medium); color: var(--color-danger-fg); }
+
+/* ---- Inline code in running text (paths, branches, ids) ---------------------- */
+:is(.callout__text, .attention__text, .timeline__text) code {
+  padding: 0 var(--space-1); border-radius: var(--radius-xs); background: var(--color-surface-sunken);
+  color: var(--color-text); font-size: var(--text-xs-size);
+}
+.callout__text code { background: var(--color-surface); } /* on the tinted callout */
+
+/* ---- Dot grid (flow-builder canvas background) ------------------------------ */
+.dot-grid {
+  --dot-grid-size: var(--space-5);
+  background-color: var(--color-surface-sunken);
+  background-image: radial-gradient(circle, var(--color-canvas-dot) 1px, transparent 1.5px);
+  background-size: var(--dot-grid-size) var(--dot-grid-size);
+}
+
+/* ---- Phone rules ------------------------------------------------------------ */
+@media (max-width: 639.98px) {
+  .runtime-pill { width: var(--control-md); padding: 0; justify-content: center; } /* label stays for screen readers */
+  .breadcrumb__item:not(:last-child) { display: none; }
+  .breadcrumb__item + .breadcrumb__item::before { content: none; }
+  .page-header__actions > .updated { flex-basis: 100%; margin-right: 0; }
+  .attention__item { padding-inline: var(--space-4); }
+  .attention__action { margin-left: calc(var(--size-tile-sm) + var(--space-3)); }
+  .page-header__actions > .action-reason { justify-content: flex-start; }
+  /* Fill tabs (dialogs) wrap long labels instead of overflowing the bottom sheet */
+  .tabs--fill .tabs__tab {
+    height: auto; min-height: var(--control-sm); padding-block: var(--space-1);
+    white-space: normal; line-height: var(--text-sm-leading); text-align: center;
+  }
+}
+
+/* ---- Forced colors: indicators drawn with backgrounds or shadows ---------- */
+@media (forced-colors: active) {
+  .stackbar__seg, .legend__swatch, .live__dot, .switch__input::before { forced-color-adjust: none; background: CanvasText; }
+  .switch__input { border: 1px solid CanvasText; }
+  .switch__input:checked { forced-color-adjust: none; background: Highlight; }
+  .live-ring::after { border-color: CanvasText; }
+  .tabs__tab[aria-selected="true"]::after { forced-color-adjust: none; background: Highlight; }
+  .tabs__tab[aria-selected="true"], .agent-chip[aria-pressed="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  /* Focus on a selected tab or pressed chip must differ from the state outline (WCAG 2.4.7) */
+  :is(.tabs__tab[aria-selected="true"], .agent-chip[aria-pressed="true"]):focus-visible { outline: 2px dashed CanvasText; outline-offset: -5px; }
+  .stat-strip__item { border: 1px solid CanvasText; }
+  .input[aria-invalid="true"] { border: 2px solid CanvasText; }
+}

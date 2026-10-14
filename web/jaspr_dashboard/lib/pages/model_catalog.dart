@@ -294,31 +294,90 @@ class _ModelFieldsState extends State<ModelFields> {
         field('$label (manual)', value, (v) {
           component.values[key] = v;
         }),
-    ]);
+    ], classes: 'org-model__picker');
   }
 
   @override
   Component build(BuildContext context) => el('section', [
+    el('div', [
+      el('h3', [
+        icon('cpu', classes: 'icon--sm'),
+        text('Model and reasoning'),
+      ], classes: 'org-model__title'),
+      if (busy)
+        el('span', [text('Checking the CLI…')], classes: 'org-model__busy'),
+    ], classes: 'org-model__head'),
+    el('div', [
+      if (component.runtime == 'opencode')
+        picker('provider', 'Provider', {
+          for (final p in options.providers)
+            p: p == 'opencode-go'
+                ? 'OpenCode Go (opencode-go)'
+                : p == 'opencode'
+                ? 'OpenCode Zen (opencode)'
+                : p,
+        })
+      else
+        el('div', [
+          field(
+            'Provider (optional)',
+            '${component.values['provider'] ?? ''}',
+            (v) => component.values['provider'] = v,
+          ),
+        ], classes: 'org-model__picker'),
+      ..._models(),
+    ], classes: 'org-model__grid'),
     if (component.runtime == 'opencode')
-      picker('provider', 'Provider', {
-        for (final p in options.providers)
-          p: p == 'opencode-go'
-              ? 'OpenCode Go (opencode-go)'
-              : p == 'opencode'
-              ? 'OpenCode Zen (opencode)'
-              : p,
-      })
-    else
-      field(
-        'Provider (optional)',
-        '${component.values['provider'] ?? ''}',
-        (v) => component.values['provider'] = v,
+      el('p', [
+        text(
+          'Go subscriptions use opencode-go; opencode selects Zen. Connect the matching provider in CLI accounts. Listing a model does not prove account access.',
+        ),
+      ], classes: 'org-note'),
+    row([
+      if (component.runtime == 'opencode') ...[
+        button(
+          'Discover account models',
+          () => discover(),
+          disabled: busy,
+          small: true,
+          iconName: 'search',
+        ),
+        button(
+          'Refresh CLI models',
+          () => discover(force: true),
+          disabled: busy,
+          small: true,
+          iconName: 'refresh-cw',
+        ),
+      ],
+      button(
+        'Use CLI defaults',
+        () => setState(() {
+          manualKeys.clear();
+          discovered = null;
+          error = null;
+          for (final key in ['provider', 'model', 'reasoning'])
+            component.values[key] = '';
+          component.onChanged();
+        }),
+        small: true,
+        variant: 'ghost',
+        iconName: 'rotate-ccw',
       ),
-    if (component.runtime == 'opencode')
-      prose(
-        'Go subscriptions use opencode-go; opencode selects Zen. Connect the matching provider in CLI accounts. Listing a model does not prove account access.',
-      ),
+    ]),
+    if (error != null)
+      el('p', [
+        icon('circle-x', classes: 'icon--sm'),
+        text(error),
+      ], classes: 'form-error'),
+    if (options.source.isNotEmpty)
+      el('p', [
+        text('Catalog source: '),
+        el('span', [text(options.source)], classes: 'mono'),
+      ], classes: 'org-model__source'),
+  ], classes: 'org-model');
 
+  List<Component> _models() => [
     picker('model', 'Model', {
       for (final m
           in (component.runtime == 'opencode' &&
@@ -348,29 +407,5 @@ class _ModelFieldsState extends State<ModelFields> {
           for (final r in m.reasoning) r: r,
       },
     ),
-
-    if (component.runtime == 'opencode')
-      row([
-        button('Discover account models', () => discover(), disabled: busy),
-        button(
-          'Refresh CLI models',
-          () => discover(force: true),
-          disabled: busy,
-        ),
-      ]),
-
-    button(
-      'Use CLI defaults',
-      () => setState(() {
-        manualKeys.clear();
-        discovered = null;
-        error = null;
-        for (final key in ['provider', 'model', 'reasoning'])
-          component.values[key] = '';
-        component.onChanged();
-      }),
-    ),
-    if (error != null) prose(error),
-    if (options.source.isNotEmpty) prose('Catalog source: ${options.source}'),
-  ]);
+  ];
 }

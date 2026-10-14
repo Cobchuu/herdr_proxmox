@@ -7,6 +7,8 @@ import '../ui.dart';
 
 import 'org_forms.dart';
 
+import 'ops_ui.dart';
+
 Duration agentConsoleRefreshInterval(String? status) => switch (status) {
   'working' || 'running' || 'busy' || 'thinking' => const Duration(seconds: 1),
 
@@ -304,9 +306,27 @@ class _AgentConsolePageState extends State<AgentConsolePage> {
     await refresh();
   }
 
+  /// Label, tone and dot shape for an inspected terminal status.
+  (String, String, String) stateOf(String? status) => switch (status) {
+    null => ('Unavailable', 'neutral', 'dash'),
+    'working' ||
+    'running' ||
+    'busy' ||
+    'thinking' => ('Working', 'success', 'filled'),
+    'blocked' => ('Needs attention', 'danger', 'diamond'),
+    'idle' || 'done' => (capitalized(status), 'neutral', 'hollow'),
+    _ => (capitalized(status), 'neutral', 'dash'),
+  };
+
+  String capitalized(String value) => value.isEmpty
+      ? value
+      : '${value[0].toUpperCase()}${value.substring(1).replaceAll('_', ' ')}';
+
   @override
   Component build(BuildContext context) {
-    final blocked = inspection?['status'] == 'blocked';
+    final status = inspection?['status'] as String?;
+
+    final blocked = status == 'blocked';
 
     final delivery = jobs.where((j) => j['id'] == inputJob).firstOrNull;
 
@@ -324,37 +344,98 @@ class _AgentConsolePageState extends State<AgentConsolePage> {
 
     final draft = '${inspection?['reply_draft'] ?? ''}';
 
-    return card('${profile?['name'] ?? 'Agent'} console', [
-      if (profile != null)
-        prose('${profile!['role']} · ${profile!['runtime']}'),
+    final state = stateOf(status);
 
-      if (error != null) prose(error),
-      if (responseError != null) prose(responseError),
+    final name = '${profile?['name'] ?? 'Agent'}';
+
+    final model = [
+      '${profile?['provider'] ?? ''}',
+      '${profile?['model'] ?? ''}',
+    ].where((part) => part.isNotEmpty).join(' / ');
+
+    final project = '${profile?['project'] ?? ''}';
+
+    final cadence = agentConsoleRefreshInterval(status).inSeconds;
+
+    return opsPage([
+      el('div', [
+        if (profile != null)
+          roleTile(name, role: profile!['role'], live: state.$2 == 'success'),
+        pageHeader(
+          name,
+          overline: 'Agent console',
+          subtitle: profile == null
+              ? null
+              : '${profile!['role']} · ${profile!['runtime']}',
+          actions: [
+            pill(state.$1, tone: state.$2, shape: state.$3),
+            button(
+              'Refresh console',
+              refresh,
+              disabled: sending,
+              iconName: 'refresh-cw',
+            ),
+          ],
+        ),
+      ], classes: 'console-head'),
+
+      if (profile != null)
+        facts([
+          (
+            'Refresh',
+            text('Every $cadence ${cadence == 1 ? 'second' : 'seconds'}'),
+          ),
+          ('Model', model.isEmpty ? none() : text(model)),
+          ('Workspace', project.isEmpty ? none() : mono(project)),
+          if (delivery != null)
+            (
+              'Terminal response',
+              el('span', [
+                pill(
+                  '${delivery['state']}',
+                  tone: stateTone(delivery['state']),
+                  shape: shapeFor(stateTone(delivery['state'])),
+                ),
+                if ('${delivery['error'] ?? ''}'.isNotEmpty)
+                  text(' ${delivery['error']}'),
+              ], classes: 'console-response'),
+            ),
+        ], classes: 'console-facts'),
+
+      if (error != null) callout([calloutText(error)], tone: 'danger'),
+
+      if (responseError != null)
+        callout([calloutText(responseError)], tone: 'danger', role: 'alert'),
 
       if (pendingInput != null)
-        row([
-          prose(
-            'Delivery of ${pendingInput!.body?['key']} is unknown. Recheck before sending another key.',
-          ),
-          button(
-            'Recheck pending response',
-            submitPendingInput,
-            disabled: sending || !connection.state.connected,
-          ),
-        ]),
-
-      if (delivery != null)
-        prose(
-          'Terminal response: ${delivery['state']} ${delivery['error'] ?? ''}',
+        callout(
+          [
+            calloutText(
+              'Delivery of ${pendingInput!.body?['key']} is unknown. Recheck before sending another key.',
+            ),
+          ],
+          tone: 'warning',
+          iconName: 'hourglass',
+          actions: [
+            button(
+              'Recheck pending response',
+              submitPendingInput,
+              disabled: sending || !connection.state.connected,
+              small: true,
+            ),
+          ],
         ),
 
       if (blocked)
-        card('Requires attention', [
-          prose(
-            'Select Allow or Reject in the console prompt, then confirm. Escape cancels where supported.',
-          ),
-
-          row([
+        callout(
+          [
+            calloutText(
+              'Select Allow or Reject in the console prompt, then confirm. Escape cancels where supported.',
+            ),
+          ],
+          tone: 'danger',
+          title: 'Requires attention',
+          actions: [
             for (final key in [
               'up',
               'down',
@@ -367,29 +448,48 @@ class _AgentConsolePageState extends State<AgentConsolePage> {
                 key == 'enter' ? 'Confirm selected Allow / Reject' : key,
                 () => sendKey(key),
                 disabled: !canRespond,
+                small: true,
+                variant: key == 'enter' ? 'primary' : 'secondary',
+                iconName: switch (key) {
+                  'up' => 'chevron-up',
+                  'down' => 'chevron-down',
+                  'enter' => 'check',
+                  _ => null,
+                },
+                classes: key == 'enter' ? null : 'console-key',
               ),
-          ]),
-        ]),
+          ],
+        ),
 
-      row([
-        badge('${inspection?['status'] ?? 'unavailable'}'),
-        button('Refresh console', refresh, disabled: sending),
-        if (draft.isNotEmpty)
-          button(
-            showDraft ? 'Live console' : 'Current reply draft',
-            () => setState(() => showDraft = !showDraft),
-          ),
-      ]),
-
-      prose(
-        'Refreshes every second while working, every 5 seconds while idle, and every 2 seconds while awaiting attention. Retained output may omit earlier work.',
-      ),
-
-      showDraft && draft.isNotEmpty
-          ? pre(draft)
-          : SnapshotTerminal(
-              '${inspection?['output'] ?? 'No live session output available.'}',
+      terminalPanel(
+        title: showDraft && draft.isNotEmpty
+            ? 'Current reply draft'
+            : 'Live console',
+        iconName: showDraft && draft.isNotEmpty ? 'file-text' : 'terminal',
+        actions: [
+          if (draft.isNotEmpty)
+            button(
+              showDraft ? 'Live console' : 'Current reply draft',
+              () => setState(() => showDraft = !showDraft),
+              variant: 'ghost',
+              small: true,
+              iconName: showDraft ? 'terminal' : 'file-text',
             ),
-    ]);
+        ],
+        body: [
+          showDraft && draft.isNotEmpty
+              ? pre(draft)
+              : SnapshotTerminal(
+                  '${inspection?['output'] ?? 'No live session output available.'}',
+                ),
+        ],
+        footer: [
+          meta(
+            'Refreshes every second while working, every 5 seconds while idle, and every 2 seconds while awaiting attention. Retained output may omit earlier work.',
+            iconName: 'history',
+          ),
+        ],
+      ),
+    ], classes: 'console-page');
   }
 }

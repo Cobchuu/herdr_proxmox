@@ -10,6 +10,7 @@ import 'model_catalog.dart';
 import 'org_chart.dart';
 import 'collaboration_panel.dart';
 import 'organization_automation.dart';
+import 'org_ui.dart';
 
 class OrganizationPage extends StatefulComponent {
   const OrganizationPage({super.key, this.initialView = 'chart'});
@@ -303,42 +304,66 @@ class _OrganizationPageState extends State<OrganizationPage> {
     final ok = await showDialog<bool>(
       'Review obsolete sessions',
       (close) => el('div', [
-        prose(
+        note(
           'Only selected released sessions are considered. Busy, blocked, changed or unidentified sessions are skipped. Repository files remain intact.',
         ),
-        for (final j in obsolete)
-          el('label', [
-            el(
-              'input',
-              [],
-              attributes: {
-                'type': 'checkbox',
-                if (chosen.contains(j['id'])) 'checked': '',
-              },
-              events: {
-                'change': (e) {
-                  if ((e.target as web.HTMLInputElement).checked) {
-                    chosen.add('${j['id']}');
-                  } else {
-                    chosen.remove(j['id']);
-                  }
-                  refreshDialogs();
-                },
-              },
-            ),
-            text(
-              '${j['profile']?['name'] ?? j['profile_id']} · ${j['alias']} · ${j['pane_id'] ?? 'Pane identity missing'} · ${j['created_at']}',
-            ),
-          ], classes: 'checkbox-field'),
-        row([
+        if (obsolete.isEmpty)
+          emptyState(
+            'No released sessions are waiting to close.',
+            iconName: 'archive',
+          ),
+        el(
+          'ul',
+          [
+            for (final j in obsolete)
+              el('li', [
+                el('label', [
+                  el(
+                    'input',
+                    [],
+                    attributes: {
+                      'type': 'checkbox',
+                      'checked': '${chosen.contains(j['id'])}',
+                    },
+                    events: {
+                      'change': (e) {
+                        if ((e.target as web.HTMLInputElement).checked) {
+                          chosen.add('${j['id']}');
+                        } else {
+                          chosen.remove(j['id']);
+                        }
+                        refreshDialogs();
+                      },
+                    },
+                  ),
+                  el('span', [
+                    el('span', [
+                      text('${j['profile']?['name'] ?? j['profile_id']}'),
+                    ], classes: 'org-select__name'),
+                    el('span', [
+                      mono(j['alias']),
+                      text(' · '),
+                      mono(j['pane_id'] ?? 'Pane identity missing'),
+                      text(' · '),
+                      timeStamp(j['created_at']),
+                    ], classes: 'org-select__meta'),
+                  ], classes: 'org-select__text'),
+                ], classes: 'org-select'),
+              ]),
+          ],
+          classes: 'org-select-list',
+          attributes: {'role': 'list'},
+        ),
+        el('div', [
           button('Cancel', () => close(false)),
           button(
             'Archive and close selected',
             () => close(true),
             disabled: chosen.isEmpty,
             primary: true,
+            iconName: 'archive',
           ),
-        ]),
+        ], classes: 'actions org-dialog-actions'),
       ]),
     );
     if (ok != true ||
@@ -358,9 +383,22 @@ class _OrganizationPageState extends State<OrganizationPage> {
       await showDialog<void>(
         'Session cleanup results',
         (close) => el('div', [
-          for (final r in records(result['results']))
-            prose('${r['id']}: ${r['state']} ${r['reason'] ?? ''}'),
-          button('Close', () => close(null)),
+          el(
+            'ul',
+            [
+              for (final r in records(result['results']))
+                el('li', [
+                  mono(r['id']),
+                  statePill(r['state']),
+                  if ('${r['reason'] ?? ''}'.isNotEmpty) note(r['reason']),
+                ], classes: 'org-result'),
+            ],
+            classes: 'org-result-list',
+            attributes: {'role': 'list'},
+          ),
+          el('div', [
+            button('Close', () => close(null)),
+          ], classes: 'actions org-dialog-actions'),
         ]),
       );
       if (mounted && epoch == connection.generation)
@@ -389,19 +427,48 @@ class _OrganizationPageState extends State<OrganizationPage> {
         'Archived sessions',
         (close) => el('div', [
           if (archives.isEmpty)
-            prose(
+            emptyState(
               'No archives yet. Archive and close a verified idle session first.',
+              iconName: 'archive',
             ),
-          for (final a in archives)
-            card('${a['identity']?['name'] ?? 'Historical agent'}', [
-              prose(
-                '${a['alias']} · Archived ${a['archived_at']} ${a['native_resume_available'] == true ? '· Native resume available' : ''}',
-              ),
-              if (a['terminal_unavailable'] != null)
-                prose('Terminal history unavailable; saved records only.'),
-              button('View history', () => close(a)),
-            ]),
-          button('Close', () => close(null)),
+          el(
+            'ul',
+            [
+              for (final a in archives)
+                el('li', [
+                  agentTile(
+                    a['identity']?['name'] ?? 'Historical agent',
+                    role: a['identity']?['role'],
+                    size: 'sm',
+                  ),
+                  el('div', [
+                    el('p', [
+                      text('${a['identity']?['name'] ?? 'Historical agent'}'),
+                    ], classes: 'org-archive__name'),
+                    el('p', [
+                      mono(a['alias']),
+                      text(' · Archived '),
+                      timeStamp(a['archived_at']),
+                      if (a['native_resume_available'] == true)
+                        text(' · Native resume available'),
+                    ], classes: 'org-archive__meta'),
+                    if (a['terminal_unavailable'] != null)
+                      note('Terminal history unavailable; saved records only.'),
+                  ], classes: 'org-archive__text'),
+                  button(
+                    'View history',
+                    () => close(a),
+                    small: true,
+                    iconName: 'history',
+                  ),
+                ], classes: 'org-archive'),
+            ],
+            classes: 'org-archive-list',
+            attributes: {'role': 'list'},
+          ),
+          el('div', [
+            button('Close', () => close(null)),
+          ], classes: 'actions org-dialog-actions'),
         ]),
       );
       if (chosen == null || !current()) return;
@@ -415,31 +482,38 @@ class _OrganizationPageState extends State<OrganizationPage> {
       final action = await showDialog<String>(
         'Archived conversation: ${data['identity']?['name'] ?? 'agent'}',
         (close) => el('div', [
-          prose(
+          note(
             native
                 ? 'Bounded historical evidence, not a complete provider transcript. Native resume restores the original conversation binding and waits for instructions.'
                 : 'Bounded historical evidence, not a complete provider transcript. Continuing creates a fresh conversation and waits for instructions.',
           ),
-          pre(
-            'Checkout: ${data['worktree_path'] ?? data['source_project']}\nBranch: ${data['worktree_branch']}\nTask: ${data['task_id']}',
-          ),
+          factList([
+            ('Checkout', mono(data['worktree_path'] ?? data['source_project'])),
+            ('Branch', mono(data['worktree_branch'])),
+            ('Task', mono(data['task_id'])),
+          ], classes: 'org-dialog-facts'),
           if (data['terminal_capture']?['forced_stop'] == true)
-            prose(
-              'Forced stop: visible screen only, up to 160 lines. Earlier history is omitted; reply may be incomplete.',
-            ),
+            callout('warning', 'triangle-alert', [
+              note(
+                'Forced stop: visible screen only, up to 160 lines. Earlier history is omitted; reply may be incomplete.',
+              ),
+            ]),
           if (data['terminal_capture']?['character_truncated'] == true)
-            prose('Terminal output exceeded archive character limit.'),
+            callout('warning', 'triangle-alert', [
+              note('Terminal output exceeded archive character limit.'),
+            ]),
           pre(
             data['terminal'] ??
                 data['terminal_unavailable'] ??
                 'Terminal unavailable.',
           ),
           for (final m in data['messages'] as List? ?? []) pre(m),
-          row([
+          el('div', [
             button(
               'Download archive',
               () =>
                   downloadText(jsonEncode(data), 'session-${data['id']}.json'),
+              iconName: 'download',
             ),
             button('Close', () => close(null)),
             if (native)
@@ -449,7 +523,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
               () => close('continue'),
               primary: true,
             ),
-          ]),
+          ], classes: 'actions org-dialog-actions'),
         ]),
       );
       if (action != null && current())
@@ -516,81 +590,398 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Component run(Json job, bool busy) {
     final admin = connection.operator.value['role'] == 'admin';
-    return card(
-      '${job['kind'] == 'launch' ? 'Launch' : 'Delegation'} · ${bloc.state.profiles.where((p) => p['id'] == job['profile_id']).firstOrNull?['name'] ?? 'Agent'}',
-      [
-        badge('${job['state']}'),
-        prose('Updated: ${job['updated_at']}'),
-        if (job['profile'] is Map)
-          prose(
-            'Model at launch: ${savedModelLabel(Map<String, dynamic>.from(job['profile']))} · Reasoning: ${savedReasoningLabel(Map<String, dynamic>.from(job['profile']))}',
+    final launch = job['kind'] == 'launch';
+    final profile = bloc.state.profiles
+        .where((p) => p['id'] == job['profile_id'])
+        .firstOrNull;
+    final name = '${profile?['name'] ?? 'Agent'}';
+    final saved = job['profile'] is Map
+        ? Map<String, dynamic>.from(job['profile'])
+        : null;
+    final actions = <Component>[
+      if (job['kind'] == 'delegate' &&
+          admin &&
+          [
+            'delivered',
+            'reported_complete',
+            'needs_attention',
+            'uncertain',
+          ].contains(job['state'])) ...[
+        if (job['state'] == 'reported_complete')
+          button(
+            'Accept completion and free agent',
+            () => resolveDelegation(job, 'complete'),
+            disabled: busy,
+            small: true,
+            iconName: 'circle-check',
           ),
-        if (job['launch_arguments'] is List)
-          pre(
-            'Arguments sent to Herdr: ${(job['launch_arguments'] as List).join(' ')}',
-          ),
-        if (job['alias'] != null)
-          pre(
-            'Herdr name: ${job['alias']} · Pane: ${job['pane_id'] ?? 'not allocated'}',
-          ),
-        if (job['task'] != null)
-          pre('From ${job['sender_name']}: ${job['task']}'),
-        if (job['workspace_mode'] == 'worktree')
-          pre(
-            'Worktree: ${job['worktree_path']}\nBranch: ${job['worktree_branch']}',
-          ),
-        if (job['workspace_note'] != null) prose(job['workspace_note']),
-        if (job['error'] != null) prose(job['error']),
-        if (job['resolution'] is Map)
-          prose(
-            'Resolved: ${job['resolution']['decision']} · ${job['resolution']['reason']}',
-          ),
-        if (job['result'] != null)
-          pre('Operator completion report: ${job['result']}'),
-        if (job['kind'] == 'delegate' &&
-            admin &&
-            [
-              'delivered',
-              'reported_complete',
-              'needs_attention',
-              'uncertain',
-            ].contains(job['state']))
-          row([
-            if (job['state'] == 'reported_complete')
-              button(
-                'Accept completion and free agent',
-                () => resolveDelegation(job, 'complete'),
-                disabled: busy,
-              ),
-            button(
-              'Cancel after inspection',
-              () => resolveDelegation(job, 'cancel'),
-              disabled: busy,
-            ),
-          ]),
-        if (job['kind'] == 'launch' &&
-            ['persona_sent', 'released'].contains(job['state']) &&
-            job['session_closed_at'] == null &&
-            admin)
-          row([
-            button(
-              'Archive and close session',
-              () => manageSession(job, 'close'),
-              disabled: busy,
-            ),
-            if (job['state'] == 'persona_sent')
-              button(
-                'Restart in assigned checkout',
-                () => manageSession(job, 'restart'),
-                disabled: busy,
-              ),
-          ]),
-        if (job['kind'] == 'launch' &&
-            !['queued', 'running', 'released'].contains(job['state']))
-          button('Release run binding', () => release(job), disabled: busy),
-        if (job['kind'] == 'delegate' && job['state'] == 'delivered')
-          button('Record completion report', () => report(job), disabled: busy),
+        button(
+          'Cancel after inspection',
+          () => resolveDelegation(job, 'cancel'),
+          disabled: busy,
+          small: true,
+          iconName: 'circle-x',
+        ),
       ],
+      if (launch &&
+          ['persona_sent', 'released'].contains(job['state']) &&
+          job['session_closed_at'] == null &&
+          admin) ...[
+        button(
+          'Archive and close session',
+          () => manageSession(job, 'close'),
+          disabled: busy,
+          small: true,
+          iconName: 'archive',
+        ),
+        if (job['state'] == 'persona_sent')
+          button(
+            'Restart in assigned checkout',
+            () => manageSession(job, 'restart'),
+            disabled: busy,
+            small: true,
+            iconName: 'rotate-ccw',
+          ),
+      ],
+      if (launch && !['queued', 'running', 'released'].contains(job['state']))
+        button(
+          'Release run binding',
+          () => release(job),
+          disabled: busy,
+          small: true,
+          iconName: 'link',
+        ),
+      if (job['kind'] == 'delegate' && job['state'] == 'delivered')
+        button(
+          'Record completion report',
+          () => report(job),
+          disabled: busy,
+          small: true,
+          iconName: 'pencil',
+        ),
+    ];
+    return el('li', [
+      if (profile != null && profile['group_id'] == null)
+        agentTile(name, role: profile['role'], size: 'sm')
+      else
+        el(
+          'span',
+          [
+            icon(
+              profile != null ? 'message-square' : (launch ? 'play' : 'send'),
+            ),
+          ],
+          classes: 'icon-tile icon-tile--sm',
+          attributes: {'aria-hidden': 'true'},
+        ),
+      el('div', [
+        el('div', [
+          el('h3', [
+            text(launch ? 'Launch' : 'Delegation'),
+            el('span', [text(' · $name')], classes: 'org-run__agent'),
+          ], classes: 'org-run__title'),
+          statePill(job['state']),
+          el('span', [
+            text('Updated '),
+            timeStamp(job['updated_at']),
+          ], classes: 'org-run__time'),
+        ], classes: 'org-run__head'),
+        factList([
+          if (saved != null)
+            (
+              'Model at launch',
+              text(
+                '${savedModelLabel(saved)} · Reasoning: ${savedReasoningLabel(saved)}',
+              ),
+            ),
+          if (job['launch_arguments'] is List)
+            (
+              'Arguments sent to Herdr',
+              el('code', [text((job['launch_arguments'] as List).join(' '))]),
+            ),
+          if (job['alias'] != null) ('Herdr name', mono(job['alias'])),
+          if (job['alias'] != null)
+            ('Pane', mono(job['pane_id'] ?? 'not allocated')),
+          if (job['task'] != null)
+            ('From ${job['sender_name']}', textBlock(job['task'])),
+          if (job['workspace_mode'] == 'worktree')
+            ('Worktree', mono(job['worktree_path'])),
+          if (job['workspace_mode'] == 'worktree')
+            ('Branch', mono(job['worktree_branch'])),
+          if (job['resolution'] is Map)
+            (
+              'Resolved',
+              text(
+                '${job['resolution']['decision']} · ${job['resolution']['reason']}',
+              ),
+            ),
+          if (job['result'] != null)
+            (
+              'Operator completion report',
+              '${job['result']}'.trim().isEmpty
+                  ? noValue()
+                  : textBlock(job['result']),
+            ),
+        ], classes: 'org-run__facts'),
+        if (job['workspace_note'] != null) note(job['workspace_note']),
+        if (job['error'] != null) errorLine(job['error']),
+        if (actions.isNotEmpty) row(actions),
+      ], classes: 'org-run__body'),
+    ], classes: 'org-run');
+  }
+
+  Component teamRow(
+    Json org,
+    Json p,
+    List<Json> profiles,
+    List<Json> jobs,
+    bool busy,
+  ) {
+    final activity = liveActivity(
+      connection.state.agents
+          .where((a) => a['profile_id'] == p['id'])
+          .firstOrNull,
+    );
+    final launch = jobs
+        .where(
+          (j) =>
+              j['kind'] == 'launch' &&
+              j['profile_id'] == p['id'] &&
+              j['state'] != 'released',
+        )
+        .firstOrNull;
+    final manager = profiles
+        .where((x) => x['id'] == p['manager_id'])
+        .firstOrNull;
+    return el('tr', [
+      el(
+        'th',
+        [
+          agentIdentity(
+            p['name'],
+            role: p['role'],
+            meta: '${p['role']} · ${p['runtime']}',
+            live: activity == 'working',
+            extra: [
+              el('span', [
+                text(
+                  manager == null
+                      ? 'Reports to organization owner'
+                      : 'Reports to ${manager['name']}',
+                ),
+              ], classes: 'org-agent__meta'),
+              if (p['coordination_binding'] != null)
+                el('span', [
+                  text(
+                    p['coordination_binding'] == 'used'
+                        ? 'Used by coordination: ${(p['coordination_repositories'] as List? ?? []).join(', ')}'
+                        : 'Inactive coordinator profile · no repository binding',
+                  ),
+                ], classes: 'org-agent__meta'),
+              disclosure('Persona and responsibilities', [
+                textBlock(p['persona']),
+                factList([
+                  ('Project', mono(p['project'])),
+                  (
+                    'Reports to',
+                    text(manager?['name'] ?? 'Organization owner'),
+                  ),
+                  ('Persona', text('v${p['version']}')),
+                ]),
+              ], classes: 'org-team__persona'),
+            ],
+          ),
+        ],
+        classes: 'org-team__agent',
+        attributes: {'scope': 'row'},
+      ),
+      el('td', [
+        el(
+          'span',
+          [text(savedModelLabel(p))],
+          classes: '${p['model'] ?? ''}'.isEmpty
+              ? 'org-team__model org-team__model--default'
+              : 'org-team__model',
+        ),
+        el('span', [
+          text('Reasoning: ${savedReasoningLabel(p)}'),
+        ], classes: 'org-team__sub'),
+      ], classes: 'org-team__modelcell'),
+      el('td', [
+        activityPill(activity),
+        if (launch != null)
+          el('span', [
+            text('Launch: ${'${launch['state']}'.replaceAll('_', ' ')}'),
+          ], classes: 'org-team__sub'),
+      ], classes: 'org-team__status'),
+      el('td', [
+        el('div', [
+          button(
+            'Launch ${p['name']}',
+            () => submit('launch', {
+              'organization_id': org['id'],
+              'profile_id': p['id'],
+            }),
+            disabled:
+                busy ||
+                jobs.any(
+                  (j) =>
+                      j['kind'] == 'launch' &&
+                      j['profile_id'] == p['id'] &&
+                      j['state'] != 'released',
+                ),
+            primary: true,
+            small: true,
+            iconName: 'play',
+          ),
+          button(
+            'Open console',
+            () => navigate('/agents/${p['id']}'),
+            small: true,
+            iconName: 'terminal',
+          ),
+          button(
+            'Edit persona',
+            () => hire(org, p),
+            disabled: busy,
+            small: true,
+            variant: 'ghost',
+            iconName: 'pencil',
+          ),
+          button(
+            'Remove agent',
+            () async {
+              final epoch = connection.generation;
+              if (await confirm(
+                    'Remove ${p['name']}?',
+                    'Removes this agent and closes its bound Herdr terminal. History, artifacts and worktree files are preserved. Remove it from groups first.',
+                  ) &&
+                  mounted &&
+                  epoch == connection.generation)
+                await submit('remove_agent', {
+                  'organization_id': org['id'],
+                  'profile_id': p['id'],
+                });
+            },
+            disabled: busy,
+            small: true,
+            variant: 'ghost',
+            classes: 'btn--danger',
+            iconName: 'trash-2',
+          ),
+        ], classes: 'org-team__buttons'),
+      ], classes: 'org-team__actions'),
+    ]);
+  }
+
+  Component teamView(
+    Json org,
+    List<Json> profiles,
+    List<Json> jobs,
+    bool busy,
+  ) {
+    Component heading(String label, String iconName) => el(
+      'th',
+      [
+        el('span', [
+          icon(iconName, classes: 'icon--sm'),
+          text(label),
+        ], classes: 'th'),
+      ],
+      attributes: {'scope': 'col'},
+    );
+    return card(
+      'Team',
+      [
+        if (profiles.isEmpty)
+          emptyState(
+            'No agents yet. Hire an agent to start the team.',
+            iconName: 'bot',
+          )
+        else
+          el(
+            'div',
+            [
+              el('table', [
+                el('caption', [
+                  text('Agents in ${org['name'] ?? 'this organization'}'),
+                ], classes: 'visually-hidden'),
+                el('thead', [
+                  el('tr', [
+                    heading('Agent', 'bot'),
+                    heading('Model', 'cpu'),
+                    heading('Status', 'activity'),
+                    el(
+                      'th',
+                      [
+                        el('span', [
+                          text('Actions'),
+                        ], classes: 'visually-hidden'),
+                      ],
+                      classes: 'org-team__actions',
+                      attributes: {'scope': 'col'},
+                    ),
+                  ]),
+                ]),
+                el('tbody', [
+                  for (final p in profiles)
+                    teamRow(org, p, profiles, jobs, busy),
+                ]),
+              ], classes: 'table org-team'),
+            ],
+            classes: 'table-scroll org-team-wrap',
+            attributes: {'role': 'region', 'aria-label': 'Team'},
+          ),
+      ],
+      iconName: 'users',
+      count: profiles.length,
+      classes: 'org-team-card',
+    );
+  }
+
+  Component runsView(List<Json> jobs, bool busy) {
+    final runs = jobs.reversed
+        .where((j) => ['launch', 'delegate'].contains(j['kind']))
+        .toList();
+    return card(
+      'Runs',
+      [
+        if (runs.isEmpty)
+          emptyState(
+            'No runs yet. Launch an agent or delegate work to see its runs here.',
+            iconName: 'history',
+          )
+        else
+          el(
+            'ol',
+            [for (final job in runs) run(job, busy)],
+            classes: 'org-runs',
+            attributes: {'role': 'list'},
+          ),
+      ],
+      iconName: 'history',
+      count: runs.length,
+      subtitle:
+          'Delivery confirms terminal input, not completed work. Launch states are historical; see Live agents for current activity.',
+      actions: [
+        if (connection.operator.value['role'] == 'admin') ...[
+          button(
+            'Clean up obsolete panes',
+            () => cleanupSessions(jobs),
+            disabled: busy || cleaningSessions,
+            small: true,
+            iconName: 'archive',
+          ),
+          button(
+            'Archived sessions',
+            showArchives,
+            disabled: busy,
+            small: true,
+            iconName: 'history',
+          ),
+        ],
+      ],
+      classes: 'org-runs-card',
     );
   }
 
@@ -615,204 +1006,180 @@ class _OrganizationPageState extends State<OrganizationPage> {
     final jobs = state.jobs
         .where((j) => j['organization_id'] == org?['id'])
         .toList();
+    final purpose = '${org?['purpose'] ?? ''}'.trim();
     return el('div', [
-      el('header', [
-        el('div', [
-          el('h1', [text('Organization')]),
-          if (org != null) prose(org['purpose']),
-        ]),
-        row([
+      pageHeader(
+        org == null ? 'Organization' : '${org['name'] ?? 'Organization'}',
+        overline: org == null ? null : 'Organization',
+        subtitle: purpose.isEmpty ? null : purpose,
+        actions: [
           button(
             'Create organization',
             () => editOrganization(),
             disabled: busy,
+            iconName: 'plus',
           ),
           if (org != null)
             button(
               'Edit organization',
               () => editOrganization(org),
               disabled: busy,
+              iconName: 'pencil',
             ),
           button(
             'Refresh',
             () => bloc.send(OrganizationCommand('refresh')),
             disabled: state.busy,
+            iconName: 'refresh-cw',
           ),
-        ]),
-      ], classes: 'page-heading organization-heading'),
+        ],
+      ),
       if (state.error != null) notice(state.error, error: true),
       if (error != null) notice(error, error: true),
       if (bloc.pending != null)
-        row([
-          button(
-            'Retry same request',
-            () => bloc.send(bloc.pending!),
-            disabled: state.busy,
-          ),
-          button(
-            'Dismiss request',
-            () => setState(() => bloc.pending = null),
-            disabled: state.busy,
-          ),
-        ]),
-      if (org != null)
         el('div', [
+          icon('history', classes: 'icon--sm'),
           row([
-            for (final item in {
-              'chart': 'Org chart',
-              'team': 'Team',
-              'collaborate': 'Chat & groups',
-              'runs': 'Runs',
-              'automation': 'Automation',
-            }.entries)
-              button(
-                item.value,
-                () => setState(() => view = item.key),
-                primary: view == item.key,
-              ),
+            button(
+              'Retry same request',
+              () => bloc.send(bloc.pending!),
+              disabled: state.busy,
+              small: true,
+            ),
+            button(
+              'Dismiss request',
+              () => setState(() => bloc.pending = null),
+              disabled: state.busy,
+              small: true,
+              variant: 'ghost',
+            ),
           ]),
-          row([
+        ], classes: 'org-retry'),
+      if (org == null && state.loaded)
+        card('Organization', [
+          emptyState(
+            'No organization yet. Create an organization to hire agents.',
+            iconName: 'network',
+          ),
+        ], iconName: 'network'),
+      if (org != null) ...[
+        el('div', [
+          viewTabs(
+            'org-view',
+            'Organization views',
+            {
+              'chart': ('Org chart', 'network'),
+              'team': ('Team', 'users'),
+              'collaborate': ('Chat & groups', 'message-square'),
+              'runs': ('Runs', 'history'),
+              'automation': ('Automation', 'settings'),
+            },
+            view,
+            (value) => setState(() => view = value),
+          ),
+          el('div', [
+            button(
+              'Delegate work',
+              () => delegate(org),
+              disabled: busy || profiles.length < 2,
+              iconName: 'send',
+            ),
             button(
               'Hire an agent',
               () => hire(org),
               disabled: busy,
               primary: true,
+              iconName: 'plus',
             ),
-            button(
-              'Delegate work',
-              () => delegate(org),
-              disabled: busy || profiles.length < 2,
+          ], classes: 'org-tabsrow__actions'),
+        ], classes: 'org-tabsrow'),
+        tabPanel('org-view', view, [
+          if (view == 'chart')
+            OrgChart(
+              profiles: profiles,
+              agents: connection.state.agents,
+              jobs: jobs,
+              groups: state.groups
+                  .where(
+                    (g) =>
+                        g['organization_id'] == org['id'] &&
+                        g['removed_at'] == null,
+                  )
+                  .toList(),
+              onSelect: (p) => navigate('/agents/${p['id']}'),
+              onSelectGroup: (g) => navigate('/groups/${g['id']}'),
+              onConfigure: (p) => hire(org, p),
             ),
-          ]),
-        ], classes: 'organization-navigation'),
-      if (org != null && view == 'chart')
-        OrgChart(
-          profiles: profiles,
-          agents: connection.state.agents,
-          jobs: jobs,
-          groups: state.groups
-              .where(
-                (g) =>
-                    g['organization_id'] == org['id'] &&
-                    g['removed_at'] == null,
-              )
-              .toList(),
-          onSelect: (p) => navigate('/agents/${p['id']}'),
-          onSelectGroup: (g) => navigate('/groups/${g['id']}'),
-          onConfigure: (p) => hire(org, p),
-        ),
-      if (org != null && view == 'team')
-        el('div', [
-          for (final p in profiles)
-            card('${p['name']}', [
-              prose('${p['role']} · ${p['runtime']}'),
-              if (p['coordination_binding'] != null)
-                prose(
-                  p['coordination_binding'] == 'used'
-                      ? 'Used by coordination: ${(p['coordination_repositories'] as List? ?? []).join(', ')}'
-                      : 'Inactive coordinator profile · no repository binding',
-                ),
-              prose(
-                'Model: ${savedModelLabel(p)} · Reasoning: ${savedReasoningLabel(p)}',
-              ),
-              details('Persona and responsibilities', [
-                pre(p['persona']),
-                prose('Project: ${p['project']}'),
-                prose(
-                  'Reports to: ${profiles.where((x) => x['id'] == p['manager_id']).firstOrNull?['name'] ?? 'Organization owner'}',
-                ),
-                prose('Persona v${p['version']}'),
-              ]),
-              row([
-                button('Open console', () => navigate('/agents/${p['id']}')),
-                button('Edit persona', () => hire(org, p), disabled: busy),
-                button('Remove agent', () async {
-                  final epoch = connection.generation;
-                  if (await confirm(
-                        'Remove ${p['name']}?',
-                        'Removes this agent and closes its bound Herdr terminal. History, artifacts and worktree files are preserved. Remove it from groups first.',
-                      ) &&
-                      mounted &&
-                      epoch == connection.generation)
-                    await submit('remove_agent', {
-                      'organization_id': org['id'],
-                      'profile_id': p['id'],
-                    });
-                }, disabled: busy),
-                button(
-                  'Launch ${p['name']}',
-                  () => submit('launch', {
-                    'organization_id': org['id'],
-                    'profile_id': p['id'],
-                  }),
-                  disabled:
-                      busy ||
-                      jobs.any(
-                        (j) =>
-                            j['kind'] == 'launch' &&
-                            j['profile_id'] == p['id'] &&
-                            j['state'] != 'released',
-                      ),
-                  primary: true,
-                ),
-              ]),
-            ]),
-        ], classes: 'cards-grid'),
-      if (org != null && view == 'collaborate')
-        CollaborationPanel(
-          key: ValueKey('collaboration-${org['id']}'),
-          organization: org,
-          profiles: profiles,
-          onOpenGroup: (id) => navigate('/groups/$id'),
-        ),
-      if (org != null && view == 'runs') ...[
-        if (connection.operator.value['role'] == 'admin')
-          row([
-            button(
-              'Clean up obsolete panes',
-              () => cleanupSessions(jobs),
-              disabled: busy || cleaningSessions,
+          if (view == 'team') teamView(org, profiles, jobs, busy),
+          if (view == 'collaborate')
+            CollaborationPanel(
+              key: ValueKey('collaboration-${org['id']}'),
+              organization: org,
+              profiles: profiles,
+              onOpenGroup: (id) => navigate('/groups/$id'),
             ),
-            button('Archived sessions', showArchives, disabled: busy),
-          ]),
-        prose(
-          'Delivery confirms terminal input, not completed work. Launch states are historical; see Live agents for current activity.',
-        ),
-        for (final job in jobs.reversed.where(
-          (j) => ['launch', 'delegate'].contains(j['kind']),
-        ))
-          run(job, busy),
-      ],
-      if (org != null && view == 'automation')
-        OrganizationAutomation(
-          key: ValueKey('policy-${org['id']}'),
-          organizationId: '${org['id']}',
-        ),
-      details('Organization settings', [
-        select('Organization', '${org?['id'] ?? ''}', {
-          '': 'Select organization',
-          for (final o in organizations) '${o['id']}': '${o['name']}',
-        }, (v) => selected = v.isEmpty ? null : v),
-        if (org != null)
-          details('Shared instructions', [pre(org['instructions'])]),
-      ]),
-      details('Migration & backup', [
-        prose(
-          'Exports all organizations, archived entries, models, personas, permissions, project paths, worktree preferences, reporting lines and groups. Runtime sessions, discussions, repositories, recovery snapshots and credentials need separate backups.',
-        ),
-        row([
-          button(
-            'Export configuration',
-            () => transfer(false),
-            disabled: transferring,
-          ),
-          button(
-            'Import configuration',
-            () => transfer(true),
-            disabled: transferring,
-          ),
+          if (view == 'runs') runsView(jobs, busy),
+          if (view == 'automation')
+            OrganizationAutomation(
+              key: ValueKey('policy-${org['id']}'),
+              organizationId: '${org['id']}',
+            ),
         ]),
-      ]),
+      ],
+      el('div', [
+        cardDisclosure(
+          'Organization settings',
+          [
+            el('div', [
+              select(
+                'Organization',
+                '${org?['id'] ?? ''}',
+                {
+                  '': 'Select organization',
+                  for (final o in organizations) '${o['id']}': '${o['name']}',
+                },
+                (v) => selected = v.isEmpty ? null : v,
+              ),
+            ], classes: 'org-settings__select'),
+            if (org != null)
+              el('section', [
+                el('h3', [text('Shared instructions')], classes: 'overline'),
+                textBlock(
+                  '${org['instructions'] ?? ''}'.trim().isEmpty
+                      ? 'No shared instructions.'
+                      : org['instructions'],
+                ),
+              ], classes: 'org-settings__instructions'),
+          ],
+          iconName: 'settings',
+          hint:
+              '${organizations.length} ${organizations.length == 1 ? 'organization' : 'organizations'}',
+        ),
+        cardDisclosure(
+          'Migration & backup',
+          [
+            note(
+              'Exports all organizations, archived entries, models, personas, permissions, project paths, worktree preferences, reporting lines and groups. Runtime sessions, discussions, repositories, recovery snapshots and credentials need separate backups.',
+            ),
+            row([
+              button(
+                'Export configuration',
+                () => transfer(false),
+                disabled: transferring,
+                iconName: 'download',
+              ),
+              button(
+                'Import configuration',
+                () => transfer(true),
+                disabled: transferring,
+                iconName: 'upload',
+              ),
+            ]),
+          ],
+          iconName: 'archive',
+          hint: 'Export or import the configuration',
+        ),
+      ], classes: 'org-admin'),
     ], classes: 'organization-page');
   }
 }

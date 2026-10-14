@@ -1,5 +1,8 @@
 import 'native_task_ui.dart';
+import 'package:jaspr/dom.dart' as dom;
 import '../services.dart';
+import '../ui.dart' as ui;
+import 'ops_ui.dart' as ops;
 
 const knowledgeKinds = [
   'outcome',
@@ -318,223 +321,305 @@ class _KnowledgePageState extends State<KnowledgePage> {
     reason.dispose();
   }
 
-  Component filter(
-    String label,
-    String value,
-    List<String> choices,
-    void Function(String) changed,
-  ) => SizedBox(
-    width: 220,
-    child: DropdownButtonFormField<String>(
-      key: ValueKey('$label:$org:$value'),
-      initialValue: value,
-      isExpanded: true,
-      decoration: InputDecoration(labelText: label),
-      items: [
-        DropdownMenuItem(value: '', child: Text('All ${label.toLowerCase()}')),
-        ...choices.map(
-          (v) => DropdownMenuItem(
-            value: v,
-            child: Text(v, overflow: TextOverflow.ellipsis),
-          ),
+  /// Presentation only: which records show their evidence and provenance.
+  final expanded = <String>{};
+
+  String capitalized(Object? value) {
+    final word = '${value ?? ''}';
+    return word.isEmpty ? word : '${word[0].toUpperCase()}${word.substring(1)}';
+  }
+
+  void searchChanged(String value) {
+    search.text = value.length > 200 ? value.substring(0, 200) : value;
+    setState(() {});
+    debounce?.cancel();
+    debounce = Timer(const Duration(milliseconds: 250), () => load());
+  }
+
+  void clearSearch() {
+    debounce?.cancel();
+    search.clear();
+    setState(() {});
+    load();
+  }
+
+  Component toolbar() => ui.el('div', [
+    ui.el('div', [
+      ui.icon('search', classes: 'icon--sm search-field__icon'),
+      ui.field(
+        'Search knowledge',
+        search.text,
+        searchChanged,
+        placeholder: 'Search titles and evidence',
+      ),
+      if (search.text.isNotEmpty)
+        ui.iconButton(
+          'Clear knowledge search',
+          'x',
+          clearSearch,
+          small: true,
+          classes: 'search-field__clear',
         ),
-      ],
-      onChanged: (v) {
-        changed(v ?? '');
+    ], classes: 'search-field knowledge-search'),
+    if (organizations.isNotEmpty)
+      ui.select(
+        'Organization',
+        org,
+        {for (final o in organizations) '${o['id']}': '${o['name']}'},
+        (v) {
+          setState(() {
+            org = v;
+            repository = '';
+            records = [];
+          });
+          load();
+        },
+      ),
+    ui.select(
+      'Repositories',
+      repository,
+      {'': 'All repositories', for (final r in repositories) r: r},
+      (v) {
+        repository = v;
         load();
       },
     ),
-  );
+    ui.select(
+      'Kinds',
+      kind,
+      {'': 'All kinds', for (final k in knowledgeKinds) k: capitalized(k)},
+      (v) {
+        kind = v;
+        load();
+      },
+    ),
+  ], classes: 'knowledge-toolbar');
 
-  @override
-  Component build(BuildContext context) => ListView(
-    padding: const EdgeInsets.all(20),
-    children: [
-      Text(
-        'Project knowledge',
-        style: Theme.of(context).textTheme.headlineMedium,
-      ),
-      const SizedBox(height: 8),
-      const Text(
-        'Findings, decisions and open questions preserved across agent sessions. Historical claims must be reconciled with current code. Reviewed does not mean tests passed.',
-      ),
-      const SizedBox(height: 16),
-      if (organizations.isNotEmpty)
-        DropdownButtonFormField<String>(
-          key: ValueKey(org),
-          initialValue: org,
-          isExpanded: true,
-          decoration: const InputDecoration(labelText: 'Organization'),
-          items: organizations
-              .map(
-                (o) => DropdownMenuItem(
-                  value: o['id'] as String,
-                  child: Text('${o['name']}'),
-                ),
-              )
-              .toList(),
-          onChanged: (v) {
-            setState(() {
-              org = v!;
-              repository = '';
-              records = [];
-            });
+  Component stateChips() => ui.el(
+    'div',
+    [
+      ui.el('span', [ui.text('States')], classes: 'toolbar__label'),
+      for (final value in ['', ...knowledgeStates])
+        ops.chip(
+          value.isEmpty ? 'All' : capitalized(value),
+          status == value,
+          () {
+            setState(() => status = value);
             load();
           },
         ),
-      if (organizations.isEmpty && error == null)
-        const Text(
-          'Create an organization to start retaining project knowledge.',
-        ),
-      const SizedBox(height: 12),
-      TextField(
-        controller: search,
-        maxLength: 200,
-        decoration: InputDecoration(
-          labelText: 'Search knowledge',
-          prefixIcon: const Icon('search'),
-          suffixIcon: search.text.isEmpty
-              ? null
-              : IconButton(
-                  tooltip: 'Clear knowledge search',
-                  icon: const Icon('clear'),
-                  onPressed: () {
-                    debounce?.cancel();
-                    search.clear();
-                    setState(() {});
-                    load();
-                  },
-                ),
-        ),
-        onChanged: (_) {
-          setState(() {});
-          debounce?.cancel();
-          debounce = Timer(const Duration(milliseconds: 250), () => load());
-        },
-      ),
-      Wrap(
-        spacing: 12,
-        runSpacing: 12,
-        children: [
-          filter(
-            'Repositories',
-            repository,
-            repositories,
-            (v) => repository = v,
-          ),
-          filter('Kinds', kind, knowledgeKinds, (v) => kind = v),
-          filter('States', status, knowledgeStates, (v) => status = v),
-        ],
-      ),
-      Wrap(
-        spacing: 12,
-        children: [
-          TextButton.icon(
-            onPressed: busy || org.isEmpty ? null : () => load(),
-            icon: const Icon('refresh'),
-            label: const Text('Refresh knowledge'),
-          ),
-          if (admin)
-            FilledButton.icon(
-              onPressed: busy || org.isEmpty ? null : create,
-              icon: const Icon('add'),
-              label: const Text('Add knowledge'),
-            ),
-        ],
-      ),
-      if (busy) const LinearProgressIndicator(),
-      if (error != null)
-        Text(
-          error!,
-          style: TextStyle(color: Theme.of(context).colorScheme.error),
-        ),
-      if (!busy && records.isEmpty && org.isNotEmpty)
-        const Padding(
-          padding: EdgeInsets.all(20),
-          child: Text(
-            'No knowledge matches these filters. Outcomes are captured as task candidates and completed work are recorded.',
-          ),
-        ),
-      for (final record in records)
-        Card(
-          child: ExpansionTile(
-            key: ValueKey(record['id']),
-            title: Text(
-              '${record['title']}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(
-              '${record['kind']} / ${record['state']} / ${record['repository'] == '' ? 'Organization-wide' : record['repository']}',
-            ),
-            childrenPadding: const EdgeInsets.all(16),
-            expandedCrossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SelectableText('${record['body']}'),
-              const SizedBox(height: 12),
-              SelectableText(
-                'Knowledge ID: ${record['id']}\nCaptured: ${record['created_at']}\nSource: ${(record['source'] as Map)['kind']}\nCommit: ${(record['source'] as Map)['source_sha'] ?? 'Not recorded'}\nExact-commit required checks verified: ${(record['source'] as Map)['checks_verified'] == true}',
-              ),
-              for (final agent
-                  in (record['source'] as Map)['agents'] as List? ?? [])
-                Text(
-                  'Agent: ${agent['name'] ?? agent['profile_id']} / ${agent['role'] ?? ''} / ${agent['runtime'] ?? ''}',
-                ),
-              if ((record['source'] as Map)['run_id'] != null)
-                SelectableText(
-                  'Agent run: ${(record['source'] as Map)['run_id']}',
-                ),
-              Wrap(
-                spacing: 8,
-                children: [
-                  if ((record['source'] as Map)['task_id'] != null)
-                    TextButton(
-                      onPressed: () => component.coordinator.push(
-                        TaskDetailRoute(
-                          (record['source'] as Map)['task_id'] as String,
-                        ),
-                      ),
-                      child: const Text('Open source task'),
-                    ),
-                  if ((record['source'] as Map)['group_id'] != null)
-                    TextButton(
-                      onPressed: () => component.coordinator.push(
-                        GroupRoute(
-                          (record['source'] as Map)['group_id'] as String,
-                        ),
-                      ),
-                      child: const Text('Open source group'),
-                    ),
-                  if (admin && record['state'] != 'superseded')
-                    TextButton(
-                      onPressed: busy ? null : () => review(record),
-                      child: const Text('Review record'),
-                    ),
-                  if (admin && record['state'] != 'superseded')
-                    TextButton(
-                      onPressed: busy
-                          ? null
-                          : () => review(record, supersede: true),
-                      child: const Text('Supersede record'),
-                    ),
-                ],
-              ),
-              if (record['replacement_id'] != null)
-                SelectableText(
-                  'Replaced by knowledge ${record['replacement_id']}',
-                ),
-              for (final audit in record['audit'] as List? ?? [])
-                Text(
-                  '${audit['action']} by ${audit['actor']} at ${audit['at']}: ${audit['reason']}',
-                ),
-            ],
-          ),
-        ),
-      if (before != null)
-        TextButton(
-          onPressed: busy ? null : () => load(more: true),
-          child: const Text('Load older knowledge'),
-        ),
     ],
+    classes: 'chips knowledge-states',
+    attributes: {'role': 'group', 'aria-label': 'Filter knowledge by state'},
   );
+
+  Component recordView(Map<String, dynamic> record) {
+    final id = '${record['id']}';
+    final source = Map<String, dynamic>.from(record['source'] as Map? ?? {});
+    final open = expanded.contains(id);
+    final repository = record['repository'] == ''
+        ? 'Organization-wide'
+        : '${record['repository']}';
+    final state = '${record['state']}';
+    final tone = switch (state) {
+      'reviewed' => 'success',
+      'hypothesis' => 'warning',
+      'reported' => 'info',
+      _ => 'neutral',
+    };
+    return ui.el('li', [
+      ui.el('div', [
+        dom.button(
+          [
+            ui.el('span', [
+              ui.text(record['title']),
+            ], classes: 'knowledge-record__title'),
+            // The full kind / state / repository line stays in the button's
+            // name; the tags beside it show the same facts visually.
+            ui.el('span', [
+              ui.text('${record['kind']} / $state / $repository'),
+            ], classes: 'visually-hidden'),
+            ui.icon('chevron-down', classes: 'disclosure-chevron'),
+          ],
+          type: dom.ButtonType.button,
+          classes: 'knowledge-record__toggle',
+          attributes: {
+            'aria-expanded': '$open',
+            'aria-controls': 'knowledge-record-$id',
+          },
+          onClick: () => setState(() {
+            if (!expanded.remove(id)) expanded.add(id);
+          }),
+        ),
+        ui.el('div', [
+          ui.el('span', [
+            ui.icon(switch ('${record['kind']}') {
+              'outcome' => 'circle-check',
+              'decision' => 'git-merge',
+              'question' => 'circle-help',
+              'guidance' => 'book-open',
+              _ => 'search',
+            }),
+            ui.text(capitalized(record['kind'])),
+          ], classes: 'type-tag'),
+          ops.pill(
+            capitalized(state),
+            tone: tone,
+            shape: state == 'superseded' ? 'dash' : ops.shapeFor(tone),
+          ),
+          ui.el('span', [ui.text(repository)], classes: 'mono-chip'),
+        ], classes: 'knowledge-record__tags'),
+      ], classes: 'knowledge-record__head'),
+      if (open)
+        ui.el(
+          'div',
+          [
+            ui.el('p', [
+              ui.text(record['body']),
+            ], classes: 'knowledge-record__text'),
+            ops.facts([
+              ('Knowledge ID', ops.mono(record['id'])),
+              ('Captured', ops.mono(record['created_at'])),
+              ('Source', ui.text(source['kind'])),
+              ('Commit', ops.mono(source['source_sha'] ?? 'Not recorded')),
+              (
+                'Exact-commit required checks verified',
+                ops.mono('${source['checks_verified'] == true}'),
+              ),
+              for (final agent in source['agents'] as List? ?? [])
+                (
+                  'Agent',
+                  ui.text(
+                    '${agent['name'] ?? agent['profile_id']} / ${agent['role'] ?? ''} / ${agent['runtime'] ?? ''}',
+                  ),
+                ),
+              if (source['run_id'] != null)
+                ('Agent run', ops.mono(source['run_id'])),
+              if (record['replacement_id'] != null)
+                (
+                  'Replaced by',
+                  ui.text('knowledge ${record['replacement_id']}'),
+                ),
+            ]),
+            ui.el('div', [
+              if (source['task_id'] != null)
+                ui.button(
+                  'Open source task',
+                  () => component.coordinator.push(
+                    TaskDetailRoute(source['task_id'] as String),
+                  ),
+                  small: true,
+                  iconName: 'list-checks',
+                ),
+              if (source['group_id'] != null)
+                ui.button(
+                  'Open source group',
+                  () => component.coordinator.push(
+                    GroupRoute(source['group_id'] as String),
+                  ),
+                  small: true,
+                  iconName: 'users',
+                ),
+              if (admin && record['state'] != 'superseded')
+                ui.button(
+                  'Review record',
+                  busy ? null : () => review(record),
+                  small: true,
+                  iconName: 'circle-check',
+                ),
+              if (admin && record['state'] != 'superseded')
+                ui.button(
+                  'Supersede record',
+                  busy ? null : () => review(record, supersede: true),
+                  small: true,
+                  iconName: 'git-compare',
+                ),
+            ], classes: 'actions'),
+            if ((record['audit'] as List? ?? []).isNotEmpty) ...[
+              ui.el('h3', [ui.text('Audit')], classes: 'overline'),
+              ui.el(
+                'ul',
+                [
+                  for (final audit in record['audit'] as List)
+                    ui.el('li', [
+                      ui.icon('history', classes: 'icon--sm'),
+                      ui.text(
+                        '${audit['action']} by ${audit['actor']} at ${audit['at']}: ${audit['reason']}',
+                      ),
+                    ]),
+                ],
+                classes: 'knowledge-audit',
+                attributes: {'role': 'list'},
+              ),
+            ],
+          ],
+          classes: 'knowledge-record__body',
+          attributes: {'id': 'knowledge-record-$id'},
+        ),
+    ], classes: 'knowledge-record');
+  }
+
+  @override
+  Component build(BuildContext context) => ops.opsPage([
+    ui.pageHeader(
+      'Project knowledge',
+      subtitle:
+          'Findings, decisions and open questions preserved across agent sessions. Historical claims must be reconciled with current code. Reviewed does not mean tests passed.',
+      actions: [
+        ui.button(
+          'Refresh knowledge',
+          busy || org.isEmpty ? null : () => load(),
+          iconName: 'refresh-cw',
+        ),
+        if (admin)
+          ui.button(
+            'Add knowledge',
+            busy || org.isEmpty ? null : create,
+            primary: true,
+            iconName: 'plus',
+          ),
+      ],
+    ),
+    ui.card(
+      'Knowledge records',
+      [
+        toolbar(),
+        stateChips(),
+        if (busy)
+          ui.el(
+            'progress',
+            [],
+            attributes: {'aria-label': 'Loading knowledge'},
+          ),
+        if (error != null) ui.notice(error, error: true),
+        if (organizations.isEmpty && error == null)
+          ui.emptyState(
+            'Create an organization to start retaining project knowledge.',
+            iconName: 'book-open',
+          ),
+        if (!busy && records.isEmpty && org.isNotEmpty)
+          ui.emptyState(
+            'No knowledge matches these filters. Outcomes are captured as task candidates and completed work are recorded.',
+            iconName: 'book-open',
+          ),
+        if (records.isNotEmpty)
+          ui.el(
+            'ul',
+            [for (final record in records) recordView(record)],
+            classes: 'knowledge-list',
+            attributes: {'role': 'list'},
+          ),
+        if (before != null)
+          ui.el('div', [
+            ui.button(
+              'Load older knowledge',
+              busy ? null : () => load(more: true),
+              iconName: 'chevron-down',
+            ),
+          ], classes: 'knowledge-more'),
+      ],
+      iconName: 'book-open',
+      classes: 'knowledge-card',
+    ),
+  ], classes: 'knowledge-page');
 }

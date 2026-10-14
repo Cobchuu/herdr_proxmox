@@ -1,5 +1,6 @@
 import 'package:web/web.dart' as web;
 import 'operations_support.dart';
+import 'ops_ui.dart';
 
 String logSize(int bytes) =>
     '${(bytes / 1000000).toStringAsFixed(bytes < 10000 ? 6 : 3)} MB';
@@ -90,78 +91,203 @@ class _LogsState extends OperationsState<LogsPage> {
       await action('delete', {'id': log['id']});
   }
 
-  @override
-  Component build(BuildContext context) => stack([
-    card('Saved terminal logs', [
-      paragraph(
-        'Save retained terminal text before closing a pane. These are snapshots, not guaranteed full run transcripts. Setup/login terminals are never archived here.',
-      ),
-      paragraph(
+  String sourceLabel(Object? value) => switch (value) {
+    'visible' => 'Visible screen',
+    'recent-unwrapped' => 'Recent history',
+    _ => '${value ?? ''}',
+  };
+
+  Component storage() {
+    final percent = (total / 100000000 * 100).clamp(0, 100);
+    return el('div', [
+      meta(
         'Stored: ${logSize(total)} / 100 MB. 1 MB = 1,000,000 bytes. Download limit: 10 MB.',
+        iconName: 'hard-drive',
       ),
-      button('Refresh logs', refresh, disabled: busy),
-      field('Pane ID, e.g. w1:p1', pane, (v) => pane = v),
-      actions([
-        for (final agent in connection.state.agents)
-          button(
-            '${agent['name'] ?? agent['pane_id']}',
-            () => setState(() {
-              pane = '${agent['pane_id']}';
-              label = '${agent['name'] ?? agent['pane_id']}';
-            }),
+      el(
+        'div',
+        [el('span', [], classes: 'meter__fill')],
+        classes: 'meter',
+        attributes: {
+          'role': 'meter',
+          'aria-label': 'Saved log storage',
+          'aria-valuemin': '0',
+          'aria-valuemax': '100',
+          'aria-valuenow': percent.toStringAsFixed(2),
+          'aria-valuetext': '${logSize(total)} of 100 MB',
+          'style': '--meter-value: ${percent.toStringAsFixed(2)}%',
+          if (percent >= 90)
+            'data-level': 'danger'
+          else if (percent >= 75)
+            'data-level': 'warning',
+        },
+      ),
+    ], classes: 'logs-storage');
+  }
+
+  @override
+  Component build(BuildContext context) => opsPage([
+    pageHeader(
+      'Terminal logs',
+      subtitle:
+          'Save retained terminal text before closing a pane. These are snapshots, not guaranteed full run transcripts. Setup/login terminals are never archived here.',
+      actions: [
+        button('Refresh logs', refresh, disabled: busy, iconName: 'refresh-cw'),
+      ],
+    ),
+    el('div', [
+      card(
+        'Save a snapshot',
+        [
+          field('Pane ID, e.g. w1:p1', pane, (v) => setState(() => pane = v)),
+          field('Snapshot label (optional)', label, (v) => label = v),
+          select(
+            'Source',
+            source,
+            {
+              'visible': 'Visible screen — passive read',
+              'recent-unwrapped': 'Recent history (idle agent)',
+            },
+            (v) {
+              if (!busy) setState(() => source = v);
+            },
           ),
-      ]),
-      field('Snapshot label (optional)', label, (v) => label = v),
-      select(
-        'Source',
-        source,
-        {
-          'visible': 'Visible screen — passive read',
-          'recent-unwrapped': 'Recent history (idle agent)',
-        },
-        (v) {
-          if (!busy) setState(() => source = v);
-        },
+          if (connection.state.agents.isNotEmpty)
+            el(
+              'div',
+              [
+                el('span', [text('Agents')], classes: 'toolbar__label'),
+                for (final agent in connection.state.agents)
+                  chip(
+                    '${agent['name'] ?? agent['pane_id']}',
+                    pane.isNotEmpty && pane == '${agent['pane_id']}',
+                    () => setState(() {
+                      pane = '${agent['pane_id']}';
+                      label = '${agent['name'] ?? agent['pane_id']}';
+                    }),
+                  ),
+              ],
+              classes: 'chips logs-agents',
+              attributes: {
+                'role': 'group',
+                'aria-label': 'Choose an agent pane',
+              },
+            ),
+          el('div', [
+            meta(
+              'Recent history exports up to 2,000 terminal rows. Older output may no longer be available.',
+              iconName: 'info',
+            ),
+            button(
+              'Save text snapshot',
+              () => action('save', {
+                'pane': pane.trim(),
+                'label': label.trim().isEmpty ? pane.trim() : label.trim(),
+                'source': source,
+              }),
+              primary: true,
+              disabled: busy,
+              iconName: 'download',
+            ),
+          ], classes: 'logs-save__footer'),
+          feedback(),
+        ],
+        iconName: 'terminal',
+        actions: [
+          busy
+              ? pill('Saving', tone: 'info')
+              : pane.trim().isEmpty
+              ? pill('No pane selected', shape: 'dash')
+              : pill('Pane ${pane.trim()}', tone: 'accent'),
+        ],
+        classes: 'logs-save',
       ),
-      paragraph(
-        'Recent history exports up to 2,000 terminal rows. Older output may no longer be available.',
+      card(
+        'Saved snapshots',
+        [
+          storage(),
+          if (logs.isEmpty)
+            emptyState(
+              'No saved snapshots. Save a pane’s text to keep it after the pane closes.',
+              iconName: 'archive',
+            )
+          else
+            table(
+              ['Snapshot', 'Pane', 'Source', 'Created', 'Size', 'Actions'],
+              [
+                for (final log in logs)
+                  [
+                    el('span', [
+                      el('strong', [text(log['label'])]),
+                      el('span', [
+                        text('${log['size_bytes']} bytes'),
+                      ], classes: 'mono'),
+                    ], classes: 'logs-name'),
+                    mono(log['pane']),
+                    pill(
+                      sourceLabel(log['source']),
+                      shape: log['source'] == 'visible' ? 'hollow' : 'filled',
+                    ),
+                    mono(log['created_at']),
+                    el('span', [
+                      mono(logSize(log['size_bytes'] as int)),
+                      if (log['download_allowed'] != true)
+                        pill('Over download limit', tone: 'warning'),
+                    ], classes: 'logs-size'),
+                    actions([
+                      button(
+                        'Preview last 8 KB',
+                        () => action('preview', {'id': log['id']}),
+                        disabled: busy,
+                        small: true,
+                        iconName: 'scan',
+                      ),
+                      button(
+                        'Open text page',
+                        () => open(log, 'view'),
+                        small: true,
+                        iconName: 'external-link',
+                      ),
+                      button(
+                        'Download .txt',
+                        () => open(log, 'download'),
+                        disabled: log['download_allowed'] != true,
+                        small: true,
+                        iconName: 'download',
+                      ),
+                      button(
+                        'Delete snapshot',
+                        () => delete(log),
+                        disabled: busy,
+                        small: true,
+                        variant: 'danger',
+                        iconName: 'trash-2',
+                      ),
+                    ]),
+                  ],
+              ],
+            ),
+        ],
+        iconName: 'archive',
+        count: logs.length,
+        classes: 'logs-saved',
       ),
-      button(
-        'Save text snapshot',
-        () => action('save', {
-          'pane': pane.trim(),
-          'label': label.trim().isEmpty ? pane.trim() : label.trim(),
-          'source': source,
-        }),
-        primary: true,
-        disabled: busy,
-      ),
-      feedback(),
-    ]),
-    for (final log in logs)
-      card('${log['label']} — ${logSize(log['size_bytes'] as int)}', [
-        paragraph(
-          '${log['size_bytes']} bytes · ${log['pane']} · ${log['source']} · ${log['created_at']}',
+      if (preview != null)
+        card(
+          'Snapshot preview',
+          [codeText(preview)],
+          iconName: 'scan',
+          actions: [
+            button(
+              'Close preview',
+              () => setState(() => preview = null),
+              small: true,
+              variant: 'ghost',
+              iconName: 'x',
+            ),
+          ],
+          classes: 'logs-preview',
         ),
-        actions([
-          button(
-            'Preview last 8 KB',
-            () => action('preview', {'id': log['id']}),
-            disabled: busy,
-          ),
-          button('Open text page', () => open(log, 'view')),
-          button(
-            'Download .txt',
-            () => open(log, 'download'),
-            disabled: log['download_allowed'] != true,
-          ),
-          button('Delete snapshot', () => delete(log), disabled: busy),
-        ]),
-      ]),
-    if (preview != null)
-      card('Snapshot preview', [
-        codeText(preview),
-        button('Close preview', () => setState(() => preview = null)),
-      ]),
-  ]);
+    ], classes: 'logs-grid'),
+  ], classes: 'logs-page');
 }

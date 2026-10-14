@@ -44,6 +44,7 @@ class EdgeInsets {
   static const zero = EdgeInsets.all(0);
   final double top, right, bottom, left;
   String get css => '${top}px ${right}px ${bottom}px ${left}px';
+  bool get isZero => top == 0 && right == 0 && bottom == 0 && left == 0;
 }
 
 class TextStyle {
@@ -534,9 +535,17 @@ class _ExpansionState extends State<ExpansionTile> {
         },
       ),
       if (expanded)
-        Padding(
-          padding: component.childrenPadding,
-          child: Column(children: component.children),
+        // A body hook for page styles; zero padding stays unstyled inline so
+        // a page can pad it (the tasks page does).
+        Component.element(
+          tag: 'div',
+          classes: 'native-expansion__body',
+          attributes: {
+            'style': component.childrenPadding.isZero
+                ? 'min-width:0;'
+                : 'padding:${component.childrenPadding.css};min-width:0;',
+          },
+          children: [Column(children: component.children)],
         ),
     ],
   );

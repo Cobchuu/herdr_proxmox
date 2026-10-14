@@ -23,6 +23,23 @@ extension type _Xterm._(JSObject _) implements JSObject {
   external web.HTMLElement? get element;
 }
 
+/// Resolves a design token as the dark scheme renders it, so the terminal
+/// matches the dark terminal panel in both themes. The fallback applies when
+/// the token stylesheet is not loaded (unit tests).
+String _darkToken(String name, String fallback) {
+  final body = web.document.body;
+  if (body == null) return fallback;
+  final probe = web.document.createElement('span') as web.HTMLElement;
+  probe.style
+    ..setProperty('display', 'none')
+    ..setProperty('color-scheme', 'dark')
+    ..setProperty('color', 'var($name, $fallback)');
+  body.append(probe);
+  final value = web.window.getComputedStyle(probe).color;
+  probe.remove();
+  return value.isEmpty ? fallback : value;
+}
+
 /// The locally bundled xterm.js core renders terminal rows as DOM elements.
 /// No canvas or WebGL addon is loaded. VT state, alternate buffers, selection,
 /// paste and keyboard input are handled by the same terminal emulator.
@@ -33,12 +50,17 @@ class BrowserTerminal {
             'scrollback': maxLines,
             'cols': 80,
             'rows': 24,
-            'fontFamily': 'ui-monospace, SFMono-Regular, Consolas, monospace',
-            'fontSize': 14,
-            'lineHeight': 1.3,
+            'fontFamily':
+                '"JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace',
+            'fontSize': 13,
+            'lineHeight': 1.35,
             'cursorBlink': true,
             'screenReaderMode': true,
-            'theme': {'background': '#101414', 'foreground': '#dce6e2'},
+            'theme': {
+              'background': _darkToken('--color-surface-sunken', '#101414'),
+              'foreground': _darkToken('--color-text', '#dce6e2'),
+              'cursor': _darkToken('--color-accent', '#dce6e2'),
+            },
           }.jsify()
           as JSObject,
     );
@@ -160,7 +182,11 @@ class _TerminalViewState extends State<TerminalView> {
     final row = host.querySelector('.xterm-rows > div') as web.HTMLElement?;
     final sample =
         host.querySelector('.xterm-char-measure-element') as web.HTMLElement?;
-    final width = sample?.getBoundingClientRect().width ?? 0;
+    // xterm measures a run of repeated characters; one cell is that width
+    // divided by the run length.
+    final run = (sample?.textContent ?? '').length;
+    final width =
+        (sample?.getBoundingClientRect().width ?? 0) / (run > 0 ? run : 1);
     final height = row?.getBoundingClientRect().height ?? 0;
     if (width <= 0 || height <= 0 || host.clientWidth <= 0) return;
     component.terminal.resize(

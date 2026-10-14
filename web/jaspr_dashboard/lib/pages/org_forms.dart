@@ -2,6 +2,7 @@ import 'org_form_values.dart';
 import 'package:web/web.dart' as web;
 import '../ui.dart';
 import 'model_catalog.dart';
+import 'org_ui.dart';
 
 typedef Json = Map<String, dynamic>;
 Component prose(Object? value) => el('p', [text(value)]);
@@ -33,67 +34,117 @@ Future<Json?> editRecord(
   Set<String> flags = const {},
   void Function(String key, dynamic value, Json values)? changed,
   bool Function(String key, Json values)? visible,
+  Set<String> wide = const {},
 }) {
   final values = Json.from(initial);
   String? error;
-  return showDialog<Json>(
-    title,
-    (close) => el(
+  // Short inputs and selects pair up two per row; text areas, switches,
+  // [wide] keys (paths) and a short field without a partner take the full
+  // width of the form. Pairs are recomputed from the visible fields.
+  bool short(String key) =>
+      !long.contains(key) && !flags.contains(key) && !wide.contains(key);
+  Set<String> halves() {
+    final shown = [
+      for (final key in labels.keys)
+        if (visible == null || visible(key, values)) key,
+    ];
+    final result = <String>{};
+    for (var i = 0; i < shown.length - 1; i++) {
+      if (short(shown[i]) &&
+          short(shown[i + 1]) &&
+          !result.contains(shown[i])) {
+        result.addAll([shown[i], shown[i + 1]]);
+        i++;
+      }
+    }
+    return result;
+  }
+
+  Component item(Set<String> half, String key, Component child) => el(
+    'div',
+    [child],
+    classes: [
+      'org-form__item',
+      if (half.contains(key)) 'org-form__item--half',
+      if (flags.contains(key)) 'org-form__item--switch',
+    ].join(' '),
+  );
+  return showDialog<Json>(title, (close) {
+    final half = halves();
+    return el(
       'form',
       [
         for (final entry in labels.entries)
           if (visible != null && !visible(entry.key, values))
             const Component.empty()
           else if (flags.contains(entry.key))
-            el('label', [
-              el(
-                'input',
-                [],
-                attributes: {
-                  'type': 'checkbox',
-                  if (values[entry.key] == true) 'checked': 'checked',
-                },
-                events: {
-                  'change': (e) {
-                    values[entry.key] =
-                        (e.target as web.HTMLInputElement).checked;
-                    refreshDialogs();
+            item(
+              half,
+              entry.key,
+              el('label', [
+                el(
+                  'input',
+                  [],
+                  classes: 'switch__input',
+                  attributes: {
+                    'type': 'checkbox',
+                    'role': 'switch',
+                    'checked': '${values[entry.key] == true}',
                   },
+                  events: {
+                    'change': (e) {
+                      values[entry.key] =
+                          (e.target as web.HTMLInputElement).checked;
+                      refreshDialogs();
+                    },
+                  },
+                ),
+                el('span', [text(entry.value)], classes: 'switch__label'),
+              ], classes: 'switch'),
+            )
+          else if (choices.containsKey(entry.key))
+            item(
+              half,
+              entry.key,
+              select(
+                entry.value,
+                '${values[entry.key] ?? ''}',
+                choices[entry.key]!,
+                (v) {
+                  values[entry.key] = v;
+                  changed?.call(entry.key, v, values);
+                  refreshDialogs();
                 },
               ),
-              text(entry.value),
-            ], classes: 'checkbox-field')
-          else if (choices.containsKey(entry.key))
-            select(
-              entry.value,
-              '${values[entry.key] ?? ''}',
-              choices[entry.key]!,
-              (v) {
-                values[entry.key] = v;
-                changed?.call(entry.key, v, values);
-                refreshDialogs();
-              },
             )
           else if (long.contains(entry.key))
-            textarea(entry.value, '${values[entry.key] ?? ''}', (v) {
-              values[entry.key] = v;
-              changed?.call(entry.key, v, values);
-              if (entry.key == 'project') refreshDialogs();
-            })
-          else
-            field(
-              entry.value,
-              '${values[entry.key] ?? ''}',
-              (v) {
+            item(
+              half,
+              entry.key,
+              textarea(entry.value, '${values[entry.key] ?? ''}', (v) {
                 values[entry.key] = v;
                 changed?.call(entry.key, v, values);
                 if (entry.key == 'project') refreshDialogs();
-              },
-              required: required.contains(entry.key),
+              }),
+            )
+          else
+            item(
+              half,
+              entry.key,
+              field(
+                entry.value,
+                '${values[entry.key] ?? ''}',
+                (v) {
+                  values[entry.key] = v;
+                  changed?.call(entry.key, v, values);
+                  if (entry.key == 'project') refreshDialogs();
+                },
+                required: required.contains(entry.key),
+              ),
             ),
         ...?extra?.call(values),
-        if (error != null) prose(error),
-        row([
+        if (error != null) errorLine(error),
+        el('div', [
           button('Cancel', () => close(null)),
           button('Save', () {
             for (final key in required) {
@@ -122,11 +173,12 @@ Future<Json?> editRecord(
             }
             close(values);
           }, primary: true),
-        ]),
+        ], classes: 'actions org-dialog-actions'),
       ],
+      classes: 'org-form',
       events: {'submit': (event) => event.preventDefault()},
-    ),
-  );
+    );
+  });
 }
 
 Future<Json?> organizationForm([Json? org]) =>
@@ -141,6 +193,7 @@ Future<Json?> organizationForm([Json? org]) =>
       required: {'name', 'purpose'},
       long: {'purpose', 'instructions'},
       limits: {'name': 120, 'purpose': 2000, 'instructions': 8000},
+      wide: {'name'},
     ).then(
       (v) => v == null
           ? null
@@ -188,6 +241,7 @@ Future<Json?> hireForm(
     long: {'persona', 'accessible_paths'},
     flags: {'use_worktree'},
     limits: {'name': 120, 'role': 120, 'project': 2000, 'persona': 8000},
+    wide: {'project'},
     choices: {
       'runtime': {
         '': 'Choose runtime',
@@ -223,7 +277,7 @@ Future<Json?> hireForm(
           values: v,
           onChanged: refreshDialogs,
         ),
-      prose(
+      note(
         'Saved settings apply on next launch. Connect the same CLI account before launching. Permission changes require relaunch. Full autonomy allows all tools; dashboard outputs grants reply/artifact folder access. Additional path globs allow external-directory access; this is not a sandbox.',
       ),
     ],
@@ -302,31 +356,45 @@ Future<Json?> groupForm(List<Json> profiles, [Json? group]) async {
       },
     },
     extra: (v) => [
-      prose(
-        'Choose 2–6 agents. Repository scope requires the same configured project. Facilitator permissions and worktree settings apply on next launch; members retain their own settings. Read-only is a discussion rule, not a sandbox. Automatic tasks remain subject to organization limits.',
-      ),
-      for (final p in profiles.where((p) => p['group_id'] == null))
-        el('label', [
-          el(
-            'input',
-            [],
-            attributes: {
-              'type': 'checkbox',
-              if (members.contains(p['id'])) 'checked': 'checked',
-            },
-            events: {
-              'change': (e) {
-                if ((e.target as web.HTMLInputElement).checked) {
-                  members.add('${p['id']}');
-                } else {
-                  members.remove(p['id']);
-                }
-                refreshDialogs();
-              },
-            },
-          ),
-          text('${p['name']} · ${p['role']}'),
-        ], classes: 'checkbox-field'),
+      el('fieldset', [
+        el('legend', [
+          text('Members'),
+          el('span', [
+            text('${members.length} selected'),
+          ], classes: 'org-form__legend-meta'),
+        ], classes: 'org-form__legend'),
+        note(
+          'Choose 2–6 agents. Repository scope requires the same configured project. Facilitator permissions and worktree settings apply on next launch; members retain their own settings. Read-only is a discussion rule, not a sandbox. Automatic tasks remain subject to organization limits.',
+        ),
+        el('div', [
+          for (final p in profiles.where((p) => p['group_id'] == null))
+            el('label', [
+              el(
+                'input',
+                [],
+                attributes: {
+                  'type': 'checkbox',
+                  'checked': '${members.contains(p['id'])}',
+                },
+                events: {
+                  'change': (e) {
+                    if ((e.target as web.HTMLInputElement).checked) {
+                      members.add('${p['id']}');
+                    } else {
+                      members.remove(p['id']);
+                    }
+                    refreshDialogs();
+                  },
+                },
+              ),
+              agentTile(p['name'], role: p['role'], size: 'xs'),
+              el('span', [
+                el('span', [text('${p['name']}')], classes: 'org-select__name'),
+                el('span', [text('${p['role']}')], classes: 'org-select__meta'),
+              ], classes: 'org-select__text'),
+            ], classes: 'org-select org-select--chip'),
+        ], classes: 'org-form__members'),
+      ], classes: 'org-form__fieldset'),
     ],
     validate: (v) {
       if (members.length < 2 || members.length > 6) return 'Choose 2–6 agents.';

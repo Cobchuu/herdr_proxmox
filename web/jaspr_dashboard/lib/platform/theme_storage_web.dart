@@ -14,3 +14,21 @@ void writeTheme(String value) {
     web.window.localStorage.setItem('herdr.theme', value);
   } catch (_) {}
 }
+
+/// Whether the wide-screen sidebar is collapsed (index.html applies it early).
+bool readSidebarCollapsed() {
+  try {
+    return web.window.localStorage.getItem('herdr.sidebar') == 'collapsed';
+  } catch (_) {
+    return false;
+  }
+}
+
+void writeSidebarCollapsed(bool collapsed) {
+  try {
+    if (collapsed)
+      web.window.localStorage.setItem('herdr.sidebar', 'collapsed');
+    else
+      web.window.localStorage.removeItem('herdr.sidebar');
+  } catch (_) {}
+}

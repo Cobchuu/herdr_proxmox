@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'build_timeline.dart';
 import 'operations_support.dart';
 import 'update_card.dart';
 
@@ -188,109 +189,301 @@ class _BuildsState extends OperationsState<BuildsPage> {
     }
   }
 
-  @override
-  Component build(BuildContext context) => stack([
-    card('Builds & deployments', [
-      paragraph('Build executor: $executor · $queued queued'),
-      if (executor != 'service')
-        paragraph(
-          'Durable build service not installed. Builds stop with the gateway; automatic builds stay off. Install as root: bash /opt/herdr-web/install/build-install.sh',
+  /// Running build in the template's next-build card. Its second section is
+  /// the deployment state; both keep their admin gates and confirmations.
+  Component _runningCard() {
+    final id = identity!;
+    final sha = id['source_sha'];
+    final mode = id['deployment_mode'];
+    return el(
+      'section',
+      [
+        el('header', [
+          el(
+            'span',
+            [icon('rocket')],
+            classes: 'icon-tile icon-tile--lg',
+            attributes: {'data-tone': 'accent'},
+          ),
+          el('div', [
+            el('p', [text('Running build')], classes: 'overline'),
+            el('h2', [
+              el('span', [
+                text(id['build_id'] ?? 'Unknown for this installation'),
+              ], classes: 'next-card__version'),
+              switch (mode) {
+                'local' => pill('Local build', 'info'),
+                'release' => pill('Release', 'success'),
+                _ => pill('Mode unknown', 'neutral', shape: 'hollow'),
+              },
+            ], classes: 'next-card__title'),
+            el('p', [
+              if (sha != null) shaChip(sha),
+              el('span', [
+                text('Package ${id['package_version'] ?? 'Unknown'}'),
+              ]),
+            ], classes: 'next-card__meta'),
+          ], classes: 'next-card__heading'),
+          if (admin &&
+              deployment?['provenance_repairable'] == true &&
+              deployment?['supported'] == true &&
+              !deploying)
+            button(
+              'Resolve source identity',
+              repairProvenance,
+              disabled: busy,
+              iconName: 'link',
+              small: true,
+            ),
+        ], classes: 'next-card__header'),
+        el('div', [
+          el('div', [
+            el('h3', [text('Build identity')], classes: 'overline'),
+            facts([
+              (
+                'Build',
+                mono(id['build_id'] ?? 'Unknown for this installation'),
+              ),
+              ('Source', mono(sha ?? 'Unknown')),
+              ('Package', text(id['package_version'] ?? 'Unknown')),
+              ('Deployment mode', text(mode ?? 'Unknown')),
+            ]),
+          ], classes: 'next-card__section'),
+          if (deployment != null) _deploymentSection(deployment!),
+        ], classes: 'next-card__body'),
+      ],
+      classes: 'card next-card',
+      attributes: {'aria-label': 'Running build'},
+    );
+  }
+
+  Component _deploymentSection(Map<String, dynamic> state) => el('div', [
+    el('div', [
+      el('h3', [text('Deployment')], classes: 'overline'),
+      statusPill(state['state']),
+    ], classes: 'next-card__section-head'),
+    facts([
+      ('Mode', text(state['deployment_mode'] ?? 'release')),
+      if (state['build_id'] != null)
+        ('Deployed build', mono(state['build_id'])),
+      if (state['rollback_available'] is bool)
+        (
+          'Rollback',
+          text(
+            state['rollback_available'] == true
+                ? 'Previous deployment available'
+                : 'No previous deployment',
+          ),
         ),
-      paragraph(
-        'Build exact integration commits from Git changes. Static artifacts and gateway/UI packages are separate. Downloading never authorizes deployment.',
-      ),
-      button('Refresh builds', refresh, disabled: refreshing),
-      feedback(),
     ]),
-    if (identity != null)
-      card('Running build', [
-        codeText(
-          'Build: ${identity!['build_id'] ?? 'Unknown for this installation'}\nSource: ${identity!['source_sha'] ?? 'Unknown'}\nPackage: ${identity!['package_version'] ?? 'Unknown'}\nDeployment mode: ${identity!['deployment_mode'] ?? 'Unknown'}',
+    if (state['error'] != null)
+      callout('danger', 'octagon-alert', [text(state['error'])]),
+    if (admin && state['rollback_available'] == true && !deploying)
+      actions([
+        button(
+          'Roll back last deployment',
+          rollbackDeployment,
+          disabled: busy,
+          iconName: 'rotate-ccw',
+          small: true,
         ),
-        if (admin &&
-            deployment?['provenance_repairable'] == true &&
-            deployment?['supported'] == true &&
-            !deploying)
-          button('Resolve source identity', repairProvenance, disabled: busy),
       ]),
-    if (deployment != null)
-      card('Deployment', [
-        badge('${deployment!['state']}'),
-        paragraph('Mode: ${deployment!['deployment_mode'] ?? 'release'}'),
-        if (deployment!['build_id'] != null)
-          codeText('Deployed build: ${deployment!['build_id']}'),
-        if (deployment!['error'] != null) paragraph(deployment!['error']),
-        if (admin && deployment!['rollback_available'] == true && !deploying)
-          button(
-            'Roll back last deployment',
-            rollbackDeployment,
-            disabled: busy,
+  ], classes: 'next-card__section');
+
+  Component _downloads(Map<String, dynamic> run) {
+    Component get(String label, String kind) => button(
+      label,
+      () => download(run, kind),
+      disabled: downloading != null,
+      iconName: 'download',
+      small: true,
+    );
+    return el('div', [
+      el('div', [
+        get('Download log', 'log'),
+        if (run['artifact'] is Map) ...[
+          get('Download static artifact', 'artifact'),
+          get('Download manifest', 'manifest'),
+        ],
+        if (run['deployment_package'] is Map)
+          get('Download gateway + UI package', 'deployment'),
+        if (downloading?.startsWith('${run['id']}:') == true)
+          el(
+            'span',
+            [text('Downloading…')],
+            classes: 'build-card__progress',
+            attributes: {'role': 'status'},
           ),
-      ]),
-    if (runs.isEmpty) paragraph('No validation builds recorded.'),
-    for (final run in runs)
-      card('${run['repository']} · ${run['state']}', [
-        codeText('Source: ${run['target']}\nBuild: ${run['id']}'),
-        if (run['task_id'] != null) paragraph('Task/job: ${run['task_id']}'),
-        if (run['event_ids'] is List)
-          paragraph(
-            'Integration events: ${(run['event_ids'] as List).join(', ')}',
+      ], classes: 'build-card__downloads'),
+      if (run['deployment_package'] is Map && admin)
+        button(
+          'Deploy this build',
+          () => promote(run),
+          variant: 'primary',
+          iconName: 'rocket',
+          small: true,
+          classes: 'build-card__deploy',
+          disabled: busy || refreshing || deploying,
+        ),
+    ], classes: 'build-card__actions');
+  }
+
+  /// One exact-commit build: header, facts, evidence list, notes, problems,
+  /// validation steps (open for the newest build with checks and any
+  /// failure) and the download/deploy row.
+  Component _card(Map<String, dynamic> run, {required bool newest}) {
+    final checks = checksOf(run);
+    final failed = [
+      for (final check in checks)
+        if (statusLook(check['status']).$1 == 'danger')
+          '${check['name'] ?? check['id']}',
+    ];
+    final heading = 'build-${run['id']}-title';
+    return el(
+      'article',
+      [
+        el('header', [
+          el(
+            'h3',
+            [text(run['repository'] ?? 'Build')],
+            classes: 'build-card__title',
+            attributes: {'id': heading},
           ),
+          statusPill(run['state']),
+          if ('${run['target'] ?? ''}'.isNotEmpty)
+            shaChip(run['target'], classes: 'build-card__sha'),
+        ], classes: 'build-card__head'),
+        ?runFacts(run),
+        if (failed.isNotEmpty)
+          buildProblem('danger', 'octagon-alert', [
+            el('strong', [
+              text(
+                '${failed.length} check${failed.length == 1 ? '' : 's'} failed',
+              ),
+            ]),
+            text(' · ${failed.join(', ')}'),
+          ]),
+        facts([
+          ('Source', mono(run['target'])),
+          ('Build', mono(run['id'])),
+          if (run['task_id'] != null) ('Task/job', mono(run['task_id'])),
+          if (run['event_ids'] is List)
+            ('Integration events', mono((run['event_ids'] as List).join(', '))),
+          ('Command', text(run['command'] ?? 'Preparing validation')),
+        ], classes: 'build-card__evidence'),
         if (run['validation_waiver'] != null)
-          paragraph(
+          buildNote(
+            'info',
             'The originating event has a validation waiver. Build checks retain their actual results.',
           ),
-        paragraph(run['command'] ?? 'Preparing validation'),
-        if (run['checks'] is List)
-          for (final check in run['checks'])
-            if (check is Map)
-              paragraph(
-                '${check['name'] ?? check['id']} · ${check['status']} · ${check['duration_ms'] ?? 0} ms · exit ${check['exit_code'] ?? 'not run'}\n${check['summary'] ?? ''}',
-              ),
+        if ('${run['note'] ?? ''}'.isNotEmpty)
+          buildNote('file-text', run['note']),
         if (run['artifact_error'] != null)
-          paragraph(
-            'Build output could not be retained: ${run['artifact_error']}',
-          ),
+          buildProblem('warning', 'triangle-alert', [
+            text(
+              'Build output could not be retained: ${run['artifact_error']}',
+            ),
+          ]),
         if (run['deployment_package_error'] != null)
-          paragraph(
-            'Full package unavailable: ${run['deployment_package_error']}',
+          buildProblem('warning', 'triangle-alert', [
+            text(
+              'Full package unavailable: ${run['deployment_package_error']}',
+            ),
+          ]),
+        if (checks.isNotEmpty)
+          checkSteps(checks, open: newest || failed.isNotEmpty),
+        _downloads(run),
+      ],
+      classes: 'build-card',
+      attributes: {'aria-labelledby': heading},
+    );
+  }
+
+  /// Vertical timeline, newest first: [start time] [status marker] [card].
+  /// Without any start times the date column folds away.
+  Component _history() {
+    final dated = runs.any((run) => runTime(run['started_at']) != null);
+    final newest = runs.indexWhere((run) => checksOf(run).isNotEmpty);
+    return el(
+      'section',
+      [
+        el('div', [
+          el('h2', [
+            icon('history'),
+            text('Build timeline'),
+            if (runs.isNotEmpty)
+              el('span', [text('${runs.length}')], classes: 'count'),
+          ], classes: 'history__title'),
+          el('p', [
+            text(
+              'Build exact integration commits from Git changes. Static artifacts and gateway/UI packages are separate. Downloading never authorizes deployment.',
+            ),
+          ], classes: 'history__subtitle'),
+        ], classes: 'history__head'),
+        if (runs.isEmpty)
+          el('div', [
+            emptyState('No validation builds recorded.', iconName: 'package'),
+          ], classes: 'card history__empty')
+        else
+          el(
+            'ol',
+            [
+              for (final (index, run) in runs.indexed)
+                el(
+                  'li',
+                  [
+                    if (dated) whenColumn(runTime(run['started_at'])),
+                    rail(run['state']),
+                    _card(run, newest: index == newest),
+                  ],
+                  classes: 'build-entry',
+                  attributes: {
+                    'data-status': '${run['state']}',
+                    'data-edge': [
+                      if (index == 0) 'first',
+                      if (index == runs.length - 1) 'last',
+                    ].join(' '),
+                  },
+                ),
+            ],
+            classes: dated
+                ? 'build-timeline'
+                : 'build-timeline build-timeline--undated',
+            attributes: {'role': 'list'},
           ),
-        actions([
-          button(
-            'Download log',
-            () => download(run, 'log'),
-            disabled: downloading != null,
+      ],
+      classes: 'history',
+      attributes: {'aria-label': 'Build timeline'},
+    );
+  }
+
+  @override
+  Component build(BuildContext context) => el('div', [
+    pageHeader(
+      'Builds & deployments',
+      subtitle: 'Build executor: $executor · $queued queued',
+      actions: [
+        button(
+          'Refresh builds',
+          refresh,
+          disabled: refreshing,
+          iconName: 'refresh-cw',
+        ),
+      ],
+    ),
+    el('div', [feedback()], classes: 'builds-feedback'),
+    if (executor != 'service')
+      callout('warning', 'triangle-alert', [
+        el('span', [
+          text(
+            'Builds stop with the gateway; automatic builds stay off. Install as root: ',
           ),
-          if (run['artifact'] is Map) ...[
-            button(
-              'Download static artifact',
-              () => download(run, 'artifact'),
-              disabled: downloading != null,
-            ),
-            button(
-              'Download manifest',
-              () => download(run, 'manifest'),
-              disabled: downloading != null,
-            ),
-          ],
-          if (run['deployment_package'] is Map) ...[
-            button(
-              'Download gateway + UI package',
-              () => download(run, 'deployment'),
-              disabled: downloading != null,
-            ),
-            if (admin)
-              button(
-                'Deploy this build',
-                () => promote(run),
-                primary: true,
-                disabled: busy || refreshing || deploying,
-              ),
-          ],
+          el('code', [text('bash /opt/herdr-web/install/build-install.sh')]),
         ]),
-        if (downloading?.startsWith('${run['id']}:') == true)
-          paragraph('Downloading…'),
-      ]),
+      ], title: 'Durable build service not installed.'),
+    if (identity != null) _runningCard(),
+    ?cadenceStrip(runs, DateTime.now()),
+    _history(),
     const UpdateCard(),
-  ]);
+  ], classes: 'stack builds-page');
 }

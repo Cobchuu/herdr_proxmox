@@ -8,6 +8,8 @@ import '../ui.dart';
 
 import 'org_forms.dart';
 
+import 'org_ui.dart';
+
 String newRequestId() =>
     '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(0x7fffffff)}';
 
@@ -166,37 +168,100 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
     }
   }
 
+  Component value(Object? v) => v is bool
+      ? statePill(v ? 'on' : 'off', label: v ? 'On' : 'Off')
+      : v is num
+      ? el('span', [text(v)], classes: 'org-policy__num')
+      : text(v);
+
   @override
   Component build(BuildContext context) {
     final admin =
         connection.state.connected &&
         connection.operator.value['role'] == 'admin';
+    final entries = policy?.entries.toList() ?? const [];
+    final switches = entries.where((e) => e.value is bool).toList();
+    final limits = entries.where((e) => e.value is! bool).toList();
 
-    return card('Organization automation & limits', [
-      prose(
-        'Shared by every group. Valid proposals are retained as drafts; limits control automatic queueing. Changing limits does not reprocess finalized discussions.',
-      ),
-
-      if (error != null) prose(error),
-
-      if (policy != null) ...[
-        for (final entry in policy!.entries)
-          prose('${entry.key.replaceAll('_', ' ')}: ${entry.value}'),
+    return card(
+      'Organization automation & limits',
+      [
+        if (error != null) errorLine(error),
+        if (policy == null && error == null)
+          note(busy ? 'Loading limits…' : 'Limits are not loaded.'),
+        if (policy != null)
+          el('div', [
+            if (switches.isNotEmpty)
+              el('section', [
+                el('h3', [text('Automation')], classes: 'overline'),
+                factList([
+                  for (final entry in switches)
+                    (
+                      automationLabels[entry.key] ?? humanize(entry.key),
+                      value(entry.value),
+                    ),
+                ], classes: 'org-policy__list'),
+              ], classes: 'org-policy__group'),
+            if (limits.isNotEmpty)
+              el('section', [
+                el('h3', [text('Limits')], classes: 'overline'),
+                factList([
+                  for (final entry in limits)
+                    (
+                      automationLabels[entry.key] ?? humanize(entry.key),
+                      value(entry.value),
+                    ),
+                ], classes: 'org-policy__list'),
+              ], classes: 'org-policy__group'),
+          ], classes: 'org-policy'),
       ],
-
-      row([
+      iconName: 'shield-check',
+      subtitle:
+          'Shared by every group. Valid proposals are retained as drafts; limits control automatic queueing. Changing limits does not reprocess finalized discussions.',
+      actions: [
+        button(
+          'Refresh limits',
+          refresh,
+          disabled: busy,
+          small: true,
+          variant: 'ghost',
+          iconName: 'refresh-cw',
+        ),
+        if (pending != null)
+          button(
+            'Retry same policy save',
+            save,
+            disabled: !admin || busy,
+            small: true,
+          ),
         button(
           'Edit policy',
           edit,
           disabled: !admin || policy == null || busy || pending != null,
+          small: true,
+          iconName: 'pencil',
         ),
-        button('Refresh limits', refresh, disabled: busy),
-        if (pending != null)
-          button('Retry same policy save', save, disabled: !admin || busy),
-      ]),
-    ]);
+      ],
+      classes: 'org-policy-card',
+    );
   }
 }
+
+/// Display labels for the stored policy keys (shared with the edit form).
+const automationLabels = <String, String>{
+  'auto_queue_proposals': 'Automatically queue qualifying follow-ups',
+  'paused': 'Pause automatic follow-up',
+  'reap_finished_sessions':
+      'Archive and close finished idle sessions automatically',
+  'reap_orphaned_panes': 'Reclaim proven empty orphaned panes',
+  'max_per_meeting': 'Max automatic tasks per meeting',
+  'max_open_per_agent': 'Max open tasks per agent',
+  'max_follow_up_depth': 'Max follow-up depth',
+  'daily_cap': 'Daily task limit',
+  'max_active_sessions': 'Max active sessions',
+  'max_active_meetings': 'Max active meetings',
+  'daily_session_cap': 'Daily session starts',
+};
 
 Future<Json?> editOrganizationAutomation(Json policy) async {
   final defaults = <String, dynamic>{
@@ -224,20 +289,7 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
     'daily_session_cap': 500,
   };
 
-  final labels = {
-    'auto_queue_proposals': 'Automatically queue qualifying follow-ups',
-    'paused': 'Pause automatic follow-up',
-    'reap_finished_sessions':
-        'Archive and close finished idle sessions automatically',
-    'reap_orphaned_panes': 'Reclaim proven empty orphaned panes',
-    'max_per_meeting': 'Max automatic tasks per meeting',
-    'max_open_per_agent': 'Max open tasks per agent',
-    'max_follow_up_depth': 'Max follow-up depth',
-    'daily_cap': 'Daily task limit',
-    'max_active_sessions': 'Max active sessions',
-    'max_active_meetings': 'Max active meetings',
-    'daily_session_cap': 'Daily session starts',
-  };
+  const labels = automationLabels;
 
   final result = await editRecord(
     'Organization automation & limits',
@@ -250,7 +302,7 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
       'reap_orphaned_panes',
     },
     extra: (v) => [
-      prose(
+      note(
         'Valid proposals remain drafts when queueing is disabled or limits are reached. Publishing, merging and deployment remain manual. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes.',
       ),
     ],

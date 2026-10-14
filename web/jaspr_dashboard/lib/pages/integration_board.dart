@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'operations_support.dart';
+import 'ops_ui.dart';
 
 class IntegrationBoard extends StatefulComponent {
   const IntegrationBoard({super.key, required this.repository});
@@ -351,6 +352,72 @@ class _BoardState extends OperationsState<IntegrationBoard> {
   );
   String recoveryCommand(Map event) =>
       'git worktree add --detach <new-recovery-folder> ${event['recovery']['ref']}^1\ngit -C <new-recovery-folder> restore --source=${event['recovery']['ref']} --worktree -- .\ngit -C <new-recovery-folder> read-tree ${event['recovery']['ref']}^2';
+  Component eventRow(Map event, bool enabled) {
+    final status = eventStatus(event);
+    final tone = stateTone(status);
+    return el('li', [
+      iconTile(
+        switch (tone) {
+          'danger' => 'triangle-alert',
+          'warning' => 'hourglass',
+          'success' => 'git-merge',
+          _ => 'git-commit-horizontal',
+        },
+        tone: tone,
+        size: 'sm',
+      ),
+      el('div', [
+        el('p', [
+          el('strong', [text(event['name'])]),
+          pill(status, tone: tone, shape: shapeFor(tone)),
+        ], classes: 'integration-event__title'),
+        el('p', [
+          text('${event['path']} → ${event['target']}'),
+        ], classes: 'integration-event__change mono'),
+        if ('${event['reason'] ?? ''}'.isNotEmpty)
+          el('p', [text(event['reason'])], classes: 'integration-event__text'),
+        facts([
+          if ('${event['blocker_label'] ?? ''}'.isNotEmpty)
+            ('Blocker', mono(event['blocker_label'])),
+          if (validationRun(event) != null)
+            ('Exact-commit validation', text(validationRun(event))),
+          if ('${event['checkpoint'] ?? ''}'.isNotEmpty)
+            ('Checkpoint', mono(event['checkpoint'])),
+        ]),
+        actions([
+          button(
+            'Review decision',
+            () => eventDetails(event),
+            small: true,
+            iconName: 'scan',
+          ),
+          if (validationRecord(event) != null &&
+              validationRun(event) != 'running')
+            button(
+              'Download validation log',
+              () => downloadLog(validationRecord(event)!),
+              disabled: busy,
+              small: true,
+              iconName: 'download',
+            ),
+          if ([
+            'deferred',
+            'blocked',
+            'validation_pending',
+            'validation_failed',
+          ].contains(event['state']))
+            button(
+              status.startsWith('Merged') ? 'Retry validation' : 'Ask again',
+              () => action('integration/retry', {'id': event['id']}),
+              disabled: busy || !enabled,
+              small: true,
+              iconName: 'rotate-ccw',
+            ),
+        ]),
+      ], classes: 'integration-event__body'),
+    ], classes: 'integration-event');
+  }
+
   @override
   Component build(BuildContext context) {
     final config = (data['configurations'] as List? ?? [])
@@ -364,140 +431,201 @@ class _BoardState extends OperationsState<IntegrationBoard> {
         (connection.organizationDirectory.value['organizations'] as List? ?? [])
             .firstOrNull?['id'];
     final enabled = config?['enabled'] == true;
-    return card('Integration coordinator', [
-      disclosure(
-        enabled
-            ? '${events.length} tracked decisions · idle-only delivery'
-            : 'Coordinate updates without interrupting active work',
-        [
-          actions([
-            badge(
-              config == null
-                  ? 'Not configured'
-                  : enabled
-                  ? 'Enabled'
-                  : 'Paused',
-            ),
-            button(
-              'Refresh coordination',
-              refresh,
-              disabled: busy || refreshing,
+    final blockers = events.any(
+      (e) => [
+        'blocked',
+        'deferred',
+        'validation_pending',
+        'validation_failed',
+        'validation_waived',
+      ].contains(e['state']),
+    );
+    final audit = (data['audit'] as List? ?? [])
+        .where((a) => a['repository'] == component.repository)
+        .toList();
+    return card(
+      'Integration coordinator',
+      [
+        el('details', [
+          el('summary', [
+            text(
+              enabled
+                  ? '${events.length} tracked decisions · idle-only delivery'
+                  : 'Coordinate updates without interrupting active work',
             ),
           ]),
-          paragraph(
-            'Last scan: ${displayTime(checked)} · Signed in: ${connection.operator.value['name']} · ${connection.operator.value['role']}',
-          ),
-          paragraph('Launch details: Org chart → Runs'),
-          if (config != null)
-            paragraph(
-              'Coordinator: ${config['coordinator_state'] ?? 'Checking launch'} ${config['coordinator_error'] ?? ''}',
+          facts([
+            ('Last scan', mono(displayTime(checked))),
+            (
+              'Signed in',
+              text(
+                '${connection.operator.value['name']} · ${connection.operator.value['role']}',
+              ),
             ),
-          paragraph(
-            'The gateway queues exact-commit updates. Enabling coordination lets workers merge after choosing integrate_now; deferred work waits for a checkpoint. Workers can report blockers. The coordinator summarizes supplied Git verification, worker-reported tests and recovery references. Inspect pending permissions in Org chart → Chat. Existing worktrees and sessions stay in place.',
-          ),
+            ('Launch details', text('Org chart → Runs')),
+            if (config != null)
+              (
+                'Coordinator',
+                text(
+                  '${config['coordinator_state'] ?? 'Checking launch'} ${config['coordinator_error'] ?? ''}',
+                ),
+              ),
+          ]),
+          el('p', [
+            text(
+              'The gateway queues exact-commit updates. Enabling coordination lets workers merge after choosing integrate_now; deferred work waits for a checkpoint. Workers can report blockers. The coordinator summarizes supplied Git verification, worker-reported tests and recovery references. Inspect pending permissions in Org chart → Chat. Existing worktrees and sessions stay in place.',
+            ),
+          ], classes: 'integration__about'),
           if (config?['report_state'] == 'waiting')
-            paragraph(
-              config?['coordinator_state'] == 'persona_sent'
-                  ? 'Fresh summary waiting for collected worker outcomes; the coordinator is ready.'
-                  : 'Fresh summary waiting: coordinator is not ready (${config?['coordinator_state'] ?? 'not launched'}). ${config?['coordinator_error'] ?? ''} Inspect its run; delivered once ready.',
-            ),
+            callout([
+              calloutText(
+                config?['coordinator_state'] == 'persona_sent'
+                    ? 'Fresh summary waiting for collected worker outcomes; the coordinator is ready.'
+                    : 'Fresh summary waiting: coordinator is not ready (${config?['coordinator_state'] ?? 'not launched'}). ${config?['coordinator_error'] ?? ''} Inspect its run; delivered once ready.',
+              ),
+            ], iconName: 'hourglass'),
           if (config != null && !enabled)
-            paragraph(
-              'Coordination is paused. Resume it to request retries; delivered jobs still finish.',
+            callout(
+              [
+                calloutText(
+                  'Coordination is paused. Resume it to request retries; delivered jobs still finish.',
+                ),
+              ],
+              tone: 'neutral',
+              iconName: 'circle-dashed',
             ),
           if ([
             'uncertain',
             'needs_attention',
-          ].contains(config?['report_state'])) ...[
-            paragraph(
-              'Coordinator report needs attention. ${config?['report_error'] ?? ''} Inspect the conversation in Org chart → Chat. Worker integration continues independently.',
+          ].contains(config?['report_state']))
+            callout(
+              [
+                calloutText(
+                  'Coordinator report needs attention. ${config?['report_error'] ?? ''} Inspect the conversation in Org chart → Chat. Worker integration continues independently.',
+                ),
+              ],
+              tone: 'danger',
+              actions: [
+                button(
+                  'Recover saved report',
+                  () => repair(config, fresh: false),
+                  disabled: busy || !enabled,
+                  small: true,
+                ),
+                button(
+                  'Create fresh summary',
+                  () => repair(config, fresh: true),
+                  disabled: busy || !enabled,
+                  small: true,
+                ),
+              ],
             ),
-            actions([
+          el('div', [
+            if (!enabled)
               button(
-                'Recover saved report',
-                () => repair(config, fresh: false),
-                disabled: busy || !enabled,
-              ),
+                'Enable coordinator',
+                () => action('integration/configure', {
+                  'repository': component.repository,
+                  'organization_id': org,
+                  'profile_id': config?['profile_id'] ?? 'new',
+                  'enabled': true,
+                }),
+                primary: true,
+                disabled: busy || org == null,
+                iconName: 'play',
+              )
+            else
               button(
-                'Create fresh summary',
-                () => repair(config, fresh: true),
-                disabled: busy || !enabled,
+                'Pause coordination',
+                () => action('integration/configure', {
+                  'repository': component.repository,
+                  'enabled': false,
+                }),
+                disabled: busy,
+                iconName: 'square',
               ),
-            ]),
-          ],
-          if (!enabled)
-            button(
-              'Enable coordinator',
-              () => action('integration/configure', {
-                'repository': component.repository,
-                'organization_id': org,
-                'profile_id': config?['profile_id'] ?? 'new',
-                'enabled': true,
-              }),
-              primary: true,
-              disabled: busy || org == null,
-            )
-          else
-            button(
-              'Pause coordination',
-              () => action('integration/configure', {
-                'repository': component.repository,
-                'enabled': false,
-              }),
-              disabled: busy,
-            ),
-          if (enabled) ...[
-            toggle(
-              'Install a missing toolchain automatically',
-              config?['auto_sdk'] == true,
-              (value) => action('integration/configure', {
-                'repository': component.repository,
-                'organization_id': config?['organization_id'] ?? org,
-                'profile_id': config?['profile_id'],
-                'enabled': true,
-                'auto_sdk': value,
-              }),
-              disabled: busy || !admin,
-            ),
-            paragraph(
-              'Queues the pinned toolchain once only when the release declares exactly one. Toolchains are listed in Settings. Only the root service installs it.',
-            ),
-            toggle(
-              'Build incorporated commits automatically',
-              config?['auto_build'] == true,
-              (value) => action('integration/configure', {
-                'repository': component.repository,
-                'profile_id': config?['profile_id'],
-                'enabled': true,
-                'auto_build': value,
-              }),
-              disabled:
-                  busy ||
-                  !admin ||
-                  (validation['executor'] != 'service' &&
-                      config?['auto_build'] != true),
-            ),
-            paragraph(
-              validation['executor'] == 'service'
-                  ? 'Queues the exact commit after Git verification; failed builds need explicit retry. Deployment remains an administrator action.'
-                  : 'Requires the durable build service. Install as root: bash /opt/herdr-web/install/build-install.sh',
-            ),
-          ],
+            if (enabled) ...[
+              switchField(
+                'Install a missing toolchain automatically',
+                config?['auto_sdk'] == true,
+                (value) => action('integration/configure', {
+                  'repository': component.repository,
+                  'organization_id': config?['organization_id'] ?? org,
+                  'profile_id': config?['profile_id'],
+                  'enabled': true,
+                  'auto_sdk': value,
+                }),
+                disabled: busy || !admin,
+              ),
+              meta(
+                'Queues the pinned toolchain once only when the release declares exactly one. Toolchains are listed in Settings. Only the root service installs it.',
+              ),
+              switchField(
+                'Build incorporated commits automatically',
+                config?['auto_build'] == true,
+                (value) => action('integration/configure', {
+                  'repository': component.repository,
+                  'profile_id': config?['profile_id'],
+                  'enabled': true,
+                  'auto_build': value,
+                }),
+                disabled:
+                    busy ||
+                    !admin ||
+                    (validation['executor'] != 'service' &&
+                        config?['auto_build'] != true),
+              ),
+              meta(
+                validation['executor'] == 'service'
+                    ? 'Queues the exact commit after Git verification; failed builds need explicit retry. Deployment remains an administrator action.'
+                    : 'Requires the durable build service. Install as root: bash /opt/herdr-web/install/build-install.sh',
+              ),
+            ],
+          ], classes: 'integration__controls'),
           for (final event in events)
             if ('${event['automatic_build_error'] ?? ''}'.isNotEmpty)
-              paragraph(
-                'Automatic build waiting · ${event['name']}: ${event['automatic_build_error']}',
-              ),
+              callout([
+                calloutText(
+                  'Automatic build waiting · ${event['name']}: ${event['automatic_build_error']}',
+                ),
+              ], tone: 'warning'),
           if (validation['error'] != null)
-            paragraph('Validation runner unavailable: ${validation['error']}'),
+            callout([
+              calloutText(
+                'Validation runner unavailable: ${validation['error']}',
+              ),
+            ], tone: 'danger'),
           feedback(),
           if (actionFailure != null) notice(actionFailure, error: true),
+          el('div', [
+            el('h3', [text('Worker decisions')], classes: 'overline'),
+            if (blockers)
+              button(
+                'Review blockers',
+                () => reviewBlockers(events, enabled),
+                disabled: busy,
+                small: true,
+                iconName: 'list-checks',
+              ),
+          ], classes: 'integration__section-head'),
           if (events.isEmpty && enabled)
-            paragraph(
+            emptyState(
               'No worker events yet. Job completion and remote fetches wake the watcher; a 60-second background scan remains as fallback.',
+              iconName: 'git-merge',
             ),
-          paragraph(
+          if (events.isNotEmpty)
+            el(
+              'ul',
+              [for (final event in events.take(20)) eventRow(event, enabled)],
+              classes: 'integration-events',
+              attributes: {'role': 'list'},
+            ),
+          el('div', [
+            el('h3', [text('Recovery')], classes: 'overline'),
+          ], classes: 'integration__section-head'),
+          meta(
             'Recovery snapshots include tracked and non-ignored untracked files, plus staging. Ignored files and submodule contents need separate backups. Recover in a separate checkout to preserve current work.',
+            iconName: 'shield-check',
           ),
           for (final event in (data['recoveries'] as List? ?? events).where(
             (e) =>
@@ -510,82 +638,76 @@ class _BoardState extends OperationsState<IntegrationBoard> {
                 codeText(
                   'Snapshot: ${event['recovery']['commit']}\nReference: ${event['recovery']['ref']}\nIn this repository use a new empty folder:\n${recoveryCommand(event)}\nOriginal staging tree: ${event['recovery']['ref']}^2\nOriginal HEAD: ${event['recovery']['ref']}^1',
                 ),
-                button('Copy recovery command', () async {
-                  final result = await copyText(
-                    recoveryCommand(event),
-                    filename: 'recovery-command.txt',
-                  );
-                  if (mounted) setState(() => message = result);
-                }),
+                button(
+                  'Copy recovery command',
+                  () async {
+                    final result = await copyText(
+                      recoveryCommand(event),
+                      filename: 'recovery-command.txt',
+                    );
+                    if (mounted) setState(() => message = result);
+                  },
+                  small: true,
+                  iconName: 'copy',
+                ),
               ],
             ),
           disclosure('Audit history', [
-            paragraph(
+            meta(
               'Recent 200 audit records. Recovery snapshots remain until explicitly removed.',
             ),
-            for (final entry in (data['audit'] as List? ?? []).where(
-              (a) => a['repository'] == component.repository,
-            ))
-              card(
-                '${entry['action']}${entry['state'] != null
-                    ? ' · ${entry['state']}'
-                    : entry['enabled'] == true
-                    ? ' · enabled'
-                    : entry['enabled'] == false
-                    ? ' · paused'
-                    : ''}',
+            if (audit.isNotEmpty)
+              table(
+                ['Action', 'Time', 'Actor', 'Reason'],
                 [
-                  codeText(
-                    '${displayTime(entry['at'])} · ${entry['name'] ?? profileName(entry['profile_id'] ?? 'Gateway')}\n${entry['reason'] ?? ''}',
-                  ),
+                  for (final entry in audit)
+                    [
+                      text(
+                        '${entry['action']}${entry['state'] != null
+                            ? ' · ${entry['state']}'
+                            : entry['enabled'] == true
+                            ? ' · enabled'
+                            : entry['enabled'] == false
+                            ? ' · paused'
+                            : ''}',
+                      ),
+                      mono(displayTime(entry['at'])),
+                      text(
+                        entry['name'] ??
+                            profileName(entry['profile_id'] ?? 'Gateway'),
+                      ),
+                      text(entry['reason'] ?? ''),
+                    ],
                 ],
               ),
           ]),
-          if (events.any(
-            (e) => [
-              'blocked',
-              'deferred',
-              'validation_pending',
-              'validation_failed',
-              'validation_waived',
-            ].contains(e['state']),
-          ))
-            button(
-              'Review blockers',
-              () => reviewBlockers(events, enabled),
-              disabled: busy,
-            ),
-          for (final event in events.take(20))
-            card('${event['name']} · ${eventStatus(event)}', [
-              codeText(
-                '${event['path']} → ${event['target']}\n${event['reason'] ?? ''}${'${event['blocker_label'] ?? ''}'.isEmpty ? '' : '\nBlocker: ${event['blocker_label']}'}${validationRun(event) == null ? '' : '\nExact-commit validation: ${validationRun(event)}'}${'${event['checkpoint'] ?? ''}'.isEmpty ? '' : '\nCheckpoint: ${event['checkpoint']}'}',
-              ),
-              actions([
-                button('Review decision', () => eventDetails(event)),
-                if (validationRecord(event) != null &&
-                    validationRun(event) != 'running')
-                  button(
-                    'Download validation log',
-                    () => downloadLog(validationRecord(event)!),
-                    disabled: busy,
-                  ),
-                if ([
-                  'deferred',
-                  'blocked',
-                  'validation_pending',
-                  'validation_failed',
-                ].contains(event['state']))
-                  button(
-                    eventStatus(event).startsWith('Merged')
-                        ? 'Retry validation'
-                        : 'Ask again',
-                    () => action('integration/retry', {'id': event['id']}),
-                    disabled: busy || !enabled,
-                  ),
-              ]),
-            ]),
-        ],
-      ),
-    ]);
+        ], classes: 'integration'),
+      ],
+      iconName: 'git-merge',
+      actions: [
+        pill(
+          config == null
+              ? 'Not configured'
+              : enabled
+              ? 'Enabled'
+              : 'Paused',
+          tone: enabled ? 'success' : 'neutral',
+          shape: config == null
+              ? 'dash'
+              : enabled
+              ? 'filled'
+              : 'hollow',
+        ),
+        button(
+          'Refresh coordination',
+          refresh,
+          disabled: busy || refreshing,
+          small: true,
+          variant: 'ghost',
+          iconName: 'refresh-cw',
+        ),
+      ],
+      classes: 'integration-board',
+    );
   }
 }
