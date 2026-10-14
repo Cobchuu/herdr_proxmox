@@ -1,0 +1,234 @@
+/* ==========================================================================
+   Herdr Overview (lib/overview.dart: "/" and "/agents") — page layout only.
+   Ported from the template's css/dashboard.css. Shared pieces come from
+   styles.css (page header, list reset, tables, details), components.css
+   (card, chips, search field, meter, mono chip, role tile, empty state) and
+   composites.css (stat strip, attention list, timeline, live ring).
+   Sections: page rhythm · runtime banner · needs attention · overview grid ·
+   agents card · status pill shapes · workspaces · recent activity · system
+   health · disclosures + forms · small screens · forced colors.
+   ========================================================================== */
+
+/* ---- Page rhythm: 24px steps; banner + stat strip belong together -------- */
+.overview-page { display: flex; flex-direction: column; min-width: 0; }
+.overview-page > * { margin: 0; }
+.overview-page > * + * { margin-top: var(--space-6); }
+.overview-page > .runtime + .overview-stats { margin-top: var(--space-4); }
+/* styles.css gives every p/h a 12px bottom margin; the template has none */
+.overview-page :where(p, h2, h3) { margin-bottom: 0; }
+
+/* ---- Runtime banner (slim, one row) -----------------------------------------
+   Tile · "Herdr is running" + meta on one line · toggle. Wraps on phones.    */
+.runtime {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  background: linear-gradient(100deg, var(--color-success-bg), var(--color-surface) 32%);
+  box-shadow: var(--shadow-xs);
+}
+.runtime[data-state="stopped"] { background: linear-gradient(100deg, var(--color-neutral-bg), var(--color-surface) 32%); }
+/* Out-ranks .icon-tile[data-tone] so the tile reads as a raised surface on the tinted banner */
+.runtime .runtime__tile[data-tone] {
+  position: relative; background: var(--color-surface); border-color: var(--color-border);
+  box-shadow: var(--shadow-xs); color: var(--tone-fg);
+}
+.runtime__tile::after {
+  content: ""; position: absolute; top: -3px; right: -3px; width: 10px; height: 10px;
+  border-radius: var(--radius-full); background: var(--tone-solid); box-shadow: 0 0 0 2px var(--color-surface);
+}
+.runtime[data-state="running"] .runtime__tile::after { animation: runtime-pulse var(--duration-pulse) var(--ease-standard) infinite; }
+@keyframes runtime-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 2px var(--tone-solid); }
+  60% { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 7px transparent; }
+}
+.runtime__text { flex: 1 1 220px; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); }
+.runtime__title { font-size: var(--text-base-size); line-height: var(--text-base-leading); font-weight: var(--weight-semibold); }
+.runtime__meta { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+
+/* ---- Needs attention (hidden when nothing is blocked) ------------------------ */
+.overview-attention .card__header { min-height: 52px; padding-block: var(--space-2-5); }
+.attention__text strong { font-weight: var(--weight-semibold); }
+/* From md up the rows share columns (subgrid): icon · text · action */
+@media (min-width: 768px) {
+  .overview-attention .attention { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: var(--space-3); }
+  .overview-attention .attention__item { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+  .overview-attention .attention__action { grid-column: 3; }
+}
+
+/* ---- Overview grid -------------------------------------------------------------
+     < xl   one column: agents, workspaces, activity, health
+     >= xl  main column + activity rail; agents and system health span both. */
+.overview-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+.overview-grid > .card { display: flex; flex-direction: column; }
+.overview-grid > .card > .card__body { flex: 1; }
+@media (min-width: 1280px) {
+  .overview-grid { grid-template-columns: minmax(0, 1fr) minmax(300px, .5fr); }
+  .overview-grid > .overview-grid__wide { grid-column: 1 / -1; }
+}
+
+/* ---- Agents card ------------------------------------------------------------- */
+.agents-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.agents-search { flex: 1 1 220px; max-width: 340px; }
+.agents-search > .field { flex: 1; margin: 0; }
+.agents-search > .field > span {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.agents-search .search-field__icon { top: calc(var(--control-md) / 2 - var(--icon-sm) / 2); }
+/* Chips are plain <button>s: drop the element defaults the template chip does not set */
+.agents-toolbar .chip { min-height: 0; padding-inline: var(--space-3); box-shadow: none; line-height: 1.25; }
+.agents-result { margin-top: var(--space-3); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
+.overview-agents .agents-wrap { container: agents / inline-size; margin-top: var(--space-3); }
+.agents-table :is(td, tbody th) { white-space: nowrap; }
+/* Row headers are cells, not column headers (styles.css paints every th) */
+.agents-table tbody th {
+  height: auto; background: transparent; color: var(--color-text);
+  font-size: var(--text-base-size); font-weight: var(--weight-regular);
+}
+.agents-table .agents-table__agent { width: 55%; min-width: 220px; }
+.agents-table .agents-table__workspace { width: 25%; }
+.agents-table thead .agents-table__status { min-width: 132px; }
+.agent { display: flex; align-items: center; gap: var(--space-3); }
+.agent__text { display: flex; flex-direction: column; min-width: 0; }
+.agent__name { font-weight: var(--weight-medium); color: var(--color-text); }
+a.agent__name:hover { text-decoration: underline; text-underline-offset: 3px; }
+.agent__meta { font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
+.agent__ws { display: none; font-family: var(--font-mono); }
+/* Narrow cards (phones, the 1024 layout): the workspace folds under the name */
+@container agents (max-width: 559.98px) {
+  .agents-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .agents-table .agents-table__workspace { display: none; }
+  .agents-table .agents-table__agent { width: 100%; min-width: 0; white-space: normal; }
+  .agent__ws { display: inline; }
+  .agent__name { overflow-wrap: anywhere; }
+}
+
+/* ---- Status pill shapes (shape repeats the state without color) -------------- */
+.status[data-shape="hollow"]::before { background: transparent; border: 1.5px solid var(--tone-solid); }
+.status[data-shape="diamond"]::before { border-radius: 1px; transform: rotate(45deg) scale(.88); }
+.status[data-shape="dash"]::before { width: 8px; height: 2px; border-radius: 1px; }
+
+/* ---- Workspaces card ----------------------------------------------------------- */
+.ws-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.ws-grid > .ws-grid__create { grid-column: 1 / -1; } /* "create" is always its own slim row */
+.ws-tile.workspace-tile {
+  display: flex; flex-direction: column; gap: var(--space-2); height: 100%; padding: var(--space-4);
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: none;
+}
+.ws-tile__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.ws-tile__name { min-width: 0; font-size: var(--text-base-size); line-height: var(--text-base-leading); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.ws-tile__path { font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); overflow-wrap: anywhere; }
+.ws-tile__foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: auto; padding-top: var(--space-2); }
+/* Agents take their own line so Focus and Rename sit in the same place on every tile */
+.ws-tile__agents { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: center; gap: var(--space-1-5) var(--space-3); min-width: 0; }
+.ws-tile__count, .ws-tile__working {
+  display: inline-flex; align-items: center; gap: var(--space-1-5);
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary); white-space: nowrap;
+}
+.ws-tile .ws-tile__actions { margin-top: 0; gap: var(--space-1); }
+.ws-create {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-3); row-gap: 0; align-items: center;
+  justify-content: normal; width: 100%; min-height: 0; padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--color-border-strong); border-radius: var(--radius-lg); background: transparent; box-shadow: none;
+  color: var(--color-text-secondary); font-weight: var(--weight-regular); line-height: var(--text-base-leading); text-align: left;
+}
+.ws-create > .icon-tile { grid-row: span 2; }
+.ws-create:hover:not(:disabled) { background: var(--color-hover); border-color: var(--color-accent); }
+.ws-create__title { align-self: end; font-weight: var(--weight-semibold); color: var(--color-text); }
+.ws-create__meta { align-self: start; font-size: var(--text-sm-size); line-height: var(--text-sm-leading); }
+
+/* ---- Recent activity (timeline in the card body) ------------------------------- */
+.overview-activity .timeline { padding: 0; }
+.overview-activity .timeline__text strong { font-weight: var(--weight-semibold); color: var(--color-text); }
+
+/* ---- System health --------------------------------------------------------------- */
+.health { container: health / inline-size; }
+.health__sampled { margin-bottom: var(--space-4); font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
+.meters { display: grid; gap: var(--space-4); }
+.meter-row__label { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); font-weight: var(--weight-medium); }
+.meter-row__label .icon { width: var(--icon-sm); height: var(--icon-sm); color: var(--color-text-tertiary); }
+.meter-row__value {
+  margin-left: auto; font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); font-weight: var(--weight-regular);
+  color: var(--color-text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* Wide card: the three meters sit side by side (each needs ~230px for its value) */
+@container health (min-width: 760px) { .meters { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-8); } }
+.health > .notice { margin: var(--space-4) 0 0; }
+/* The processes disclosure bleeds to the card edges like the template's */
+.overview-health .processes { margin: var(--space-5) calc(-1 * var(--space-5)) calc(-1 * var(--space-5)); border-top: 1px solid var(--color-border); }
+.processes > .processes__summary {
+  display: flex; align-items: center; gap: var(--space-3); min-height: 0; margin: 0; padding: var(--space-3) var(--space-5);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg); font-weight: var(--weight-regular);
+}
+.processes__summary::after { content: none; }
+.processes[open] > .processes__summary { border-radius: 0; }
+.processes__summary:hover { background: var(--color-hover); }
+.processes__text { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); }
+.processes__title { font-weight: var(--weight-medium); }
+.processes__meta { font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
+.processes__empty { padding: 0 var(--space-5) var(--space-4); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-tertiary); }
+.processes .table thead th { border-top: 0; }
+.processes .table td, .processes .table th { white-space: nowrap; padding-inline: var(--space-2); }
+.processes .table td:first-child { /* one line; the full name is in the title attribute */
+  width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading);
+}
+.processes .table :is(td, th):first-child { padding-left: var(--space-5); }
+.processes .table :is(td, th):last-child { padding-right: var(--space-5); }
+.processes .table th.num { text-align: right; font-family: var(--font-sans); }
+
+/* ---- Disclosures ("Add a project or workspace", "Terminal access") --------------- */
+.overview-disclosure { container: overview-disclosure / inline-size; }
+details.overview-disclosure > .overview-disclosure__summary {
+  gap: var(--space-3); min-height: 60px; margin: 0; padding: var(--space-3) var(--space-5);
+  border-radius: calc(var(--radius-lg) - 1px); font-weight: var(--weight-regular);
+}
+.overview-disclosure[open] > .overview-disclosure__summary { border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0; }
+.overview-disclosure__summary::after { content: none; }
+.overview-disclosure__summary:hover { background: var(--color-hover); }
+.overview-disclosure__summary > .icon-tile { color: var(--color-text-secondary); }
+.overview-disclosure__text { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); }
+.overview-disclosure__title { font-weight: var(--weight-semibold); color: var(--color-text); }
+.overview-disclosure__meta { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); }
+/* Out-ranks styles.css `details.card > summary ~ *` (inline margins) */
+.overview-page details.overview-disclosure > .overview-disclosure__body { margin: 0; padding: var(--space-5); border-top: 1px solid var(--color-border); }
+.overview-disclosure__body--split { display: grid; gap: var(--space-5); }
+.overview-disclosure__body--split > .overview-disclosure__section + .overview-disclosure__section { padding-top: var(--space-5); border-top: 1px solid var(--color-border); }
+@container overview-disclosure (min-width: 760px) {
+  .overview-disclosure__body--split { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
+  .overview-disclosure__body--split > .overview-disclosure__section + .overview-disclosure__section {
+    padding: 0 0 0 var(--space-6); border-top: 0; border-left: 1px solid var(--color-border);
+  }
+}
+.overview-disclosure__section { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.overview-disclosure__heading { font-size: var(--text-base-size); line-height: var(--text-base-leading); font-weight: var(--weight-semibold); }
+.overview-disclosure__hint { margin-top: calc(-1 * var(--space-2)); font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); }
+.overview-form { display: grid; gap: var(--space-3); }
+.overview-form > .field { margin: 0; }
+.overview-form > .btn { justify-self: start; }
+.clone-project > .notice { margin: 0; }
+.clone-job { padding-block: var(--space-2-5); }
+.clone-job__text { display: flex; flex-direction: column; flex: 1 1 200px; min-width: 0; }
+.clone-job__detail { font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); overflow-wrap: anywhere; }
+.overview-disclosure .code-output { margin: 0; }
+
+/* ---- Small screens ----------------------------------------------------------------- */
+@media (max-width: 639.98px) {
+  .runtime { padding: var(--space-3) var(--space-4) var(--space-4); }
+  .runtime .btn { width: 100%; }
+  .agents-search { max-width: none; flex-basis: 100%; }
+  .overview-health .processes { margin: var(--space-4) calc(-1 * var(--space-4)) calc(-1 * var(--space-4)); }
+  .processes > .processes__summary { padding-inline: var(--space-4); }
+  .processes__empty { padding-inline: var(--space-4); }
+  .processes .table :is(td, th):first-child { padding-left: var(--space-4); }
+  .processes .table :is(td, th):last-child { padding-right: var(--space-4); }
+  details.overview-disclosure > .overview-disclosure__summary { padding-inline: var(--space-4); }
+  .overview-page details.overview-disclosure > .overview-disclosure__body { padding: var(--space-4); }
+  .overview-form > .btn { justify-self: stretch; }
+}
+
+/* ---- Forced colors ------------------------------------------------------------------ */
+@media (forced-colors: active) {
+  .runtime__tile::after { forced-color-adjust: none; background: CanvasText; }
+  .status[data-shape="hollow"]::before { background: transparent; border-color: CanvasText; }
+}

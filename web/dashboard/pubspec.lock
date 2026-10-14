@@ -83,6 +83,13 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  herdr_dashboard_state:
+    dependency: "direct main"
+    description:
+      path: "../dashboard_state"
+      relative: true
+    source: path
+    version: "0.0.0"
   http:
     dependency: "direct main"
     description:

@@ -7,6 +7,8 @@ dependencies:
     sdk: flutter
   http: 1.6.0
   juice: 1.10.0
+  herdr_dashboard_state:
+    path: ../dashboard_state
   zenrouter: 3.0.0
   xterm: 4.0.0
   cupertino_icons: 1.0.8

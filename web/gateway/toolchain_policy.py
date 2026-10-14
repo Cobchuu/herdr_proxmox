@@ -25,7 +25,7 @@ CATALOG = Path(__file__).resolve().parents[2] / 'install/toolchains.json'
 DECLARATIONS = ('.fvmrc', '.github/workflows/ci.yml', 'scripts/validate.sh', 'scripts/build-web.sh')
 # Dependency resolution must come from committed lockfiles, not from whatever
 # the resolver happened to pick at build time.
-LOCKFILES = ('web/dashboard/pubspec.lock', 'web/shell/pubspec.lock')
+LOCKFILES = ('web/dashboard/pubspec.lock', 'web/jaspr_dashboard/pubspec.lock')
 CHECKS = ('scripts/validate.sh', 'scripts/build-web.sh')
 
 VERSION = re.compile(r'\d+(?:\.\d+)+')

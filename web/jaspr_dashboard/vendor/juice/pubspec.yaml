@@ -1,0 +1,12 @@
+name: juice
+version: 1.10.0
+publish_to: none
+description: Juice 1.10.0 bloc core with a DOM framework adapter.
+environment:
+  sdk: '>=3.12.0 <4.0.0'
+dependencies:
+  rxdart: 0.28.0
+  logger: 2.6.2
+  matcher: 0.12.19
+  test_api: 0.7.13
+  meta: 1.19.0

@@ -1,0 +1,453 @@
+// ignore_for_file: deprecated_member_use_from_same_package
+
+import 'dart:async';
+import 'package:juice/src/foundation.dart';
+
+import 'bloc_state.dart';
+import 'bloc_event.dart';
+import 'stream_status.dart';
+import 'juice_logger.dart';
+import 'bloc_use_case.dart';
+import 'bloc_error_handler.dart';
+import 'cancellable_event.dart';
+import 'use_case_builders/use_case_builder.dart';
+import 'aviators/aviator.dart';
+import 'core/state_manager.dart';
+import 'core/event_dispatcher.dart';
+import 'core/use_case_registry.dart';
+import 'core/use_case_executor.dart';
+import 'core/status_emitter.dart';
+import 'core/aviator_manager.dart';
+import 'bloc.dart' show Emittable, ErrorSink, StateStreamableSource;
+
+/// A bloc that manages state through use cases.
+///
+/// JuiceBloc provides structured state management by routing events to
+/// dedicated use cases, which encapsulate business logic and emit state
+/// changes. It uses composition of focused components rather than deep
+/// inheritance.
+///
+/// Example:
+/// ```dart
+/// class CounterBloc extends JuiceBloc<CounterState> {
+///   CounterBloc() : super(
+///     CounterState(count: 0),
+///     [
+///       () => UseCaseBuilder(
+///         typeOfEvent: IncrementEvent,
+///         useCaseGenerator: () => IncrementUseCase(),
+///       ),
+///     ],
+///   );
+/// }
+/// ```
+class JuiceBloc<TState extends BlocState>
+    implements
+        StateStreamableSource<StreamStatus<TState>>,
+        Emittable<StreamStatus<TState>>,
+        ErrorSink {
+  /// Creates a JuiceBloc with initial state and use cases.
+  ///
+  /// [initialState] - The initial state of the bloc
+  /// [useCases] - List of use case builders that handle events
+  /// [aviatorBuilders] - List of navigation builders (optional)
+  /// [customLogger] - Optional custom logger implementation
+  /// [errorHandler] - Custom error handler, defaults to BlocErrorHandler
+  JuiceBloc(
+    TState initialState,
+    List<UseCaseBuilderGenerator> useCases, [
+    List<AviatorBuilder> aviatorBuilders = const [],
+    JuiceLogger? customLogger,
+    BlocErrorHandler errorHandler = const BlocErrorHandler(),
+  ])  : _logger = customLogger ?? JuiceLoggerConfig.logger,
+        _errorHandler = errorHandler,
+        _stateManager = StateManager(
+          StreamStatus.updating(initialState, initialState, null),
+        ) {
+    _statusEmitter = StatusEmitter(
+      stateManager: _stateManager,
+      logger: _logger,
+      blocName: runtimeType.toString(),
+    );
+
+    _useCaseExecutor = UseCaseExecutor<JuiceBloc<TState>, TState>(
+      contextFactory: _createContext,
+      onError: _handleUseCaseError,
+      logger: _logger,
+    );
+
+    _dispatcher = EventDispatcher<EventBase>(
+      onUnhandledEvent: _handleUnhandledEvent,
+    );
+
+    _initialize(useCases, aviatorBuilders);
+  }
+
+  // ============================================================
+  // Components
+  // ============================================================
+
+  final StateManager<StreamStatus<TState>> _stateManager;
+  late final StatusEmitter<TState> _statusEmitter;
+  late final EventDispatcher<EventBase> _dispatcher;
+  late final UseCaseExecutor<JuiceBloc<TState>, TState> _useCaseExecutor;
+  final UseCaseRegistry _useCaseRegistry = UseCaseRegistry();
+  final AviatorManager _aviatorManager = AviatorManager();
+
+  // ============================================================
+  // Configuration
+  // ============================================================
+
+  /// Internal logger instance
+  final JuiceLogger _logger;
+  JuiceLogger get logger => _logger;
+
+  final BlocErrorHandler _errorHandler;
+
+  // ============================================================
+  // Public API
+  // ============================================================
+
+  /// The current state of the bloc.
+  TState get state => _stateManager.current.state;
+
+  /// The previous state of the bloc.
+  TState get oldState => _stateManager.current.oldState;
+
+  /// The current status with metadata.
+  @override
+  StreamStatus<TState> get currentStatus => _stateManager.current;
+
+  /// Stream of status changes.
+  @override
+  Stream<StreamStatus<TState>> get stream => _stateManager.stream;
+
+  /// Whether the bloc is closed.
+  @override
+  bool get isClosed => _stateManager.isClosed;
+
+  /// True once [close] has started — and stays true after it completes
+  /// (then [isClosed] is true as well). Monotonic, like `SyncBloc`'s own
+  /// flag it now formalizes.
+  ///
+  /// New events are refused from here on, so nothing is dispatched into a
+  /// bloc that is tearing down. Use cases already in flight keep running and
+  /// can check this to stop early; their emits after the close completes are
+  /// dropped (the close fence).
+  bool get isClosing => _closing || isClosed;
+  bool _closing = false;
+
+  /// Sends an event to be processed by its registered use case.
+  ///
+  /// If the bloc is closed, the event is ignored and a warning is logged.
+  Future<void> send(EventBase event) async {
+    if (isClosed || _closing) {
+      _logger.log(
+        isClosed
+            ? 'Event ignored: bloc is closed'
+            : 'Event ignored: bloc is closing',
+        context: {
+          'type': 'bloc_lifecycle',
+          'action': 'event_ignored',
+          'bloc': runtimeType.toString(),
+          'event': event.runtimeType.toString(),
+        },
+      );
+      return;
+    }
+    return _dispatcher.dispatch(event);
+  }
+
+  /// Sends a cancellable event and returns it for cancellation control.
+  ///
+  /// If the bloc is closed, the event is not dispatched.
+  T sendCancellable<T extends CancellableEvent>(T event) {
+    if (!isClosed && !_closing) {
+      send(event);
+    }
+    return event;
+  }
+
+  /// Sends an event and waits for processing to complete.
+  ///
+  /// This method sends the event and returns the first status emitted FOR
+  /// THIS EVENT that is not a [WaitingStatus] — an [UpdatingStatus],
+  /// [FailureStatus], or [CancelingStatus]. Emissions caused by other events
+  /// are ignored.
+  ///
+  /// [event] - The event to send.
+  /// [timeout] - Maximum time to wait for completion (default: 30 seconds).
+  ///
+  /// Returns the final [StreamStatus] after processing completes.
+  ///
+  /// Throws [TimeoutException] if the operation doesn't complete within
+  /// the timeout duration, and [StateError] if the bloc is closed or closing
+  /// (the event would be ignored).
+  ///
+  /// Example:
+  /// ```dart
+  /// final status = await bloc.sendAndWait(FetchDataEvent());
+  /// if (status is FailureStatus) {
+  ///   print('Failed: ${status.error}');
+  /// }
+  /// ```
+  Future<StreamStatus<TState>> sendAndWait(
+    EventBase event, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    if (isClosed || _closing) {
+      // Fail loud: the event would be ignored and the wait could only time
+      // out.
+      throw StateError(
+          'sendAndWait(${event.runtimeType}) on a closed or closing '
+          '$runtimeType');
+    }
+    // Listen BEFORE sending: `send` completes only after the use case has
+    // finished emitting, and the stream does not replay, so subscribing
+    // afterwards missed the event's own result and always timed out.
+    final result = stream
+        .where((s) => identical(s.event, event))
+        .firstWhere((s) => s is! WaitingStatus<TState>)
+        .timeout(timeout);
+    send(event);
+    return result;
+  }
+
+  /// Observes every emission SYNCHRONOUSLY (inside the emit, before stream
+  /// delivery). Returns the remover. Framework-internal — `sendAndWaitResult`
+  /// uses it to know an event's terminal status the moment processing ends.
+  @internal
+  void Function() tapEmissions(
+          void Function(StreamStatus<TState> status) observer) =>
+      _stateManager.tap(observer);
+
+  /// Runs the named aviator WITHOUT emitting a status. Framework-internal:
+  /// inline use cases navigate through this — they used to call
+  /// `emitUpdate(aviatorName:)`, which emitted an extra UpdatingStatus that
+  /// overwrote a failure/waiting/cancel and broadcast to every widget.
+  @internal
+  void navigateAviator(String? aviatorName, Map<String, dynamic>? args) =>
+      _aviatorManager.navigate(aviatorName, args);
+
+  /// Triggers an update with the current state.
+  void start() => send(UpdateEvent(newState: state));
+
+  /// Emits a new status directly.
+  ///
+  /// Prefer using use cases for state changes. This is primarily
+  /// for internal use and testing.
+  @protected
+  @visibleForTesting
+  @override
+  void emit(StreamStatus<TState> status) {
+    _stateManager.emit(status);
+  }
+
+  /// Reports an error which triggers [onError].
+  @protected
+  @mustCallSuper
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) {
+    onError(error, stackTrace ?? StackTrace.current);
+  }
+
+  /// Called when an error occurs. Override to customize error handling.
+  @protected
+  @mustCallSuper
+  void onError(Object error, StackTrace stackTrace) {
+    _logger.logError('Bloc error', error, stackTrace, context: {
+      'type': 'bloc_error',
+      'bloc': runtimeType.toString(),
+      'state': state.toString(),
+    });
+
+    try {
+      _errorHandler.handleError(
+        'Unhandled bloc error',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    } catch (e, handlerStackTrace) {
+      _logger.logError('Error in custom errorHandler', e, handlerStackTrace,
+          context: {
+            'type': 'error_handler_error',
+            'bloc': runtimeType.toString()
+          });
+    }
+  }
+
+  /// Closes the bloc and releases all resources.
+  @mustCallSuper
+  @override
+  Future<void> close() {
+    // Memoized: a second caller (a scope ending while a widget disposes)
+    // awaits the same teardown instead of returning before it finishes.
+    return _closeFuture ??= _close();
+  }
+
+  Future<void>? _closeFuture;
+
+  Future<void> _close() async {
+    if (isClosed) return;
+    _closing = true;
+
+    _logger.log('Closing bloc', context: {
+      'type': 'bloc_lifecycle',
+      'action': 'close',
+      'bloc': runtimeType.toString(),
+    });
+
+    await _useCaseRegistry.closeAll();
+    await _aviatorManager.closeAll();
+    await Future.wait(_eventSubscriptions.map((s) => s.close()));
+    _eventSubscriptions.clear();
+    _dispatcher.clear();
+    await _stateManager.close();
+  }
+
+  /// Synchronous cleanup method for Flutter widget compatibility.
+  ///
+  /// This calls [close] internally. Prefer using [close] directly
+  /// when you need to await cleanup completion.
+  void dispose() {
+    close();
+  }
+
+  // ============================================================
+  // Initialization
+  // ============================================================
+
+  void _initialize(
+    List<UseCaseBuilderGenerator> useCases,
+    List<AviatorBuilder> aviatorBuilders,
+  ) {
+    _registerBuiltInUseCases();
+    _registerUseCases(useCases);
+    _registerAviators(aviatorBuilders);
+  }
+
+  void _registerBuiltInUseCases() {
+    _registerUseCase(UseCaseBuilder(
+      typeOfEvent: UpdateEvent,
+      useCaseGenerator: () => UpdateUseCase(),
+    ));
+    _registerUseCase(UseCaseBuilder(
+      typeOfEvent: UpdateEvent<TState>,
+      useCaseGenerator: () => UpdateUseCase(),
+    ));
+  }
+
+  final List<EventSubscription> _eventSubscriptions = [];
+
+  void _registerUseCases(List<UseCaseBuilderGenerator> useCases) {
+    for (final generator in useCases) {
+      final builder = generator();
+
+      // Handle EventSubscription specially
+      if (builder is EventSubscription) {
+        _registerEventSubscription(builder);
+      } else {
+        _registerUseCase(builder);
+      }
+
+      // Fire initial event if configured
+      if (builder.initialEventBuilder != null) {
+        final event = builder.initialEventBuilder!();
+        if (event.runtimeType == builder.eventType) {
+          send(event);
+        }
+      }
+    }
+  }
+
+  void _registerUseCase(UseCaseBuilderBase builder) {
+    if (builder is UseCaseBuilder) builder.checkRegisteredOn(this);
+    _useCaseRegistry.register(builder);
+
+    _dispatcher.register<EventBase>(
+      (event) => _useCaseExecutor.execute(builder, event),
+      eventType: builder.eventType,
+      concurrency: builder.concurrency,
+    );
+  }
+
+  void _registerEventSubscription(EventSubscription subscription) {
+    _eventSubscriptions.add(subscription);
+
+    // Only register the use case if no handler exists for this event type
+    final eventType = subscription.eventType;
+    if (!_useCaseRegistry.hasBuilder(eventType)) {
+      _registerUseCase(subscription);
+    }
+
+    // Wire up to dispatch transformed events via send()
+    subscription.setEventHandler((event) {
+      send(event);
+    });
+
+    // Initialize the subscription to listen to source bloc
+    subscription.initialize();
+  }
+
+  void _registerAviators(List<AviatorBuilder> aviatorBuilders) {
+    for (final generator in aviatorBuilders) {
+      _aviatorManager.register(generator());
+    }
+  }
+
+  // ============================================================
+  // Context Factory
+  // ============================================================
+
+  UseCaseContext<JuiceBloc<TState>, TState> _createContext(EventBase event) {
+    return UseCaseContext(
+      bloc: this,
+      getState: () => state,
+      getOldState: () => oldState,
+      emitUpdate: (newState, groups, {bool skipIfSame = false}) =>
+          _statusEmitter.emitUpdate(event, newState, groups,
+              skipIfSame: skipIfSame),
+      emitWaiting: (newState, groups) =>
+          _statusEmitter.emitWaiting(event, newState, groups),
+      emitFailure: (newState, groups,
+              {Object? error, StackTrace? errorStackTrace}) =>
+          _statusEmitter.emitFailure(event, newState, groups,
+              error: error, errorStackTrace: errorStackTrace),
+      emitCancel: (newState, groups) =>
+          _statusEmitter.emitCancel(event, newState, groups),
+      emitEvent: (EventBase? e) {
+        if (e != null && !_stateManager.isClosed) {
+          _stateManager.emit(currentStatus.copyWith(event: e));
+        }
+      },
+      navigate: _aviatorManager.navigate,
+      navigateAsync: _aviatorManager.navigateAsync,
+    );
+  }
+
+  // ============================================================
+  // Error Handling
+  // ============================================================
+
+  void _handleUnhandledEvent(EventBase event) {
+    final message = 'No use case registered for ${event.runtimeType}';
+    _logger
+        .logError(message, StateError(message), StackTrace.current, context: {
+      'type': 'unhandled_event',
+      'bloc': runtimeType.toString(),
+      'event': event.runtimeType.toString(),
+    });
+    _errorHandler.handleError(message);
+  }
+
+  void _handleUseCaseError(Object error, StackTrace stack, EventBase event) {
+    _logger.logError('Use case error', error, stack, context: {
+      'type': 'use_case_error',
+      'bloc': runtimeType.toString(),
+      'event': event.runtimeType.toString(),
+      'state': state.toString(),
+    });
+
+    onError(error, stack);
+  }
+}

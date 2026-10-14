@@ -1,0 +1,5 @@
+analyzer:
+  exclude:
+    # Generated deployment assets have no package context of their own.
+    - web/public/**
+    - '**/build/**'

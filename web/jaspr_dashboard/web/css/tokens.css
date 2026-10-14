@@ -1,0 +1,205 @@
+/* ==========================================================================
+   Herdr design tokens — the single source of truth.
+   No raw color values may appear outside this file.
+
+   Theming
+   - Every color token is defined ONCE with light-dark(<light>, <dark>).
+   - The active scheme comes from `color-scheme` on :root:
+       no data-theme        -> follows the operating system
+       [data-theme="light"] -> forced light
+       [data-theme="dark"]  -> forced dark
+
+   Breakpoints (reference only — custom properties can't be used in @media)
+     sm 640px · md 768px · lg 1024px · xl 1280px · 2xl 1536px
+     Write queries mobile-first: @media (min-width: 1024px) { … }
+     Max-width queries use the .98 convention: (max-width: 1023.98px)
+     Components that live inside cards respond to their own width with
+     @container queries instead — see dashboard.css and composites.css.
+     js/shell.js mirrors the lg drawer query; keep the two in sync.
+   ========================================================================== */
+
+:root { color-scheme: light dark; }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+:root {
+  /* ---- Surfaces --------------------------------------------------------- */
+  --color-canvas:          light-dark(#F5F6F8, #0A0D12); /* app background */
+  --color-surface:         light-dark(#FFFFFF, #11151C); /* cards, sidebar, topbar */
+  --color-surface-raised:  light-dark(#FFFFFF, #161B24); /* buttons, popovers */
+  --color-surface-sunken:  light-dark(#F0F2F5, #0D1016); /* tracks, table heads, wells */
+  --color-surface-translucent: color-mix(in srgb, var(--color-surface) 85%, transparent);
+  --color-hover:           light-dark(#F1F3F6, #1A202A);
+  --color-selected:        light-dark(#EEF0FC, #1C2240);
+  --color-scrim:           light-dark(rgb(14 19 32 / .42), rgb(0 0 0 / .62));
+
+  /* ---- Borders ---------------------------------------------------------- */
+  --color-border:          light-dark(#E4E7EC, #222934); /* dividers, card edges */
+  --color-border-strong:   light-dark(#CDD2DA, #2F3746); /* buttons, chips */
+  --color-border-input:    light-dark(#838B9A, #5E6779); /* form fields, switch tracks: >= 3:1 on surface, canvas, sunken, hover (light) */
+
+  /* ---- Text ------------------------------------------------------------- */
+  --color-text:            light-dark(#0E1320, #E8EBF1);
+  --color-text-secondary:  light-dark(#485164, #A9B1C0);
+  --color-text-tertiary:   light-dark(#626A7C, #868FA0); /* nudged for AA on canvas/hover */
+  --color-text-disabled:   light-dark(#A1A8B5, #4D5566);
+
+  /* ---- Brand accent (indigo / periwinkle) ------------------------------- */
+  --color-accent:          light-dark(#4C5FD5, #8C9BFF);
+  --color-accent-hover:    light-dark(#3F51C2, #A3B0FF);
+  --color-accent-pressed:  light-dark(#36469F, #B7C1FF);
+  --color-accent-subtle:   light-dark(#EEF0FC, #1C2240);
+  --color-accent-text:     light-dark(#3443B8, #AEB8FF);
+  --color-on-accent:       light-dark(#FFFFFF, #0A0D12);
+  --color-focus:           light-dark(#4C5FD5, #8C9BFF);
+
+  /* ---- Rail (dark in both themes) --------------------------------------- */
+  --color-rail:            light-dark(#0E1320, #06080C);
+  --color-rail-text:       light-dark(#A9B1C0, #8A93A4);
+  --color-rail-active:     light-dark(#FFFFFF, #FFFFFF);
+  --color-rail-hover:      light-dark(rgb(255 255 255 / .08), rgb(255 255 255 / .08));
+  --color-rail-border:     light-dark(rgb(255 255 255 / .16), rgb(255 255 255 / .14));
+  --color-rail-tile:       light-dark(#8C9BFF, #8C9BFF); /* periwinkle nod to the original */
+  --color-rail-tile-text:  light-dark(#0A0D12, #0A0D12);
+
+  /* ---- Status: fg = text, bg = tint, solid = dots/fills ------------------ */
+  --color-success-fg: light-dark(#0B7A3B, #5AD38A);
+  --color-success-bg: light-dark(#E6F6EC, #10261A);
+  --color-success:    light-dark(#139243, #22C55E); /* light nudged: >= 3:1 vs white, canvas, tint */
+  --color-warning-fg: light-dark(#8F5300, #F5C060);
+  --color-warning-bg: light-dark(#FFF3D9, #2A2010);
+  --color-warning:    light-dark(#C77700, #F5A524); /* light nudged: >= 3:1 vs white, track, tint */
+  --color-danger-fg:  light-dark(#B42318, #FF8E88);
+  --color-danger-bg:  light-dark(#FDECEB, #2C1416);
+  --color-danger:     light-dark(#E5484D, #F2555A);
+  --color-info-fg:    light-dark(#0369A1, #7DD3FC); /* sky, kept apart from the indigo accent ("Ready to merge") */
+  --color-info-bg:    light-dark(#E0F2FE, #0C2536);
+  --color-info:       light-dark(#0284C7, #38BDF8); /* dots, hotfix markers: >= 3.5:1 vs white, canvas, sunken, tint */
+  --color-neutral-fg: light-dark(#485164, #A9B1C0);
+  --color-neutral-bg: light-dark(#EEF0F3, #1C222C);
+  --color-neutral:    light-dark(#838B9A, #6B7486); /* nudged: status dots >= 3:1 */
+
+  /* ---- Semantic tone aliases ---------------------------------------------
+     Components read --tone-fg / --tone-bg / --tone-solid. The default is
+     neutral; [data-tone="success|warning|danger|info|neutral|accent"] on an
+     element (or an ancestor) re-points them — see components.css "Tones".
+     "accent" reuses the brand accent (fg accent-text, bg accent-subtle,
+     solid accent) for "Ready to merge" and the next build.               */
+  --tone-fg:    var(--color-neutral-fg);
+  --tone-bg:    var(--color-neutral-bg);
+  --tone-solid: var(--color-neutral);
+
+  /* ---- Agent role tints (pastel tiles) ---------------------------------- */
+  --role-lead-bg:        light-dark(#EEF0FC, #1E2342);
+  --role-lead-fg:        light-dark(#3443B8, #AEB8FF);
+  --role-developer-bg:   light-dark(#E5F2FC, #11263A);
+  --role-developer-fg:   light-dark(#1B67A6, #7CC0F7);
+  --role-qa-bg:          light-dark(#E6F6EC, #10261A);
+  --role-qa-fg:          light-dark(#1A7444, #6FD69B);
+  --role-reviewer-bg:    light-dark(#FDF2DF, #2A2010);
+  --role-reviewer-fg:    light-dark(#8F5300, #F2C26A);
+  --role-integration-bg: light-dark(#FCEAF0, #2D1520);
+  --role-integration-fg: light-dark(#AE2F5B, #F592B5);
+  --role-worktree-bg:    light-dark(#F1EBFD, #221A3A);
+  --role-worktree-fg:    light-dark(#6A3EC0, #C1A6FF);
+  --role-coordinator-bg: light-dark(#E2F5F3, #0F2A28);
+  --role-coordinator-fg: light-dark(#0F716B, #5FD3C8);
+
+  /* ---- Workflow canvas (flow-builder style graph) ----------------------- */
+  --color-canvas-dot:     light-dark(#C3C8D1, #2A3140); /* decorative dot grid on the sunken surface (~1.5:1) */
+  --color-edge:           light-dark(#7D8595, #5D6678); /* dependency connector: >= 3:1 on sunken and lane band */
+  --color-edge-emphasis:  var(--color-accent);          /* highlighted chain (4.8:1 / 7.5:1 on sunken) */
+  --color-lane-band:      light-dark(rgb(14 19 32 / .035), rgb(255 255 255 / .03)); /* alternating agent lanes */
+
+  /* ---- Elevation -------------------------------------------------------- */
+  --shadow-color:        light-dark(rgb(16 24 40 / .06), rgb(0 0 0 / .45));
+  --shadow-color-strong: light-dark(rgb(16 24 40 / .12), rgb(0 0 0 / .6));
+  --shadow-xs: 0 1px 2px var(--shadow-color);
+  --shadow-sm: 0 1px 3px var(--shadow-color), 0 1px 2px var(--shadow-color);
+  --shadow-md: 0 10px 28px -10px var(--shadow-color-strong), 0 2px 6px var(--shadow-color);
+  --shadow-lg: 0 24px 48px -16px var(--shadow-color-strong);
+
+  /* ---- Typography ------------------------------------------------------- */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+
+  /* Type scale: always use a -size with its matching -leading. */
+  --text-3xs-size: 0.625rem;  --text-3xs-leading: 0.75rem;  /* 10/12 initials in 24px tiles only */
+  --text-2xs-size: 0.6875rem; --text-2xs-leading: 0.875rem; /* 11/14 micro-labels */
+  --text-xs-size:  0.75rem;   --text-xs-leading:  1rem;     /* 12/16 meta, pills */
+  --text-sm-size:  0.8125rem; --text-sm-leading:  1.125rem; /* 13/18 secondary */
+  --text-base-size: 0.875rem; --text-base-leading: 1.25rem; /* 14/20 UI default */
+  --text-md-size:  1rem;      --text-md-leading:  1.5rem;   /* 16/24 card titles */
+  --text-lg-size:  1.125rem;  --text-lg-leading:  1.625rem; /* 18/26 */
+  --text-xl-size:  1.375rem;  --text-xl-leading:  1.75rem;  /* 22/28 */
+  --text-2xl-size: 1.75rem;   --text-2xl-leading: 2.125rem; /* 28/34 H1 */
+  --text-3xl-size: 2.125rem;  --text-3xl-leading: 2.5rem;   /* 34/40 */
+  --text-wordmark-size: 1.0625rem;                          /* 17px "Herdr" wordmark */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --tracking-tight: -0.02em;   /* headings >= 22px */
+  --tracking-snug: -0.01em;    /* wordmark */
+  --tracking-wide: 0.02em;     /* initials in role tiles */
+  --tracking-overline: 0.06em; /* uppercase micro-labels */
+
+  /* ---- Spacing (4px base) ----------------------------------------------- */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;   /* half-step for dense UI (chip/pill gaps) */
+  --space-2: 8px;
+  --space-2-5: 10px;  /* half-step for nav rows and timeline */
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- Radius ----------------------------------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;     /* badges, kbd */
+  --radius-md: 10px;    /* buttons, inputs, nav items */
+  --radius-lg: 14px;    /* cards, runtime banner */
+  --radius-xl: 20px;    /* dialogs */
+  --radius-full: 9999px;/* pills, avatars */
+
+  /* ---- Sizes ------------------------------------------------------------ */
+  --rail-width: 64px;
+  --sidebar-width: 264px;
+  --topbar-height: 60px;
+  --content-max: 1440px;
+  --inspector-width: 360px; /* workflow inspector side panel (xl and up) */
+  --dialog-width: 560px;    /* default modal dialog width */
+  --size-tile-sm: 28px;     /* small role / icon tiles, attention icons */
+  --size-count-sm: 18px;    /* compact count badge (tabs, chips, group titles) */
+  --control-sm: 30px;
+  --control-md: 36px;
+  --control-lg: 42px;
+  --icon-sm: 16px;
+  --icon-md: 18px;
+  --icon-lg: 20px;
+
+  --dash-len: 4px;          /* dash + gap of drawn dashed lines (repeating gradients) */
+  --opacity-dim: .42;       /* items outside a highlighted chain / agent */
+
+  /* ---- Motion ----------------------------------------------------------- */
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 260ms;
+  --duration-spin: 700ms;   /* one turn of a refresh icon */
+  --duration-pulse: 2400ms; /* "running" heartbeat on the runtime tile */
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+
+  /* ---- Layers ----------------------------------------------------------- */
+  --z-sticky: 10;
+  --z-overlay: 40;
+  --z-drawer: 50;
+  --z-popover: 60;
+  --z-dialog: 70;   /* non-modal dialog fallback; modal dialogs use the top layer */
+}

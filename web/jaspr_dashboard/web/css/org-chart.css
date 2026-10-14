@@ -1,0 +1,155 @@
+/* ==========================================================================
+   Organization chart — the template's flow-builder look: cards on a dotted,
+   sunken canvas joined by connectors that leave and enter through small
+   handles. Node dimensions (232 × 144) are fixed and shared with ChartLayout
+   in org_chart.dart; padding, gaps and the head height below must keep the
+   content inside that box. Tokens only.
+   ========================================================================== */
+
+/* ---- Board (card) ---------------------------------------------------------- */
+.organization-chart {
+  display: flex; flex-direction: column; min-width: 0; margin-top: 0; overflow: hidden;
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  background: var(--color-surface); box-shadow: var(--shadow-xs);
+}
+.org-chart__toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4);
+  min-height: 60px; padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--color-border);
+}
+.org-chart__heading { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; }
+.org-chart__title {
+  display: flex; align-items: center; gap: var(--space-2); margin: 0;
+  font-size: var(--text-md-size); line-height: var(--text-md-leading); font-weight: var(--weight-semibold); color: var(--color-text);
+}
+.org-chart__title > .icon { color: var(--color-text-secondary); }
+.org-chart__summary { font-size: var(--text-sm-size); line-height: var(--text-sm-leading); color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+.org-chart__controls { flex: none; }
+.org-chart__controls .btn-group__btn { min-height: 0; box-shadow: none; border-radius: 0; }
+
+/* ---- Canvas ---------------------------------------------------------------- */
+.organization-chart .org-chart-viewport {
+  position: relative; isolation: isolate; overflow: hidden; width: 100%; max-width: 100%; min-height: 0;
+  height: clamp(300px, var(--chart-natural-height, 420px), min(650px, max(300px, calc(100dvh - 180px))));
+  border: 0; border-radius: 0; cursor: grab; touch-action: none; outline-offset: -3px;
+  background-color: var(--color-surface-sunken);
+  background-image: radial-gradient(circle, var(--color-canvas-dot) 1px, transparent 1.5px);
+  background-size: var(--space-5) var(--space-5);
+}
+.organization-chart .org-chart-viewport[data-panning] { cursor: grabbing; user-select: none; }
+.organization-chart .org-chart-viewport[data-empty] { height: 240px; cursor: default; }
+.org-chart-scene { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; user-select: none; }
+.org-chart-edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.org-chart-edge { stroke: var(--color-edge); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+
+/* ---- Agent and group cards ----------------------------------------------------- */
+.organization-chart .org-chart-node {
+  position: absolute; box-sizing: border-box; display: flex; flex-direction: column; gap: var(--space-2);
+  padding: var(--space-3); overflow: visible; overflow-wrap: normal;
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-md);
+  background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-sm);
+  transition: border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
+}
+.organization-chart .org-chart-node:hover { border-color: var(--color-text-tertiary); box-shadow: var(--shadow-md); }
+.org-chart-node:focus-within { z-index: 2; border-color: var(--color-accent); box-shadow: 0 0 0 1px var(--color-accent), var(--shadow-md); }
+.org-chart-node__head { display: flex; align-items: center; gap: var(--space-2-5); flex-shrink: 0; min-width: 0; height: 38px; }
+/* Role tile: 32px rounded square with role-tinted initials (template .role-tile) */
+.org-chart-node__avatar {
+  display: inline-grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px;
+  border-radius: var(--radius-md); background: var(--tile-bg, var(--role-developer-bg)); color: var(--tile-fg, var(--role-developer-fg));
+  font-size: var(--text-xs-size); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-wide); line-height: 1;
+}
+.org-chart-node__avatar[data-role="lead"] { --tile-bg: var(--role-lead-bg); --tile-fg: var(--role-lead-fg); }
+.org-chart-node__avatar[data-role="developer"] { --tile-bg: var(--role-developer-bg); --tile-fg: var(--role-developer-fg); }
+.org-chart-node__avatar[data-role="qa"] { --tile-bg: var(--role-qa-bg); --tile-fg: var(--role-qa-fg); }
+.org-chart-node__avatar[data-role="reviewer"] { --tile-bg: var(--role-reviewer-bg); --tile-fg: var(--role-reviewer-fg); }
+.org-chart-node__avatar[data-role="integration"] { --tile-bg: var(--role-integration-bg); --tile-fg: var(--role-integration-fg); }
+.org-chart-node__avatar[data-role="worktree"] { --tile-bg: var(--role-worktree-bg); --tile-fg: var(--role-worktree-fg); }
+.org-chart-node__avatar[data-role="coordinator"] { --tile-bg: var(--role-coordinator-bg); --tile-fg: var(--role-coordinator-fg); }
+.org-chart-node__avatar--group { --tile-bg: var(--color-accent-subtle); --tile-fg: var(--color-accent-text); }
+.org-chart-node__avatar .icon { width: var(--icon-sm); height: var(--icon-sm); }
+.org-chart-node__identity { display: flex; flex-direction: column; justify-content: center; gap: 0; flex: 1; min-width: 0; }
+.organization-chart .org-chart-node__name {
+  display: block; min-width: 0; min-height: 0; max-width: 100%; padding: 0;
+  border: 0; border-radius: var(--radius-xs); background: transparent; box-shadow: none; color: var(--color-text);
+  font-size: var(--text-base-size); line-height: var(--text-sm-leading); font-weight: var(--weight-semibold); text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+}
+.organization-chart .org-chart-node__name:hover:not(:disabled) { background: transparent; color: var(--color-accent-text); text-decoration: underline; text-underline-offset: 3px; }
+.org-chart-node__role {
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.organization-chart .org-chart-node__configure {
+  align-self: flex-start; flex: none; width: 24px; height: 24px; min-width: 24px; min-height: 24px; padding: 0;
+  border: 0; border-radius: var(--radius-sm); background: transparent; box-shadow: none; color: var(--color-text-tertiary);
+}
+.organization-chart .org-chart-node__configure:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); }
+.org-chart-node__configure .icon { width: var(--icon-sm); height: var(--icon-sm); }
+.org-chart-node__activity { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
+.org-chart-node__activity .status { max-width: 150px; height: 20px; overflow: hidden; text-overflow: ellipsis; }
+.org-chart-node__runtime {
+  max-width: 80px; font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-leading);
+  color: var(--color-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.org-chart-node__manager, .org-chart-node__run, .org-chart-node__members {
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.org-chart-node__manager { color: var(--color-text-secondary); }
+.org-chart-node__run { margin-top: auto; }
+/* Connector handles where reporting lines attach */
+.org-chart-node--agent::before, .org-chart-node--agent::after {
+  content: ""; position: absolute; left: calc(50% - 3.5px); width: 7px; height: 7px; box-sizing: border-box;
+  border: 1.5px solid var(--color-edge); border-radius: var(--radius-full); background: var(--color-surface);
+}
+.org-chart-node--agent::before { top: -4px; }
+.org-chart-node--agent::after { bottom: -4px; }
+.organization-chart .org-chart-node--group { gap: var(--space-2-5); border-style: solid; }
+.org-chart-node__description {
+  height: 32px; margin: 0; overflow: hidden;
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-secondary);
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+}
+.org-chart-node--group .org-chart-node__members { display: flex; align-items: center; gap: var(--space-2); margin-top: auto; color: var(--color-text-secondary); }
+.org-chart-node__stack { flex: none; }
+.org-chart-node__names { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.org-chart__group-label {
+  position: absolute; font-size: var(--text-2xs-size); line-height: var(--space-4); font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-overline); color: var(--color-text-tertiary);
+}
+
+/* ---- Footer and empty state ---------------------------------------------------- */
+.org-chart__help {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-3);
+  padding: var(--space-2-5) var(--space-5); border-top: 1px solid var(--color-border);
+  font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary);
+}
+.org-chart__empty {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--space-2); padding: var(--space-6); text-align: center; color: var(--color-text-secondary);
+}
+.org-chart__empty > .empty__icon {
+  display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: var(--space-1);
+  border-radius: var(--radius-full); background: var(--color-accent-subtle); color: var(--color-accent-text);
+}
+.org-chart__empty > strong { color: var(--color-text); }
+.org-chart__empty > p { margin: 0; font-size: var(--text-sm-size); }
+
+@media (max-width: 639.98px) {
+  .org-chart__toolbar { padding: var(--space-3) var(--space-4); }
+  .org-chart__controls { width: 100%; }
+  .org-chart__controls > * { flex: 1 1 auto; }
+  .org-chart__controls .btn-group__btn .icon { display: none; }
+  .org-chart__controls .btn-group__readout { min-width: 44px; }
+  .org-chart__help { padding: var(--space-2-5) var(--space-4); }
+  .org-chart__help > span:first-child { font-size: 0; }
+  .org-chart__help > span:first-child::after { content: "Drag or pinch to explore · Tap a name to open"; font-size: var(--text-xs-size); }
+  .organization-chart .org-chart-viewport { height: clamp(300px, var(--chart-natural-height, 360px), min(650px, max(300px, calc(100dvh - 180px)))); }
+}
+@media (prefers-reduced-motion: reduce) { .organization-chart .org-chart-node { transition: none; } }
+@media (forced-colors: active) {
+  .org-chart-edge { stroke: CanvasText; }
+  .organization-chart .org-chart-node { border-color: CanvasText; }
+  .organization-chart .org-chart-viewport { background-image: none; }
+  .org-chart-node--agent::before, .org-chart-node--agent::after { border-color: CanvasText; }
+}

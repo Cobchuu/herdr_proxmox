@@ -1,0 +1,183 @@
+import '../../../bloc.dart';
+
+/// Function that creates a new [UseCase] instance.
+///
+/// Used by [UseCaseBuilder] to generate use case instances when events
+/// need to be processed.
+typedef UseCaseGenerator = UseCase Function();
+
+/// Function that creates a new [UseCaseBuilderBase] instance.
+///
+/// Used in bloc constructors to provide lazy initialization of use case builders.
+typedef UseCaseBuilderGenerator = UseCaseBuilderBase Function();
+
+/// Function that creates an initial event for a use case.
+///
+/// When provided to a use case builder, this event is dispatched
+/// automatically when the bloc is initialized.
+typedef UseCaseEventBuilder = EventBase Function();
+
+/// Function that creates an event based on current stream status.
+///
+/// Useful for creating events that depend on the current state of the bloc.
+typedef BlocUseCaseEventBuilder = EventBase Function(StreamStatus ss);
+
+/// Base class for building use cases that handle events in the bloc pattern.
+///
+/// Use case builders encapsulate the configuration needed to create and
+/// register use cases with a bloc. They define which event type triggers
+/// the use case and how to create new instances.
+///
+/// See [UseCaseBuilder] for the standard implementation.
+/// See [InlineUseCaseBuilder] for lambda-based use cases.
+abstract class UseCaseBuilderBase {
+  /// Creates a use case builder.
+  UseCaseBuilderBase();
+
+  /// The type of event this use case handles.
+  Type get eventType;
+
+  /// Optional builder for creating an initial event when the bloc starts.
+  ///
+  /// If provided, the event will be dispatched automatically after
+  /// the bloc is initialized.
+  UseCaseEventBuilder? get initialEventBuilder;
+
+  /// Creates the use case instance that will handle events.
+  UseCaseGenerator get generator;
+
+  /// How same-type events are processed relative to one another.
+  ///
+  /// Defaults to [EventConcurrency.concurrent] (events may interleave at awaits).
+  /// Use [EventConcurrency.sequential] for events that mutate shared state, or
+  /// [EventConcurrency.droppable] for exclusive flows.
+  EventConcurrency get concurrency => EventConcurrency.concurrent;
+
+  /// Cleanup method called when the use case is disposed.
+  ///
+  /// Override to release any resources held by the builder.
+  Future<void> close() async {}
+}
+
+/// Standard implementation of [UseCaseBuilderBase] for creating use cases.
+///
+/// Connects an event type to a use case generator, enabling the bloc to
+/// route events to the appropriate handler.
+///
+/// Example:
+/// ```dart
+/// class CounterBloc extends JuiceBloc<CounterState> {
+///   CounterBloc() : super(CounterState(), [
+///     () => UseCaseBuilder(
+///       typeOfEvent: IncrementEvent,
+///       useCaseGenerator: () => IncrementUseCase(),
+///     ),
+///     () => UseCaseBuilder(
+///       typeOfEvent: LoadDataEvent,
+///       useCaseGenerator: () => LoadDataUseCase(),
+///       initialEventBuilder: () => LoadDataEvent(), // Auto-fires on init
+///     ),
+///   ]);
+/// }
+/// ```
+class UseCaseBuilder implements UseCaseBuilderBase {
+  /// Creates a use case builder.
+  ///
+  /// [typeOfEvent] - The event type this use case handles.
+  /// [useCaseGenerator] - Factory function to create use case instances.
+  /// [initialEventBuilder] - Optional factory for an initial event.
+  UseCaseBuilder({
+    required this.typeOfEvent,
+    required this.useCaseGenerator,
+    UseCaseEventBuilder? initialEventBuilder,
+    this.concurrency = EventConcurrency.concurrent,
+  })  : _initialEventBuilder = initialEventBuilder,
+        _acceptsBloc = null,
+        _useCaseBlocType = null;
+
+  UseCaseBuilder._typed({
+    required this.typeOfEvent,
+    required this.useCaseGenerator,
+    required UseCaseEventBuilder? initialEventBuilder,
+    required this.concurrency,
+    required bool Function(JuiceBloc bloc) acceptsBloc,
+    required Type useCaseBlocType,
+  })  : _initialEventBuilder = initialEventBuilder,
+        _acceptsBloc = acceptsBloc,
+        _useCaseBlocType = useCaseBlocType;
+
+  /// Type-checked registration: the event type is INFERRED from the use
+  /// case, so it cannot disagree with it.
+  ///
+  /// ```dart
+  /// () => UseCaseBuilder.typed(() => LoadFooUseCase()),
+  /// () => UseCaseBuilder.typed(() => SaveFooUseCase(),
+  ///     concurrency: EventConcurrency.sequential),
+  /// ```
+  ///
+  /// With the plain constructor, `typeOfEvent: SaveEvent` paired with a
+  /// `LoadUseCase` compiles and fails at dispatch. Here `TEvent` comes from
+  /// the generator's return type — a mismatch is not expressible. `TBloc` is
+  /// inferred the same way and checked when the bloc REGISTERS the builder:
+  /// a use case copied onto the wrong bloc throws [ArgumentError] from that
+  /// bloc's constructor, not on the first event.
+  ///
+  /// The event must be the use case's exact event class (events match by
+  /// runtime type — AGENTS gotcha 2); a use case declared over an abstract
+  /// base event should keep the explicit constructor.
+  static UseCaseBuilder
+      typed<TBloc extends JuiceBloc, TEvent extends EventBase>(
+    UseCase<TBloc, TEvent> Function() useCaseGenerator, {
+    EventConcurrency concurrency = EventConcurrency.concurrent,
+    TEvent Function()? initialEventBuilder,
+  }) {
+    return UseCaseBuilder._typed(
+      typeOfEvent: TEvent,
+      useCaseGenerator: useCaseGenerator,
+      initialEventBuilder: initialEventBuilder,
+      concurrency: concurrency,
+      acceptsBloc: (bloc) => bloc is TBloc,
+      useCaseBlocType: TBloc,
+    );
+  }
+
+  final bool Function(JuiceBloc bloc)? _acceptsBloc;
+  final Type? _useCaseBlocType;
+
+  /// Throws [ArgumentError] when a [typed] builder is registered on a bloc
+  /// its use case cannot run on. A no-op for the plain constructor.
+  void checkRegisteredOn(JuiceBloc bloc) {
+    final accepts = _acceptsBloc;
+    if (accepts == null || accepts(bloc)) return;
+    throw ArgumentError(
+      'UseCaseBuilder.typed for $typeOfEvent builds a use case for '
+      '$_useCaseBlocType, but was registered on ${bloc.runtimeType}.',
+    );
+  }
+
+  /// The type of event this use case handles.
+  final Type typeOfEvent;
+
+  /// Function that creates the use case instance.
+  final UseCaseGenerator useCaseGenerator;
+
+  /// Private storage for optional initial event builder.
+  final UseCaseEventBuilder? _initialEventBuilder;
+
+  @override
+  final EventConcurrency concurrency;
+
+  @override
+  Type get eventType => typeOfEvent;
+
+  @override
+  UseCaseEventBuilder? get initialEventBuilder => _initialEventBuilder;
+
+  @override
+  UseCaseGenerator get generator => useCaseGenerator;
+
+  @override
+  Future<void> close() async {
+    // No resources to clean up in base implementation
+  }
+}

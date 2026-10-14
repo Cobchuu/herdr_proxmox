@@ -1,0 +1,554 @@
+@TestOn('browser')
+library;
+
+import 'dart:convert';
+import 'dart:js_interop';
+import 'package:test/test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:juice/juice.dart';
+import 'package:jaspr/client.dart';
+import 'package:jaspr/dom.dart' as dom;
+import 'package:web/web.dart' as web;
+import 'package:herdr_jaspr_dashboard/services.dart';
+import 'package:herdr_jaspr_dashboard/ui.dart' as ui;
+import 'package:herdr_jaspr_dashboard/pages/organization_page.dart';
+import 'package:herdr_jaspr_dashboard/pages/group_page.dart';
+import 'package:herdr_jaspr_dashboard/pages/collaboration_panel.dart';
+import 'package:herdr_jaspr_dashboard/pages/org_chart.dart';
+
+class _Host extends StatefulComponent {
+  const _Host(this.child);
+  final Component child;
+  @override
+  State<_Host> createState() => _HostState();
+}
+
+class _HostState extends State<_Host> {
+  void changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    ui.dialogChanges.addListener(changed);
+  }
+
+  @override
+  void dispose() {
+    ui.dialogChanges.removeListener(changed);
+    super.dispose();
+  }
+
+  @override
+  Component build(BuildContext context) =>
+      dom.div([component.child, ui.buildDialogs()]);
+}
+
+Future<void> settle() async =>
+    Future<void>.delayed(const Duration(milliseconds: 45));
+Iterable<web.HTMLElement> nodes(String selector) sync* {
+  final all = web.document.querySelectorAll('#org-dom-test $selector');
+  for (var i = 0; i < all.length; i++) yield all.item(i) as web.HTMLElement;
+}
+
+web.HTMLButtonElement btn(String value) =>
+    nodes('button').firstWhere((n) => n.textContent == value)
+        as web.HTMLButtonElement;
+Future<void> click(String value) async {
+  btn(value).click();
+  await settle();
+}
+
+web.HTMLElement control(String label) {
+  final n = nodes('label').firstWhere(
+    (n) =>
+        n.querySelector('span')?.textContent == label || n.textContent == label,
+  );
+  return (n.querySelector('input,select,textarea') ??
+          web.document.getElementById(n.getAttribute('for')!))!
+      as web.HTMLElement;
+}
+
+Future<void> input(String label, String value) async {
+  final n = control(label);
+  if (n is web.HTMLInputElement) n.value = value;
+  if (n is web.HTMLTextAreaElement) n.value = value;
+  n.dispatchEvent(web.Event('input', web.EventInit(bubbles: true)));
+  await settle();
+}
+
+Future<void> choose(String label, String value) async {
+  final n = control(label) as web.HTMLSelectElement;
+  n.value = value;
+  n.dispatchEvent(web.Event('change', web.EventInit(bubbles: true)));
+  await settle();
+}
+
+Map<String, dynamic> org() => {
+  'id': 'org',
+  'name': 'Engineering',
+  'purpose': 'Build reliable tools',
+  'instructions': 'Review the evidence',
+};
+Map<String, dynamic> agent(String id) => {
+  'id': id,
+  'organization_id': 'org',
+  'name': id == 'alice' ? 'Alice' : 'Bob',
+  'role': 'Engineer',
+  'runtime': 'codex',
+  'persona': 'Preserve behavior',
+  'project': '/projects/repo',
+  'provider': '',
+  'model': '',
+  'reasoning': '',
+  'version': 1,
+};
+Map<String, dynamic> group() => {
+  'id': 'group',
+  'organization_id': 'org',
+  'name': 'Architecture',
+  'description': 'Review the design',
+  'members': ['alice', 'bob'],
+  'read_only': true,
+  'review_scope': 'topic',
+};
+Map<String, dynamic> snapshot({List<Map<String, dynamic>> jobs = const []}) => {
+  'organizations': [org()],
+  'profiles': [agent('alice'), agent('bob')],
+  'groups': [group()],
+  'jobs': jobs,
+};
+Map<String, dynamic> modelCatalog() => {
+  'models': [
+    {
+      'id': 'model-1',
+      'name': 'Account model',
+      'provider': 'opencode-go',
+      'reasoning': ['high'],
+    },
+  ],
+  'supports_variants': true,
+  'source': 'opencode account',
+};
+
+void main() {
+  late ClientAppBinding binding;
+  DashboardBloc? connection;
+  final posts = <Map<String, dynamic>>[];
+  setUpAll(() {
+    JuiceLoggerConfig.minLevel = Level.off;
+    web.document.body!.appendChild(web.HTMLDivElement()..id = 'org-dom-test');
+    binding = ClientAppBinding();
+  });
+  setUp(() => posts.clear());
+  tearDown(() async {
+    for (final b in nodes(
+      '.dialog-layer button',
+    ).where((b) => b.textContent == 'Close').toList())
+      b.click();
+    await settle();
+    binding.detachRootComponent();
+    if (connection != null) {
+      await connection!.disconnect();
+      connection = null;
+    }
+    await BlocScope.reset();
+    web.document.getElementById('org-dom-test')!.textContent = '';
+  });
+  Future<void> mount(
+    Component child, {
+    List<Map<String, dynamic>> jobs = const [],
+    String? failAction,
+    Map<String, dynamic> Function(http.Request)? response,
+  }) async {
+    var lost = false;
+    connection = DashboardBloc(
+      client: MockClient((request) async {
+        final path = request.url.path;
+        if (request.method == 'POST') {
+          posts.add({
+            'path': path,
+            ...jsonDecode(request.body) as Map<String, dynamic>,
+          });
+          if (path.endsWith('/$failAction') && !lost) {
+            lost = true;
+            return http.Response('{"error":"response lost"}', 503);
+          }
+        }
+        final data =
+            response?.call(request) ??
+            (path.endsWith('/organizations/state') ||
+                    path.endsWith('/organizations/activity')
+                ? snapshot(jobs: jobs)
+                : path.endsWith('/organizations/history')
+                ? {
+                    ...snapshot(jobs: jobs),
+                    'group': group(),
+                    'member_states': {
+                      'alice': {'active': false, 'status': 'off'},
+                      'bob': {'active': false, 'status': 'off'},
+                    },
+                  }
+                : path.endsWith('/models')
+                ? (request.method == 'POST'
+                      ? modelCatalog()
+                      : {
+                          'runtimes': {'opencode': modelCatalog()},
+                        })
+                : path.endsWith('/organizations/session')
+                ? {'results': []}
+                : path.endsWith('/session')
+                ? {'authenticated': true}
+                : {'workspaces': [], 'agents': []});
+        return http.Response(jsonEncode(data), 200);
+      }),
+    );
+    BlocScope.register<DashboardBloc>(() => connection!);
+    connection!.connect('test');
+    await settle();
+    connection!.operator.value = {'role': 'admin'};
+    binding.attachRootComponent(_Host(child), attachTo: '#org-dom-test');
+    await settle();
+  }
+
+  List<Map<String, dynamic>> actions(String action) =>
+      posts.where((p) => p['path'] == '/api/organizations/$action').toList();
+
+  test(
+    'hire preserves CLI model, worktree and permission defaults when runtime changes',
+    () async {
+      await mount(const OrganizationPage(initialView: 'team'));
+      await click('Hire an agent');
+      await click('Save');
+      expect(actions('hire'), isEmpty);
+      await input('Name', 'Charlie');
+      await input('Role', 'Reviewer');
+      await input('Persona instructions', 'Review exact changes');
+      await choose('Runtime', 'opencode');
+      expect(
+        (control('Permissions') as web.HTMLSelectElement).value,
+        'dashboard_outputs',
+      );
+      await choose('Provider', 'opencode-go');
+      await choose('Model', 'model-1');
+      await choose('Variant / reasoning', 'high');
+      await input(
+        'Additional accessible path globs',
+        '/projects/shared/**\n/projects/shared/**',
+      );
+      await choose('Runtime', 'claude');
+      expect(
+        nodes(
+          'label',
+        ).where((n) => n.querySelector('span')?.textContent == 'Permissions'),
+        isEmpty,
+      );
+      expect((control('Model') as web.HTMLSelectElement).value, '');
+      await choose('Runtime', 'opencode');
+      await choose('Provider', 'opencode-go');
+      await choose('Model', 'model-1');
+      await choose('Variant / reasoning', 'high');
+      await click('Save');
+      final p = actions('hire').single;
+      expect(p['organization_id'], 'org');
+      expect(p['runtime'], 'opencode');
+      expect(p['provider'], 'opencode-go');
+      expect(p['model'], 'model-1');
+      expect(p['reasoning'], 'high');
+      expect(p['permission_mode'], 'dashboard_outputs');
+      expect(p['accessible_paths'], isEmpty);
+      expect(p['use_worktree'], true);
+      expect(p['request_id'], isNotEmpty);
+    },
+  );
+
+  test(
+    'session restart is inspection-gated and a lost response retries the same identity',
+    () async {
+      final job = {
+        'id': 'run',
+        'organization_id': 'org',
+        'kind': 'launch',
+        'profile_id': 'alice',
+        'state': 'persona_sent',
+        'alias': 'Alice',
+        'pane_id': '%1',
+        'profile': agent('alice'),
+      };
+      await mount(
+        const OrganizationPage(initialView: 'runs'),
+        jobs: [job],
+        failAction: 'session',
+      );
+      await click('Restart in assigned checkout');
+      expect(actions('session'), isEmpty);
+      await click('Cancel');
+      expect(actions('session'), isEmpty);
+      await click('Restart in assigned checkout');
+      await click('I inspected the idle session');
+      expect(actions('session').length, 1);
+      await click('Restart in assigned checkout');
+      await click('I inspected the idle session');
+      final calls = actions('session');
+      expect(calls.length, 2);
+      expect(calls[0]['request_id'], calls[1]['request_id']);
+      expect(calls[1]['inspected'], true);
+      expect(calls[1]['mode'], 'restart');
+      expect(calls[1]['job_id'], 'run');
+    },
+  );
+
+  test(
+    'custom CLI settings trim input and preserve catalogue-independent values',
+    () async {
+      await mount(const OrganizationPage(initialView: 'team'));
+      await click('Hire an agent');
+      await input('Name', 'Custom hire');
+      await input('Role', 'Reviewer');
+      await input('Persona instructions', 'Review changes');
+      await choose('Runtime', 'opencode');
+      await choose('Provider', 'manual');
+      await input('Provider (manual)', '  new-provider  ');
+      await choose('Model', 'manual');
+      await input('Model (manual)', '  newly-released-model  ');
+      await click('Save');
+      final p = actions('hire').single;
+      expect(p['provider'], 'new-provider');
+      expect(p['model'], 'newly-released-model');
+      expect(p['reasoning'], '');
+    },
+  );
+
+  test(
+    'original collaborate deep links retain chat and group controls',
+    () async {
+      await mount(const OrganizationPage(initialView: 'collaborate'));
+      expect(btn('Send prompt').disabled, true);
+      expect(btn('Create group').disabled, false);
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Chat with an agent'),
+      );
+    },
+  );
+
+  test(
+    'session cleanup only submits explicitly chosen inspected released sessions',
+    () async {
+      final jobs = [
+        {
+          'id': 'released',
+          'organization_id': 'org',
+          'kind': 'launch',
+          'profile_id': 'alice',
+          'state': 'released',
+          'alias': 'Alice',
+          'pane_id': '%1',
+        },
+        {
+          'id': 'busy',
+          'organization_id': 'org',
+          'kind': 'launch',
+          'profile_id': 'bob',
+          'state': 'running',
+          'alias': 'Bob',
+          'pane_id': '%2',
+        },
+      ];
+      await mount(const OrganizationPage(initialView: 'runs'), jobs: jobs);
+      await click('Clean up obsolete panes');
+      expect(btn('Archive and close selected').disabled, true);
+      expect(actions('session'), isEmpty);
+      final checkbox =
+          nodes('.dialog input[type=checkbox]').single as web.HTMLInputElement;
+      checkbox.click();
+      await settle();
+      await click('Archive and close selected');
+      final p = actions('session').single;
+      expect(p['mode'], 'cleanup');
+      expect(p['job_ids'], ['released']);
+      expect(p['inspected'], true);
+      expect(p['organization_id'], 'org');
+    },
+  );
+
+  test(
+    'group retry preserves durable identity and account change clears pending commands',
+    () async {
+      await mount(const GroupPage(id: 'group'), failAction: 'discuss');
+      await click('Start discussion');
+      expect(actions('discuss').length, 1);
+      await click('Retry same request');
+      expect(actions('discuss').length, 2);
+      expect(
+        actions('discuss')[0]['request_id'],
+        actions('discuss')[1]['request_id'],
+      );
+      expect(actions('discuss')[0]['group_id'], 'group');
+      expect(actions('discuss')[0]['organization_id'], 'org');
+      await connection!.disconnect();
+      await settle();
+      expect(
+        nodes('button').where((n) => n.textContent == 'Retry same request'),
+        isEmpty,
+      );
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        isNot(contains('Architecture')),
+      );
+    },
+  );
+
+  test(
+    'chat recovery requires inspected-idle confirmation and preserves original prompt',
+    () async {
+      final job = {
+        'id': 'chat',
+        'kind': 'chat',
+        'profile_id': 'alice',
+        'organization_id': 'org',
+        'state': 'uncertain',
+        'prompt': 'Original reviewed question',
+        'delivery': {'stage': 'command_returned'},
+      };
+      await mount(
+        CollaborationPanel(
+          organization: org(),
+          profiles: [agent('alice'), agent('bob')],
+        ),
+        jobs: [job],
+      );
+      await choose('Agent', 'alice');
+      await click('Recover saved reply');
+      expect(actions('recover'), isEmpty);
+      await click('Cancel');
+      expect(actions('recover'), isEmpty);
+      await click('Recover saved reply');
+      await click('Confirm');
+      final p = actions('recover').single;
+      expect(p['job_id'], 'chat');
+      expect(p['chat'], true);
+      expect(p['inspected'], true);
+      expect(p.containsKey('prompt'), false);
+    },
+  );
+
+  test(
+    'a group preparation confirmation cannot cross an account generation',
+    () async {
+      final job = {
+        'id': 'meeting',
+        'kind': 'discussion',
+        'organization_id': 'org',
+        'group_id': 'group',
+        'state': 'queued',
+        'preparation_version': 1,
+        'discussion_submitted_at': null,
+      };
+      await mount(const GroupPage(id: 'group'), jobs: [job]);
+      await click('Cancel waiting meeting');
+      await connection!.disconnect();
+      connection!.connect('new account');
+      await settle();
+      await click('Confirm');
+      expect(actions('cancel_discussion'), isEmpty);
+    },
+  );
+
+  test(
+    'a chat recovery confirmation cannot cross an account generation',
+    () async {
+      final job = {
+        'id': 'chat',
+        'kind': 'chat',
+        'profile_id': 'alice',
+        'organization_id': 'org',
+        'state': 'uncertain',
+        'prompt': 'Original question',
+      };
+      await mount(
+        CollaborationPanel(organization: org(), profiles: [agent('alice')]),
+        jobs: [job],
+      );
+      await choose('Agent', 'alice');
+      await click('Recover saved reply');
+      await connection!.disconnect();
+      connection!.connect('new account');
+      await settle();
+      await click('Confirm');
+      expect(actions('recover'), isEmpty);
+    },
+  );
+
+  test(
+    'organization chart renders manager links as accessible DOM and SVG',
+    () async {
+      final child = agent('bob')..['manager_id'] = 'alice';
+      await mount(
+        OrgChart(
+          profiles: [agent('alice'), child],
+          agents: const [],
+          jobs: const [],
+          onSelect: (_) {},
+        ),
+      );
+      expect(nodes('svg path').length, 1);
+      expect(nodes('canvas'), isEmpty);
+      expect(btn('Alice').disabled, false);
+      expect(
+        nodes('.status').map((n) => n.textContent),
+        contains('No live session'),
+      );
+      final beforeZoom = double.parse(
+        nodes('.org-chart-scene').single.getAttribute('data-zoom')!,
+      );
+      await click('Zoom in');
+      final afterZoom = double.parse(
+        nodes('.org-chart-scene').single.getAttribute('data-zoom')!,
+      );
+      expect(afterZoom, closeTo((beforeZoom + .15).clamp(.1, 2.5), .0001));
+    },
+  );
+
+  test(
+    'backup import reviews exact counts and sends complete configuration without launching',
+    () async {
+      final data = {
+        'format': 'herdr-configuration',
+        'version': 1,
+        'organizations': [org()],
+        'profiles': [agent('alice'), agent('bob')],
+        'groups': [group()],
+      };
+      await mount(const OrganizationPage(initialView: 'team'));
+      await click('Import configuration');
+      final picker =
+          web.document.querySelector('input[type=file]')
+              as web.HTMLInputElement;
+      final transfer = web.DataTransfer();
+      transfer.items.add(
+        web.File(
+          [jsonEncode(data).toJS].toJS,
+          'backup.json',
+          web.FilePropertyBag(type: 'application/json'),
+        ),
+      );
+      picker.files = transfer.files;
+      picker.dispatchEvent(web.Event('change'));
+      await settle();
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('1 organizations, 2 agents, 1 groups.'),
+      );
+      expect(actions('import'), isEmpty);
+      await click('Import');
+      final p = actions('import').single;
+      expect(p['organizations'], data['organizations']);
+      expect(p['profiles'], data['profiles']);
+      expect(p['groups'], data['groups']);
+      expect(actions('launch'), isEmpty);
+    },
+  );
+}

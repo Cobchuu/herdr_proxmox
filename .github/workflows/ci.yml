@@ -39,7 +39,7 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= .github/workflows/ci.yml
 
   web:
-    name: Pinned Flutter and Jaspr release build
+    name: Jaspr release and preserved bloc checks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -61,8 +61,14 @@ jobs:
           path: ~/.pub-cache
           key: dart-linux-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('web/**/pubspec.lock') }}
           restore-keys: dart-linux-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
-      - name: Analyze, test and build both web applications
+      - name: Validate preserved Flutter contracts and build Jaspr dashboard
         run: bash scripts/build-web.sh
+      - name: Analyze all repository package contexts
+        run: dart analyze
+      - name: Verify native DOM workflows in Chrome
+        working-directory: web/jaspr_dashboard
+        # Focus and requestAnimationFrame checks share one browser viewport.
+        run: dart test --platform chrome --concurrency=1
       - name: Verify request IDs in compiled JavaScript
         working-directory: web/dashboard
         run: |
