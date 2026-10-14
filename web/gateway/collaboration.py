@@ -438,6 +438,25 @@ def read_contribution(path, limit=40000, label='discussion document'):
     return text
 
 
+# Hard ceiling for one transcript contribution. The prompt asks members to aim
+# for under 8 KB, so this is deliberately looser than the target: when the two
+# were the same number, a member who wrote slightly over produced a transcript
+# the validator rejected outright and the discussion could never be finalized.
+# Matches read_contribution's default for documents, so the transcript is held to
+# the same bound as the artifact it accompanies.
+CONTRIBUTION_LIMIT = 40000
+
+
+def truncate_contribution(text, limit=CONTRIBUTION_LIMIT):
+    """Bound a contribution without splitting a character."""
+    encoded = text.encode('utf-8')
+    if len(encoded) <= limit:
+        return text
+    marker = '\n[truncated at the gateway limit]'
+    budget = max(0, limit - len(marker.encode('utf-8')))
+    return encoded[:budget].decode('utf-8', 'ignore') + marker
+
+
 def validate_contributions(contributions, runs):
     ids = {r['profile_id']: r['profile']['name'] for r in runs}
     if not isinstance(contributions, list) or not 1 <= len(contributions) <= 120:
@@ -445,9 +464,18 @@ def validate_contributions(contributions, runs):
     for part in contributions:
         if (not isinstance(part, dict) or part.get('profile_id') not in ids or
             type(part.get('round')) is not int or not 1 <= part['round'] <= 20 or
-            not isinstance(part.get('content'), str) or not part['content'].strip() or
-            len(part['content'].encode('utf-8')) > 6000):
+            not isinstance(part.get('content'), str) or not part['content'].strip()):
             raise ValueError('Invalid member contribution in group transcript.')
+        # Bound the content instead of rejecting it. A contribution over the
+        # limit is still a real one, and rejecting it made the whole transcript
+        # invalid — so a discussion whose members wrote at length could never be
+        # finalized: automatic recovery and the operator's button both failed on
+        # the same file, on every pass, with no way forward.
+        content = part['content'].strip()
+        if len(content.encode('utf-8')) > CONTRIBUTION_LIMIT:
+            content = truncate_contribution(content)
+            part['truncated'] = True
+        part['content'] = content
         part['name'] = ids[part['profile_id']]
     return contributions
 
@@ -952,7 +980,7 @@ def execute(store, job):
         "Set needs_review=true for anything that changes scope, adds dependencies or touches sensitive areas; those "
         "stay drafts for an operator. An empty array is a valid and common outcome. "
         f"Also write {transcript} as JSON with a contributions array. Each entry must have "
-        "profile_id (from the roster below), name, round (integer 1 to 20), and content (Markdown under 6 KB). "
+        "profile_id (from the roster below), name, round (integer 1 to 20), and content (Markdown, aim for under 8 KB). "
         f"Profile IDs: {json.dumps({r['alias']: r['profile_id'] for r in job['runs']})}. "
         "Record actual member responses, never invent them. Update discussion.json after each member reply "
         "using a complete valid JSON document so the dashboard can show rounds as they arrive. "

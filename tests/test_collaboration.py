@@ -1839,3 +1839,58 @@ class DiscussionStateDriftTests(unittest.TestCase):
                             ('contributions.py', 'pr_repairs.py', 'task_delivery.py'))
         for state in states:
             self.assertIn("'" + state + "'", writers, state)
+
+
+class ContributionValidationTests(unittest.TestCase):
+    """A long contribution must not make a finished discussion unfinalizable."""
+
+    def setUp(self):
+        from collaboration import validate_contributions
+        self.validate = validate_contributions
+        self.runs = [{'profile_id': 'p1', 'profile': {'name': 'Ada'}}]
+
+    def test_an_oversized_contribution_is_bounded_not_rejected(self):
+        # Rejecting it left the whole transcript invalid, so a discussion whose
+        # members wrote at length could never be finalized: automatic recovery
+        # and the operator's button both failed on the same file, every pass.
+        from collaboration import CONTRIBUTION_LIMIT
+        parts = self.validate(
+            [dict(profile_id='p1', round=1, content='x' * (CONTRIBUTION_LIMIT * 3))],
+            self.runs)
+        self.assertTrue(parts[0]['truncated'])
+        self.assertLessEqual(len(parts[0]['content'].encode('utf-8')), CONTRIBUTION_LIMIT)
+        self.assertIn('truncated at the gateway limit', parts[0]['content'])
+
+    def test_truncation_never_splits_a_character(self):
+        from collaboration import CONTRIBUTION_LIMIT
+        parts = self.validate(
+            [dict(profile_id='p1', round=1, content='\u00e9' * (CONTRIBUTION_LIMIT * 2))],
+            self.runs)
+        # Encoding back must succeed: a split multi-byte character would raise.
+        parts[0]['content'].encode('utf-8')
+
+    def test_a_contribution_within_the_limit_is_untouched(self):
+        parts = self.validate([dict(profile_id='p1', round=1, content=' short ')], self.runs)
+        self.assertEqual(parts[0]['content'], 'short')
+        self.assertNotIn('truncated', parts[0])
+        self.assertEqual(parts[0]['name'], 'Ada')
+
+    def test_a_long_but_reasonable_contribution_is_not_truncated(self):
+        # The ceiling is a safety net, not the target. 20 KB is well past the
+        # prompt's 8 KB guidance and must still pass through intact: this is the
+        # case that used to invalidate the whole transcript.
+        from collaboration import CONTRIBUTION_LIMIT
+        body = ('- finding with `file.py:12` evidence and affected callers.\n' * 350)
+        self.assertGreater(len(body.encode('utf-8')), 20000)
+        self.assertLess(len(body.encode('utf-8')), CONTRIBUTION_LIMIT)
+        parts = self.validate([dict(profile_id='p1', round=1, content=body)], self.runs)
+        self.assertEqual(parts[0]['content'], body.strip())
+        self.assertNotIn('truncated', parts[0])
+
+    def test_a_genuinely_invalid_contribution_is_still_refused(self):
+        for bad in (dict(profile_id='other', round=1, content='x'),
+                    dict(profile_id='p1', round=0, content='x'),
+                    dict(profile_id='p1', round=1, content='   '),
+                    dict(profile_id='p1', round='1', content='x')):
+            with self.assertRaisesRegex(ValueError, 'Invalid member contribution'):
+                self.validate([bad], self.runs)
