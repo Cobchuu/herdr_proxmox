@@ -466,6 +466,19 @@ class _GroupPageState extends State<GroupPage> {
       [
         if (data['inspection_error'] != null)
           errorLine('Live output unavailable: ${data['inspection_error']}'),
+        if (records(data['streams']).isEmpty &&
+            data['inspection_error'] == null)
+          el(
+            'p',
+            [
+              text(
+                live.containsKey(job['id'])
+                    ? 'No terminal streams have been returned for this discussion yet.'
+                    : 'Loading live terminal output…',
+              ),
+            ],
+            attributes: {'role': 'status'},
+          ),
 
         if (records(data['contributions']).isNotEmpty)
           el(
@@ -484,61 +497,87 @@ class _GroupPageState extends State<GroupPage> {
           ], iconName: 'file-text'),
 
         for (final stream in records(data['streams']))
-          disclosure('${stream['name']} · ${stream['status']}', [
-            SnapshotTerminal(
-              '${stream['error'] ?? stream['output'] ?? ''}',
-              key: ValueKey('${job['id']}-${stream['profile_id']}'),
-            ),
-
-            if (stream['input_result'] is Map)
-              note(
-                'Terminal response: ${stream['input_result']['state']} ${stream['input_result']['error'] ?? ''}',
-              ),
-
-            if (stream['status'] == 'blocked')
-              el('div', [
-                if (stream['console_token'] != null)
-                  button(
-                    'Respond to permission or question',
-                    () => respondToBlock(stream),
-                    disabled: busy || pending != null,
-                    small: true,
-                    primary: true,
-                  ),
-                el(
-                  'div',
-                  [
-                    for (final key in [
-                      'up',
-                      'down',
-                      'tab',
-                      'enter',
-                      'esc',
-                      'ctrl+c',
-                    ])
-                      el(
-                        'button',
-                        [text(key)],
-                        classes: 'btn-group__btn collab-keys__key',
-                        attributes: {
-                          'type': 'button',
-                          if (busy || pending != null) 'disabled': '',
-                        },
-                        events: {
-                          'click': (_) => submit('input', {
-                            'profile_id': stream['profile_id'],
-                            'key': key,
-                            if (stream['console_token'] != null)
-                              'console_token': stream['console_token'],
-                          }),
-                        },
+          Component.element(
+            tag: 'div',
+            key: ValueKey('${job['id']}-${stream['profile_id']}'),
+            classes: 'group-live-stream',
+            attributes: {'data-profile-id': '${stream['profile_id']}'},
+            children: [
+              disclosure('${stream['name']} · ${stream['status']}', [
+                if ('${stream['error'] ?? ''}'.isNotEmpty)
+                  errorLine('Terminal output unavailable: ${stream['error']}'),
+                if ('${stream['output'] ?? ''}'.isEmpty &&
+                    '${stream['error'] ?? ''}'.isEmpty)
+                  el(
+                    'p',
+                    [
+                      text(
+                        stream['status'] == 'starting'
+                            ? 'Session is starting; waiting for terminal output.'
+                            : 'No retained terminal output has been returned yet.',
                       ),
-                  ],
-                  classes: 'btn-group',
-                  attributes: {'role': 'group', 'aria-label': 'Terminal keys'},
+                    ],
+                    attributes: {'role': 'status'},
+                  ),
+                SnapshotTerminal(
+                  '${stream['output'] ?? ''}',
+                  key: ValueKey('${job['id']}-${stream['profile_id']}'),
                 ),
-              ], classes: 'collab-keys'),
-          ], iconName: 'terminal'),
+
+                if (stream['input_result'] is Map)
+                  note(
+                    'Terminal response: ${stream['input_result']['state']} ${stream['input_result']['error'] ?? ''}',
+                  ),
+
+                if (stream['status'] == 'blocked')
+                  el('div', [
+                    if (stream['console_token'] != null)
+                      button(
+                        'Respond to permission or question',
+                        () => respondToBlock(stream),
+                        disabled: busy || pending != null,
+                        small: true,
+                        primary: true,
+                      ),
+                    el(
+                      'div',
+                      [
+                        for (final key in [
+                          'up',
+                          'down',
+                          'tab',
+                          'enter',
+                          'esc',
+                          'ctrl+c',
+                        ])
+                          el(
+                            'button',
+                            [text(key)],
+                            classes: 'btn-group__btn collab-keys__key',
+                            attributes: {
+                              'type': 'button',
+                              if (busy || pending != null) 'disabled': '',
+                            },
+                            events: {
+                              'click': (_) => submit('input', {
+                                'profile_id': stream['profile_id'],
+                                'key': key,
+                                if (stream['console_token'] != null)
+                                  'console_token': stream['console_token'],
+                              }),
+                            },
+                          ),
+                      ],
+                      classes: 'btn-group',
+                      attributes: {
+                        'role': 'group',
+                        'aria-label': 'Terminal keys',
+                      },
+                    ),
+                  ], classes: 'collab-keys'),
+              ], iconName: 'terminal'),
+            ],
+          ),
       ],
       iconName: 'activity',
       classes: 'group-live',

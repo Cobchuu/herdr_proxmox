@@ -107,10 +107,12 @@ a.runtime-pill:hover { background: var(--color-hover); border-color: var(--color
   background: var(--color-border); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs);
 }
 @media (min-width: 768px) { .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (min-width: 1280px) { .stat-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+/* Three segments, not the reference's four: connection is already the topbar
+   pill and the "Updated" stamp, so it is not repeated here. */
+@media (min-width: 1280px) { .stat-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @container stat-strip (max-width: 559.98px) { .stat-strip { grid-template-columns: minmax(0, 1fr); } }
 @container stat-strip (min-width: 560px) { .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@container stat-strip (min-width: 800px) { .stat-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container stat-strip (min-width: 800px) { .stat-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @container stat-strip (min-width: 800px) and (max-width: 999.98px) {
   .stat-strip__item { padding-inline: var(--space-4) var(--space-3); }
   .stat-strip__chevron { display: none; }

@@ -213,7 +213,7 @@ class ListView extends StatelessComponent {
     classes: 'native-page',
     attributes: {
       'style':
-          'display:flex;flex-direction:column;gap:12px;min-width:0;padding:${padding.css};',
+          'display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;overflow:visible;padding:${padding.css};',
     },
     children: children,
   );
@@ -279,7 +279,13 @@ class SingleChildScrollView extends StatelessComponent {
   @override
   Component build(BuildContext context) => Component.element(
     tag: 'div',
-    attributes: {'style': 'overflow:auto;max-width:100%;'},
+    // The application main and the constrained dialog already own scrolling.
+    // Unbounded content grows inside that owner instead of creating another
+    // scrolling box. Constrained evidence outputs retain their own CSS limit.
+    classes: 'native-scroll-content',
+    attributes: {
+      'style': 'overflow:visible;min-width:0;min-height:0;max-width:100%;',
+    },
     children: [child],
   );
 }

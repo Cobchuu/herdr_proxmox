@@ -74,15 +74,11 @@ String activityLabel(String activity) => switch (activity) {
   'attention' => 'Needs attention',
   _ => 'No live session',
 };
-String activityTone(String activity) => switch (activity) {
-  'working' => 'success',
-  'attention' => 'danger',
-  _ => 'neutral',
-};
+String activityTone(String activity) => agentActivityTone(activity);
 String activityShape(String activity) => switch (activity) {
   'working' => 'filled',
   'attention' => 'diamond',
-  'idle' => 'hollow',
+  'idle' => 'filled',
   _ => 'dash',
 };
 

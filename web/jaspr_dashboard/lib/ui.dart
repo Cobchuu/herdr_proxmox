@@ -133,20 +133,23 @@ Component badge(String label, {String tone = 'neutral', String? shape}) => el(
 
 /// Status dot whose shape repeats the state without color (WCAG 1.4.1):
 /// working = filled, idle = ring, attention = diamond, offline = dash.
+/// Keep the original runtime palette: idle green, working blue, attention amber.
+String agentActivityTone(String activity) => switch (activity) {
+  'idle' => 'success',
+  'working' => 'info',
+  'attention' => 'warning',
+  _ => 'neutral',
+};
+
 Component statusDot(String activity, {String? tone}) => el(
   'span',
   [],
   classes: 'status-dot',
   attributes: {
-    'data-tone':
-        tone ??
-        switch (activity) {
-          'working' => 'success',
-          'attention' => 'danger',
-          _ => 'neutral',
-        },
+    'data-tone': tone ?? agentActivityTone(activity),
+    'data-activity': activity,
     'data-shape': switch (activity) {
-      'working' => 'filled',
+      'working' || 'idle' => 'filled',
       'attention' => 'diamond',
       'offline' => 'dash',
       _ => 'hollow',
@@ -616,4 +619,4 @@ Component buildDialogs() => el('div', [
         },
       },
     ),
-]);
+], classes: 'dialog-host');

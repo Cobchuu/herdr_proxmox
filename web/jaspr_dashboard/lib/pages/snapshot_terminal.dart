@@ -21,8 +21,9 @@ class _SnapshotTerminalState extends State<SnapshotTerminal> {
   }
 
   void update() {
-    terminal.clear();
-    terminal.write(component.output.replaceAll(RegExp(r'(?<!\r)\n'), '\r\n'));
+    terminal.replaceSnapshot(
+      component.output.replaceAll(RegExp(r'(?<!\r)\n'), '\r\n'),
+    );
   }
 
   @override
@@ -38,6 +39,10 @@ class _SnapshotTerminalState extends State<SnapshotTerminal> {
   }
 
   @override
-  Component build(BuildContext context) =>
-      TerminalView(terminal, height: component.height, autofocus: false);
+  Component build(BuildContext context) => TerminalView(
+    terminal,
+    height: component.height,
+    autofocus: false,
+    label: 'Retained terminal output',
+  );
 }

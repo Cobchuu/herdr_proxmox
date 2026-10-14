@@ -446,6 +446,9 @@ class _KnowledgePageState extends State<KnowledgePage> {
           attributes: {
             'aria-expanded': '$open',
             'aria-controls': 'knowledge-record-$id',
+            // Keep the absolute accessible metadata inside its disclosure;
+            // otherwise its static position can escape the page's scroller.
+            'style': 'position:relative;',
           },
           onClick: () => setState(() {
             if (!expanded.remove(id)) expanded.add(id);

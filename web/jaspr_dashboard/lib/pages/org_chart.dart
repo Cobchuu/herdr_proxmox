@@ -145,6 +145,10 @@ class _OrgChartState extends State<OrgChart> {
   double zoom = 1, offsetX = 0, offsetY = 0;
   double measuredWidth = 0, measuredHeight = 0;
   final pointers = <int, (double, double)>{};
+  final pointerOrigins = <int, (double, double)>{};
+  bool dragging = false;
+  bool suppressPointerClick = false;
+  Timer? clickSuppression;
   late ChartLayout layout;
   late List<Json> profiles;
   String signature = '';
@@ -194,7 +198,7 @@ class _OrgChartState extends State<OrgChart> {
       scheduleMicrotask(() {
         final viewport =
             web.document.getElementById(viewportId) as web.HTMLElement?;
-        if (mounted && viewport != null) fit(viewport);
+        if (mounted && fitting && viewport != null) fit(viewport);
       });
   }
 
@@ -203,6 +207,8 @@ class _OrgChartState extends State<OrgChart> {
     mounting?.cancel();
     observer?.disconnect();
     pointers.clear();
+    pointerOrigins.clear();
+    clickSuppression?.cancel();
     super.dispose();
   }
 
@@ -263,14 +269,29 @@ class _OrgChartState extends State<OrgChart> {
 
   void pointerDown(web.Event event) {
     final e = event as web.PointerEvent;
-    if (e.button != 0 || (e.target as web.Element?)?.closest('button') != null)
+    if (e.button != 0) return;
+    // A new deliberate press must remain clickable after a previous pan.
+    if (pointers.isEmpty) {
+      suppressPointerClick = false;
+      clickSuppression?.cancel();
+    }
+    final target = e.target;
+    if (target is web.Element &&
+        target.closest('.org-chart-node__configure') != null)
       return;
     final viewport = e.currentTarget as web.HTMLElement;
     pointers[e.pointerId] = (e.clientX.toDouble(), e.clientY.toDouble());
+    pointerOrigins[e.pointerId] = pointers[e.pointerId]!;
+    if (pointers.length > 1) beginDrag(viewport);
+  }
+
+  void beginDrag(web.HTMLElement viewport) {
+    dragging = true;
     // Synthetic events and a pointer already cancelled by the browser do not
     // have an active capture target. Panning can still finish in this viewport.
     try {
-      viewport.setPointerCapture(e.pointerId);
+      for (final pointerId in pointers.keys)
+        viewport.setPointerCapture(pointerId);
     } catch (_) {}
     viewport.focus();
     viewport.setAttribute('data-panning', '');
@@ -278,9 +299,22 @@ class _OrgChartState extends State<OrgChart> {
 
   void pointerMove(web.Event event) {
     final e = event as web.PointerEvent;
-    final previous = pointers[e.pointerId];
+    var previous = pointers[e.pointerId];
     if (previous == null) return;
     final next = (e.clientX.toDouble(), e.clientY.toDouble());
+    if (!dragging) {
+      final origin = pointerOrigins[e.pointerId]!;
+      if (math.sqrt(
+            math.pow(next.$1 - origin.$1, 2) + math.pow(next.$2 - origin.$2, 2),
+          ) <
+          5) {
+        pointers[e.pointerId] = next;
+        return;
+      }
+      previous = origin;
+      beginDrag(e.currentTarget as web.HTMLElement);
+    }
+    e.preventDefault();
     if (pointers.length == 2) {
       final other = pointers.entries
           .firstWhere((p) => p.key != e.pointerId)
@@ -300,10 +334,11 @@ class _OrgChartState extends State<OrgChart> {
           (next.$2 + other.$2) / 2 - rect.top,
         );
     } else {
+      final deltaX = next.$1 - previous.$1, deltaY = next.$2 - previous.$2;
       setState(() {
         fitting = false;
-        offsetX += next.$1 - previous.$1;
-        offsetY += next.$2 - previous.$2;
+        offsetX += deltaX;
+        offsetY += deltaY;
       });
     }
     pointers[e.pointerId] = next;
@@ -312,8 +347,31 @@ class _OrgChartState extends State<OrgChart> {
   void pointerEnd(web.Event event) {
     final e = event as web.PointerEvent;
     pointers.remove(e.pointerId);
-    if (pointers.isEmpty)
+    pointerOrigins.remove(e.pointerId);
+    if (pointers.isEmpty) {
       (e.currentTarget as web.HTMLElement).removeAttribute('data-panning');
+      if (dragging) {
+        suppressPointerClick = true;
+        clickSuppression?.cancel();
+        clickSuppression = Timer(
+          const Duration(milliseconds: 400),
+          () => suppressPointerClick = false,
+        );
+      }
+      dragging = false;
+    }
+  }
+
+  void handleActivation(web.Event event, void Function() action) {
+    // Keyboard/programmatic activation is independent of the mouse gesture.
+    if (suppressPointerClick && event is web.MouseEvent && event.detail > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressPointerClick = false;
+      clickSuppression?.cancel();
+      return;
+    }
+    action();
   }
 
   String edge((double, double) parent, (double, double) child) {
@@ -364,7 +422,10 @@ class _OrgChartState extends State<OrgChart> {
               [text(name)],
               classes: 'org-chart-node__name',
               attributes: {'type': 'button', 'title': name, 'aria-label': name},
-              events: {'click': (_) => component.onSelect(profile)},
+              events: {
+                'click': (e) =>
+                    handleActivation(e, () => component.onSelect(profile)),
+              },
             ),
             el(
               'span',
@@ -383,7 +444,10 @@ class _OrgChartState extends State<OrgChart> {
                 'title': 'Configure $name',
                 'aria-label': 'Configure $name',
               },
-              events: {'click': (_) => component.onConfigure!(profile)},
+              events: {
+                'click': (e) =>
+                    handleActivation(e, () => component.onConfigure!(profile)),
+              },
             ),
         ], classes: 'org-chart-node__head'),
         el('div', [
@@ -475,7 +539,12 @@ class _OrgChartState extends State<OrgChart> {
                 'aria-label': 'Open group ${group['name']}',
                 if (component.onSelectGroup == null) 'disabled': '',
               },
-              events: {'click': (_) => component.onSelectGroup?.call(group)},
+              events: {
+                'click': (e) => handleActivation(
+                  e,
+                  () => component.onSelectGroup?.call(group),
+                ),
+              },
             ),
             el('span', [
               text('Discussion group · ${members.length} members'),
@@ -650,6 +719,10 @@ class _OrgChartState extends State<OrgChart> {
           'pointermove': pointerMove,
           'pointerup': pointerEnd,
           'pointercancel': pointerEnd,
+          'lostpointercapture': pointerEnd,
+          'pointerleave': (e) {
+            if (!dragging) pointerEnd(e);
+          },
           'wheel': (event) {
             if (empty) return;
             final e = event as web.WheelEvent;

@@ -98,3 +98,20 @@ terminal resize/output retention and queued-input cleanup.
 No release publication or live Proxmox deployment is part of these local changes.
 A live-host smoke test remains a deployment check, especially for real provider
 terminals, container networking, toolchain installation and release promotion.
+
+## UI regression verification
+
+The native UI uses one page scroll surface; disclosure accessibility text is
+contained, and bounded evidence/terminal panels and dialogs retain their own
+intentional scrolling. Verified runtime ownership drives the original activity
+palette: idle/done green, working blue, and attention amber.
+
+Group terminals render retained output independently from optional errors,
+including healthy `error: ""` responses. Their DOM emulators attach when visible,
+refresh when disclosures reopen, and remain bound to each stream across polling
+and reordering. Chart pan gestures work from the background, cards and names;
+a completed drag does not open a console or group by accident.
+
+The regression run passed 85 isolated Chrome tests, 10 VM tests, repository-wide
+Dart analysis and optimized compilation. Browser regressions use independent
+fixtures with simulated API responses, including real xterm DOM rendering.

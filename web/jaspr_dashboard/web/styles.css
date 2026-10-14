@@ -10,8 +10,9 @@
 
 /* ---- Reset + typography --------------------------------------------------- */
 *, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html { height: 100%; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
+  height: 100%; overflow: hidden;
   margin: 0; background: var(--color-canvas); color: var(--color-text);
   font-family: var(--font-sans); font-size: var(--text-base-size); line-height: var(--text-base-leading);
   font-feature-settings: "cv11"; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
@@ -48,7 +49,7 @@ code { padding: 1px var(--space-1-5); border-radius: var(--radius-xs); backgroun
 /* ---- App shell: [rail 64] [sidebar 264] [workspace 1fr] ------------------
    The workspace column scrolls inside itself (#content); from lg up the
    topbar toggle collapses the sidebar (html[data-sidebar="collapsed"]).  */
-.app { display: grid; grid-template-columns: var(--rail-width) var(--sidebar-width) minmax(0, 1fr); height: 100dvh; }
+.app { display: grid; grid-template-columns: var(--rail-width) var(--sidebar-width) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100dvh; min-height: 0; overflow: hidden; }
 
 .rail {
   display: flex; flex-direction: column; align-items: center; height: 100dvh; padding-bottom: var(--space-4); overflow-y: auto;
@@ -112,7 +113,7 @@ code { padding: 1px var(--space-1-5); border-radius: var(--radius-xs); backgroun
 .user-card__name { overflow-wrap: anywhere; font-weight: var(--weight-semibold); color: var(--color-text); }
 .user-card__meta { font-size: var(--text-xs-size); line-height: var(--text-xs-leading); color: var(--color-text-tertiary); }
 
-.workspace { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: 100dvh; min-width: 0; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: 100dvh; min-width: 0; min-height: 0; overflow: hidden; }
 .topbar {
   position: relative; z-index: var(--z-sticky); display: flex; align-items: center; gap: var(--space-3); height: var(--topbar-height);
   padding-inline: max(var(--space-8), calc((100% - var(--content-max)) / 2 + var(--space-8)));
@@ -134,7 +135,7 @@ code { padding: 1px var(--space-1-5); border-radius: var(--radius-xs); backgroun
 .topbar__actions { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
 .notif { position: relative; }
 .notif__dot { position: absolute; top: var(--space-2); right: var(--space-2); width: 8px; height: 8px; border-radius: var(--radius-full); background: var(--color-danger); box-shadow: 0 0 0 2px var(--color-surface); }
-.main-content { overflow: auto; padding: var(--space-8); min-width: 0; scroll-padding-top: var(--space-4); }
+.main-content { position: relative; overflow: auto; padding: var(--space-8); min-width: 0; min-height: 0; scroll-padding-top: var(--space-4); overscroll-behavior: contain; }
 .main-content:focus { outline: none; }
 .main-content > div { max-width: var(--content-max); margin: 0 auto; }
 .scrim { position: fixed; inset: 0; z-index: var(--z-overlay); padding: 0; border: 0; border-radius: 0; background: var(--color-scrim); box-shadow: none; }
@@ -295,6 +296,7 @@ details.card > summary ~ :last-child { margin-bottom: var(--space-5); }
 .organization-page > details[open] > summary { margin-bottom: var(--space-4); }
 
 /* ---- Dialog layer (ui.dart showDialog) with the Phase 2 dialog look ---------- */
+.dialog-host { display: contents; }
 .dialog-layer { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: var(--space-6); background: var(--color-scrim); overflow: auto; }
 .dialog-layer:not(:last-child) { pointer-events: none; }
 .dialog {

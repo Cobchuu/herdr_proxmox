@@ -13,6 +13,7 @@ extension type _Xterm._(JSObject _) implements JSObject {
   external void clear();
   external void reset();
   external void resize(JSNumber cols, JSNumber rows);
+  external void refresh(JSNumber start, JSNumber end);
   external void focus();
   external void dispose();
   external JSObject onData(JSFunction listener);
@@ -90,6 +91,13 @@ class BrowserTerminal {
     if (!_disposed) _term.reset();
   }
 
+  /// Queue complete inspections atomically. Resetting synchronously before an
+  /// asynchronous write lets an older queued inspection append after the reset.
+  /// RIS travels through the same VT parser queue as its replacement output.
+  void replaceSnapshot(String value) {
+    write('\x1bc$value');
+  }
+
   void focus() {
     if (!_disposed) _term.focus();
   }
@@ -136,10 +144,12 @@ class TerminalView extends StatefulComponent {
     super.key,
     this.height = 400,
     this.autofocus = true,
+    this.label = 'Interactive terminal',
   });
   final BrowserTerminal terminal;
   final int height;
   final bool autofocus;
+  final String label;
   @override
   State<TerminalView> createState() => _TerminalViewState();
 }
@@ -149,33 +159,63 @@ class _TerminalViewState extends State<TerminalView> {
   late final String id = 'dom-terminal-${nextId++}';
   web.ResizeObserver? observer;
   Timer? mounting;
-  bool opened = false;
+  BrowserTerminal? attached;
   @override
   void initState() {
     super.initState();
-    // The host must be attached before xterm can measure DOM text cells.
+    // The host must exist before observing it. Closed disclosures deliberately
+    // keep it at zero size, so opening xterm waits until a visible layout exists.
     mounting = Timer.periodic(const Duration(milliseconds: 20), (_) {
       final host = web.document.getElementById(id) as web.HTMLElement?;
-      if (!mounted || host == null || opened) return;
-      opened = true;
+      if (!mounted || host == null) return;
       mounting?.cancel();
-      final existing = component.terminal._term.element;
-      if (existing == null) {
-        component.terminal._term.open(host);
-      } else {
-        // Closing and reopening a CLI setup uses the same emulator instance.
-        // Reparent its DOM rather than calling open twice and losing handlers.
-        host.appendChild(existing);
-      }
       observer = web.ResizeObserver(
-        ((JSArray<web.ResizeObserverEntry> _, web.ResizeObserver __) => fit(
-          host,
-        )).toJS,
+        ((JSArray<web.ResizeObserverEntry> _, web.ResizeObserver __) =>
+                attachAndFit(host))
+            .toJS,
       );
       observer!.observe(host);
-      fit(host);
-      if (component.autofocus) component.terminal.focus();
+      attachAndFit(host);
     });
+  }
+
+  @override
+  void didUpdateComponent(TerminalView old) {
+    super.didUpdateComponent(old);
+    if (old.terminal != component.terminal || old.height != component.height) {
+      // A stream can replace its controller while Jaspr retains the host state.
+      // Rebind after its new attributes and owner have finished rendering.
+      Timer.run(() {
+        if (!mounted) return;
+        final host = web.document.getElementById(id) as web.HTMLElement?;
+        if (host != null) attachAndFit(host);
+      });
+    }
+  }
+
+  void attachAndFit(web.HTMLElement host) {
+    if (!mounted || component.terminal._disposed) return;
+    final terminal = component.terminal;
+    if (attached != terminal) {
+      host.textContent = '';
+      attached = null;
+    }
+    if (host.clientWidth <= 0 || host.clientHeight <= 0) return;
+    if (attached == null) {
+      final existing = terminal._term.element;
+      if (existing == null) {
+        terminal._term.open(host);
+      } else {
+        // A reopened CLI setup retains its emulator, selection and listeners.
+        host.appendChild(existing);
+      }
+      attached = terminal;
+      if (component.autofocus) terminal.focus();
+    }
+    fit(host);
+    // Revealing a disclosure may leave unchanged row/column counts. Explicit
+    // refresh still paints snapshots written while its panel was hidden.
+    terminal._term.refresh(0.toJS, (terminal.viewHeight - 1).toJS);
   }
 
   void fit(web.HTMLElement host) {
@@ -208,7 +248,7 @@ class _TerminalViewState extends State<TerminalView> {
     classes: 'terminal-host',
     attributes: {
       'style': 'height:${component.height}px;padding:8px;overflow:hidden',
-      'aria-label': 'Interactive terminal',
+      'aria-label': component.label,
     },
     [],
   );

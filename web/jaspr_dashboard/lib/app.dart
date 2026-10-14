@@ -596,19 +596,6 @@ class _DashboardAppState extends State<DashboardApp> {
             ),
           ], classes: 'sidebar__brand'),
           el('div', [
-            if (org != null)
-              el('div', [
-                roleTile(org['name'], role: 'lead', size: 'sm'),
-                select(
-                  'Organization',
-                  '${org['id']}',
-                  {for (final item in orgs) '${item['id']}': '${item['name']}'},
-                  (value) {
-                    connection.selectedOrganization.value = value;
-                    navigate('/organization');
-                  },
-                ),
-              ], classes: 'team-switcher'),
             el('div', [
               icon('search', classes: 'icon--sm search-field__icon'),
               field(

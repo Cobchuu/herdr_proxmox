@@ -135,8 +135,13 @@ void main() {
       expect(elements('canvas'), isEmpty);
       expectFitted();
       expect(viewport.clientHeight, lessThan(500));
-      expect(zoom(), closeTo(1,.01));
-      expect(elements('.org-chart-node').cast<web.HTMLElement>().map((n)=>n.offsetTop).toSet().length,2);
+      expect(zoom(), closeTo(1, .01));
+      expect(
+        elements(
+          '.org-chart-node',
+        ).cast<web.HTMLElement>().map((n) => n.offsetTop).toSet().length,
+        2,
+      );
       for (final node in elements('.org-chart-node').cast<web.HTMLElement>()) {
         expect(node.offsetWidth, 232);
         expect(node.offsetHeight, 144);
@@ -182,6 +187,307 @@ void main() {
       }
       expectFitted();
       expect(elements('.org-chart-node').length, 6);
+    },
+  );
+  test(
+    'dragging from an agent name pans and suppresses only the release click',
+    () async {
+      final selected = <String>[];
+      await mount(
+        () => OrgChart(
+          profiles: [profile('Lead')],
+          agents: const [],
+          jobs: const [],
+          onSelect: (p) => selected.add('${p['id']}'),
+        ),
+      );
+      final name =
+          elements('.org-chart-node__name').single as web.HTMLButtonElement;
+      final before = offset('x');
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointerdown',
+          web.PointerEventInit(
+            pointerId: 3,
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointermove',
+          web.PointerEventInit(
+            pointerId: 3,
+            clientX: 170,
+            clientY: 120,
+            bubbles: true,
+            cancelable: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointerup',
+          web.PointerEventInit(
+            pointerId: 3,
+            clientX: 170,
+            clientY: 120,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.MouseEvent(
+          'click',
+          web.MouseEventInit(detail: 1, bubbles: true, cancelable: true),
+        ),
+      );
+      await settle();
+      expect(offset('x'), closeTo(before + 70, .01));
+      expect(selected, isEmpty);
+      // The next intentional press works immediately; there is no dead-click
+      // timeout for users who open a console after positioning the chart.
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointerdown',
+          web.PointerEventInit(
+            pointerId: 3,
+            button: 0,
+            clientX: 170,
+            clientY: 120,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointerup',
+          web.PointerEventInit(
+            pointerId: 3,
+            clientX: 170,
+            clientY: 120,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.MouseEvent(
+          'click',
+          web.MouseEventInit(detail: 1, bubbles: true, cancelable: true),
+        ),
+      );
+      await settle();
+      expect(selected, ['Lead']);
+    },
+  );
+  test(
+    'small pointer motion remains a click; group names also pan without navigation',
+    () async {
+      var opened = 0;
+      var selected = 0;
+      await mount(
+        () => OrgChart(
+          profiles: [profile('Lead')],
+          agents: const [],
+          jobs: const [],
+          groups: [
+            {
+              'id': 'review',
+              'name': 'Review',
+              'members': ['Lead'],
+            },
+          ],
+          onSelect: (_) => selected++,
+          onSelectGroup: (_) => opened++,
+        ),
+      );
+      final name =
+          elements('.org-chart-node--agent .org-chart-node__name').single
+              as web.HTMLButtonElement;
+      final before = offset('x');
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointerdown',
+          web.PointerEventInit(
+            pointerId: 4,
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointermove',
+          web.PointerEventInit(
+            pointerId: 4,
+            clientX: 102,
+            clientY: 101,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.PointerEvent(
+          'pointerup',
+          web.PointerEventInit(
+            pointerId: 4,
+            clientX: 102,
+            clientY: 101,
+            bubbles: true,
+          ),
+        ),
+      );
+      name.dispatchEvent(
+        web.MouseEvent('click', web.MouseEventInit(detail: 1, bubbles: true)),
+      );
+      await settle();
+      expect(selected, 1);
+      expect(offset('x'), before);
+      final group =
+          elements('.org-chart-node--group .org-chart-node__name').single
+              as web.HTMLButtonElement;
+      group.dispatchEvent(
+        web.PointerEvent(
+          'pointerdown',
+          web.PointerEventInit(
+            pointerId: 5,
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      group.dispatchEvent(
+        web.PointerEvent(
+          'pointermove',
+          web.PointerEventInit(
+            pointerId: 5,
+            clientX: 160,
+            clientY: 100,
+            bubbles: true,
+            cancelable: true,
+          ),
+        ),
+      );
+      group.dispatchEvent(
+        web.PointerEvent(
+          'pointerup',
+          web.PointerEventInit(
+            pointerId: 5,
+            clientX: 160,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      group.dispatchEvent(
+        web.MouseEvent('click', web.MouseEventInit(detail: 1, bubbles: true)),
+      );
+      await settle();
+      expect(opened, 0);
+      expect(offset('x'), closeTo(before + 60, .01));
+      group.click();
+      await settle();
+      expect(opened, 1);
+    },
+  );
+  test(
+    'configuration stays a direct click and cancelled drags do not leave a stuck gesture',
+    () async {
+      var configured = 0;
+      await mount(
+        () => OrgChart(
+          profiles: [profile('Lead')],
+          agents: const [],
+          jobs: const [],
+          onSelect: (_) {},
+          onConfigure: (_) => configured++,
+        ),
+      );
+      final configure =
+          elements('.org-chart-node__configure').single
+              as web.HTMLButtonElement;
+      final before = offset('x');
+      configure.dispatchEvent(
+        web.PointerEvent(
+          'pointerdown',
+          web.PointerEventInit(
+            pointerId: 6,
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      configure.dispatchEvent(
+        web.PointerEvent(
+          'pointermove',
+          web.PointerEventInit(
+            pointerId: 6,
+            clientX: 150,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      configure.dispatchEvent(
+        web.PointerEvent(
+          'pointerup',
+          web.PointerEventInit(
+            pointerId: 6,
+            clientX: 150,
+            clientY: 100,
+            bubbles: true,
+          ),
+        ),
+      );
+      configure.click();
+      await settle();
+      expect(configured, 1);
+      expect(offset('x'), before);
+      viewport.dispatchEvent(
+        web.PointerEvent(
+          'pointerdown',
+          web.PointerEventInit(
+            pointerId: 7,
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+          ),
+        ),
+      );
+      viewport.dispatchEvent(
+        web.PointerEvent(
+          'pointermove',
+          web.PointerEventInit(
+            pointerId: 7,
+            clientX: 130,
+            clientY: 100,
+            cancelable: true,
+          ),
+        ),
+      );
+      viewport.dispatchEvent(
+        web.PointerEvent('pointercancel', web.PointerEventInit(pointerId: 7)),
+      );
+      await settle();
+      expect(viewport.hasAttribute('data-panning'), false);
+      final after = offset('x');
+      viewport.dispatchEvent(
+        web.PointerEvent(
+          'pointermove',
+          web.PointerEventInit(pointerId: 7, clientX: 200, clientY: 100),
+        ),
+      );
+      await settle();
+      expect(offset('x'), after);
     },
   );
   test(

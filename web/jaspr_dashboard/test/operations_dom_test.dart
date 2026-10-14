@@ -50,17 +50,19 @@ class _HostState extends State<_Host> {
       dom.div([component.child, ui.buildDialogs()]);
 }
 
-  Future<void> settle([int ms = 50]) =>
-      Future<void>.delayed(Duration(milliseconds: ms));
-  /// Waits for a condition the browser reaches across frames — poll responses
-  /// and terminal writes land asynchronously, so a fixed delay is a race that a
-  /// loaded machine loses.
-  Future<void> until(bool Function() condition, {int timeoutMs = 5000}) async {
-    final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
-    while (!condition() && DateTime.now().isBefore(deadline)) {
-      await settle(25);
-    }
+Future<void> settle([int ms = 50]) =>
+    Future<void>.delayed(Duration(milliseconds: ms));
+
+/// Waits for a condition the browser reaches across frames — poll responses
+/// and terminal writes land asynchronously, so a fixed delay is a race that a
+/// loaded machine loses.
+Future<void> until(bool Function() condition, {int timeoutMs = 5000}) async {
+  final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
+  while (!condition() && DateTime.now().isBefore(deadline)) {
+    await settle(25);
   }
+}
+
 Iterable<web.HTMLElement> elements(String selector) sync* {
   final nodes = web.document.querySelectorAll('#operations-test $selector');
   for (var i = 0; i < nodes.length; i++) yield nodes.item(i) as web.HTMLElement;
@@ -523,9 +525,15 @@ void main() {
         TerminalView(terminal, height: 340),
         (_) => {'workspaces': [], 'agents': []},
       );
-      await settle(150);
+      await until(() => elements('.xterm-rows').isNotEmpty);
       terminal.write('\x1b[31mRed output\x1b[0m\r\nsecond line');
-      await settle();
+      await until(
+        () =>
+            elements(
+              '.xterm-rows',
+            ).single.textContent?.contains('Red output') ==
+            true,
+      );
       expect(
         elements('.xterm-rows').single.textContent,
         contains('Red output'),
@@ -576,12 +584,12 @@ void main() {
         if (r.url.path == '/api/ssh-access') return {'key_count': 0};
         return {'workspaces': [], 'agents': []};
       });
-        await click('Connect account');
-        await until(
-          () => elements(
-            '.xterm-rows',
-          ).any((e) => (e.textContent ?? '').contains('session')),
-        );
+      await click('Connect account');
+      await until(
+        () => elements(
+          '.xterm-rows',
+        ).any((e) => (e.textContent ?? '').contains('session')),
+      );
       await type('Authorization code or API key', 'hidden-code');
       await click('Send to terminal');
       expect(posts('cli-setup/input').single['id'], 'setup-identity');
@@ -627,12 +635,12 @@ void main() {
         if (r.url.path == '/api/ssh-access') return {'key_count': 0};
         return {'workspaces': [], 'agents': []};
       });
-        await click('Connect account');
-        await until(
-          () => elements(
-            '.xterm-rows',
-          ).any((e) => (e.textContent ?? '').contains('session')),
-        );
+      await click('Connect account');
+      await until(
+        () => elements(
+          '.xterm-rows',
+        ).any((e) => (e.textContent ?? '').contains('session')),
+      );
       await click('↑ Up');
       await click('↓ Down');
       await click('Close terminal');
@@ -640,12 +648,12 @@ void main() {
       await settle();
       expect(posts('cli-setup/input'), hasLength(1));
       expect(posts('cli-setup/close').single['id'], 'setup-1');
-        await click('Connect account');
-        await until(
-          () => elements(
-            '.xterm-rows',
-          ).any((e) => (e.textContent ?? '').contains('session')),
-        );
+      await click('Connect account');
+      await until(
+        () => elements(
+          '.xterm-rows',
+        ).any((e) => (e.textContent ?? '').contains('session')),
+      );
       expect(elements('.xterm-rows').single.textContent, contains('session 2'));
       expect(elements('canvas'), isEmpty);
     },

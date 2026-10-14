@@ -68,12 +68,13 @@ Component _agentPill(Map<String, dynamic> agent) {
     classes: 'status',
     attributes: {
       'data-tone': switch (activity) {
-        'working' => 'success',
-        'attention' => 'danger',
+        'working' => 'info',
+        'idle' => 'success',
+        'attention' => 'warning',
         _ => toneFor(status) == 'warning' ? 'warning' : 'neutral',
       },
       'data-shape': switch (activity) {
-        'working' => 'filled',
+        'working' || 'idle' => 'filled',
         'attention' => 'diamond',
         'offline' => 'dash',
         _ => 'hollow',
@@ -339,14 +340,6 @@ class _OverviewPageState extends State<OverviewPage> {
             meta: workspaces == 0
                 ? 'Create one to get started'
                 : '${_plural(assigned, 'agent')} assigned',
-          ),
-          _stat(
-            iconName: state.connected ? 'wifi' : 'wifi-off',
-            value: state.connected ? 'Online' : 'Offline',
-            label: 'connection',
-            meta: state.refreshed == null
-                ? 'Waiting for first update'
-                : 'Updated ${_clock(state.refreshed!)}',
           ),
         ],
         classes: 'stat-strip',

@@ -47,6 +47,7 @@ void main() {
   late DashboardBloc connection;
   final requests = <http.Request>[];
   bool authenticated = true;
+  List<Map<String, dynamic>> liveAgents = [];
   Completer<void>? switchAccount;
   Map<String, dynamic> directory() => {
     'organizations': [
@@ -94,7 +95,7 @@ void main() {
         'cwd': '/projects/repo',
       },
     ],
-    'agents': [],
+    'agents': liveAgents,
     'herdr_server': 'running',
   };
 
@@ -106,6 +107,7 @@ void main() {
   });
   setUp(() {
     requests.clear();
+    liveAgents = [];
     authenticated = true;
     switchAccount = null;
     web.window.history.replaceState(null, '', '#/');
@@ -385,6 +387,62 @@ void main() {
       } finally {
         details.setProperty('scrollIntoView'.toJS, original);
       }
+    },
+  );
+  test(
+    'sidebar restores runtime colors and trusts only verified profile ownership',
+    () async {
+      for (final path in [
+        '../web/css/tokens.css',
+        '../web/styles.css',
+        '../web/css/components.css',
+      ]) {
+        final ready = Completer<void>();
+        final stylesheet = web.HTMLLinkElement()
+          ..rel = 'stylesheet'
+          ..href = path;
+        stylesheet.addEventListener(
+          'load',
+          ((web.Event _) => ready.complete()).toJS,
+        );
+        web.document.head!.appendChild(stylesheet);
+        await ready.future.timeout(const Duration(seconds: 5));
+      }
+      liveAgents = [
+        {'profile_id': 'maya', 'agent_status': 'idle'},
+      ];
+      await mount(route: '/knowledge');
+      web.HTMLElement marker() =>
+          nodes('.sidebar a[href="#/agents/maya"] .status-dot').single;
+      expect(marker().getAttribute('data-tone'), 'success');
+      expect(marker().getAttribute('data-shape'), 'filled');
+      final probe = web.HTMLSpanElement()..style.color = 'var(--color-success)';
+      web.document.body!.appendChild(probe);
+      expect(
+        web.window.getComputedStyle(marker()).backgroundColor,
+        web.window.getComputedStyle(probe).color,
+      );
+      probe.remove();
+      for (final entry in {
+        'done': 'success',
+        'working': 'info',
+        'blocked': 'warning',
+      }.entries) {
+        liveAgents = [
+          {'profile_id': 'maya', 'agent_status': entry.key},
+        ];
+        await connection.send(DashboardCommand('refresh'));
+        await settle();
+        expect(marker().getAttribute('data-tone'), entry.value);
+      }
+      // A reused pane/alias without a verified profile binding is not this agent.
+      liveAgents = [
+        {'name': 'Maya', 'pane_id': 'workspace-1:p1', 'agent_status': 'idle'},
+      ];
+      await connection.send(DashboardCommand('refresh'));
+      await settle();
+      expect(marker().getAttribute('data-tone'), 'neutral');
+      expect(marker().getAttribute('data-shape'), 'dash');
     },
   );
 }

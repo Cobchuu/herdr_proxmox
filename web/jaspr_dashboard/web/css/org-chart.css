@@ -29,7 +29,7 @@
 /* ---- Canvas ---------------------------------------------------------------- */
 .organization-chart .org-chart-viewport {
   position: relative; isolation: isolate; overflow: hidden; width: 100%; max-width: 100%; min-height: 0;
-  height: clamp(240px, var(--chart-natural-height, 420px), max(280px, calc(100dvh - 330px)));
+  height: clamp(300px, var(--chart-natural-height, 420px), min(650px, max(300px, calc(100dvh - 180px))));
   border: 0; border-radius: 0; cursor: grab; touch-action: none; outline-offset: -3px;
   background-color: var(--color-surface-sunken);
   background-image: radial-gradient(circle, var(--color-canvas-dot) 1px, transparent 1.5px);
@@ -37,7 +37,7 @@
 }
 .organization-chart .org-chart-viewport[data-panning] { cursor: grabbing; user-select: none; }
 .organization-chart .org-chart-viewport[data-empty] { height: 240px; cursor: default; }
-.org-chart-scene { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+.org-chart-scene { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; user-select: none; }
 .org-chart-edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .org-chart-edge { stroke: var(--color-edge); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
 
@@ -144,7 +144,7 @@
   .org-chart__help { padding: var(--space-2-5) var(--space-4); }
   .org-chart__help > span:first-child { font-size: 0; }
   .org-chart__help > span:first-child::after { content: "Drag or pinch to explore · Tap a name to open"; font-size: var(--text-xs-size); }
-  .organization-chart .org-chart-viewport { height: clamp(240px, var(--chart-natural-height, 360px), max(280px, calc(100dvh - 280px))); }
+  .organization-chart .org-chart-viewport { height: clamp(300px, var(--chart-natural-height, 360px), min(650px, max(300px, calc(100dvh - 180px)))); }
 }
 @media (prefers-reduced-motion: reduce) { .organization-chart .org-chart-node { transition: none; } }
 @media (forced-colors: active) {
