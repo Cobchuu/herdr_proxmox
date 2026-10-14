@@ -1160,6 +1160,26 @@ class _OrganizationFormState extends State<OrganizationForm> {
   String policy = 'balanced';
   String preferredRuntime = '';
   String teamPreset = '';
+  static const resourceLabels = {
+    'max_active_sessions': 'Maximum concurrent sessions',
+    'max_active_meetings': 'Maximum concurrent meetings',
+    'daily_session_cap': 'Sessions per 24 hours',
+  };
+  late final resourceControllers = {
+    for (final entry in {
+      'max_active_sessions': 4,
+      'max_active_meetings': 1,
+      'daily_session_cap': 20,
+    }.entries)
+      entry.key: TextEditingController(
+        text:
+            '${(widget.templates?['resource_defaults'] as Map?)?[entry.key] ?? entry.value}',
+      ),
+  };
+  Map<String, dynamic> get resources => {
+    for (final entry in resourceControllers.entries)
+      entry.key: int.tryParse(entry.value.text) ?? -1,
+  };
   Map<String, dynamic>? team;
   Map<String, dynamic>? lastPreview;
   String? previewError;
@@ -1198,6 +1218,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
           if (preferredRuntime.isNotEmpty) preferredRuntime,
         ],
         'team_preset': teamPreset,
+        'resource_limits': resources,
       });
       if (mounted && epoch == revision)
         setState(() {
@@ -1406,6 +1427,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
     purpose.dispose();
     instructions.dispose();
     project.dispose();
+    for (final controller in resourceControllers.values) controller.dispose();
     super.dispose();
   }
 
@@ -1464,6 +1486,10 @@ class _OrganizationFormState extends State<OrganizationForm> {
                           ..clear()
                           ..addAll(draft.selectedRoles);
                         policy = '${bundle['model_policy']}';
+                        for (final entry in resourceControllers.entries) {
+                          entry.value.text =
+                              '${(bundle['resource_limits'] as Map?)?[entry.key] ?? {'max_active_sessions': 4, 'max_active_meetings': 1, 'daily_session_cap': 20}[entry.key]}';
+                        }
                       }
                       invalidate();
                     }),
@@ -1536,6 +1562,30 @@ class _OrganizationFormState extends State<OrganizationForm> {
                       loading ? 'Checking CLI accounts…' : 'Preview team',
                     ),
                   ),
+                  const Text(
+                    'Resource limits cover every launched session, including idle sessions and review helpers. Use 0 for unlimited.',
+                  ),
+                  for (final entry in resourceControllers.entries)
+                    TextFormField(
+                      controller: entry.value,
+                      decoration: InputDecoration(
+                        labelText: resourceLabels[entry.key],
+                      ),
+                      keyboardType: TextInputType.number,
+                      maxLength: 3,
+                      onChanged: (_) => setState(invalidate),
+                      validator: (v) {
+                        final value = int.tryParse(v ?? '');
+                        final maximum = {
+                          'max_active_sessions': 50,
+                          'max_active_meetings': 10,
+                          'daily_session_cap': 500,
+                        }[entry.key]!;
+                        return value == null || value < 0 || value > maximum
+                            ? 'Use an integer from 0 to $maximum.'
+                            : null;
+                      },
+                    ),
                   DropdownButtonFormField<String>(
                     initialValue: preferredRuntime,
                     decoration: const InputDecoration(
@@ -1566,6 +1616,17 @@ class _OrganizationFormState extends State<OrganizationForm> {
                       style: TextStyle(
                         color: Theme.of(context).colorScheme.error,
                       ),
+                    ),
+                  if (lastPreview != null)
+                    ExpansionTile(
+                      title: const Text('CLI account check from last preview'),
+                      children: [
+                        for (final account
+                            in lastPreview?['accounts'] as List? ?? [])
+                          Text(
+                            '${account['name']}: ${account['available'] == true ? 'Available' : 'Excluded'} · ${account['reason']}',
+                          ),
+                      ],
                     ),
                   for (final warning in team?['warnings'] as List? ?? [])
                     Text('$warning'),
@@ -1620,6 +1681,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                 ],
                 'template_plan': team!['template_plan'],
                 'team_preset': teamPreset,
+                'resource_limits': resources,
               },
             });
           }

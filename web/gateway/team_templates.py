@@ -6,6 +6,7 @@ import json
 
 import model_catalog
 from permissions import permission_mode, accessible_paths
+import template_resources
 
 
 COMMON = (
@@ -85,6 +86,8 @@ BUNDLES = [
 ]
 for bundle in BUNDLES:
     bundle.update(model_policy='balanced', version=1,
+                  resource_limits=dict(max_active_sessions=max(2, min(4, len(bundle['roles']) + 1)),
+                                       max_active_meetings=1, daily_session_cap=max(10, len(bundle['roles']) * 5)),
                   members=[dict(key=r, template_role=r) for r in bundle['roles']])
 BY_BUNDLE = {b['id']: b for b in BUNDLES}
 
@@ -96,7 +99,7 @@ def expand(body):
     if not identifier:
         return dict(body)
     bundle = BY_BUNDLE[identifier]
-    result = {'model_policy': bundle['model_policy'], **body}
+    result = {'model_policy': bundle['model_policy'], 'resource_limits': bundle['resource_limits'], **body}
     if 'template_roles' not in body and 'team_members' not in body:
         result.update(template_roles=list(bundle['roles']), team_members=[dict(s) for s in bundle['members']])
     return result
@@ -195,17 +198,27 @@ def is_free(model):
 
 
 def catalog(cli, projects, project):
-    runtimes, warnings = {}, []
+    runtimes, warnings, accounts = {}, [], []
     for runtime in model_catalog.RUNTIMES:
+        account = dict(runtime=runtime, name=RUNTIME_NAMES[runtime], available=False, model_count=0)
+        accounts.append(account)
         status = cli.status(runtime)
-        if not status.get('installed') or cli.ready(runtime):
+        if not status.get('installed'):
+            account['reason'] = 'CLI is not installed.'
+            continue
+        problem = cli.ready(runtime)
+        if problem:
+            account['reason'] = str(problem)[:500]
             continue
         if runtime in ('codex', 'claude') and status.get('status') != 'configured':
+            account['reason'] = ('Account is not signed in.' if status.get('status') == 'not_configured'
+                                 else 'Sign-in status could not be determined. Inspect CLI accounts.')
             continue
         if runtime == 'opencode':
             try:
                 entry = model_catalog.discover_models(cli, projects, {'runtime': runtime, 'project': project})
             except ValueError:
+                account['reason'] = 'Model discovery failed. Refresh OpenCode models and inspect CLI accounts.'
                 warnings.append('OpenCode model discovery failed; refresh models in the agent editor before using it for presets.')
                 continue
             # The CLI enumerates configured providers, including environment and
@@ -213,6 +226,7 @@ def catalog(cli, projects, project):
             if entry.get('stale'):
                 warnings.append('OpenCode catalog is stale; availability will be checked again at launch.')
             if not entry['models']:
+                account['reason'] = 'No models were returned for the configured providers.'
                 continue
         elif runtime == 'agy':
             entry = dict(model_catalog.curated(runtime), models=[dict(provider='', id='', name='CLI default', reasoning=[])])
@@ -220,7 +234,11 @@ def catalog(cli, projects, project):
         else:
             entry = model_catalog.curated(runtime)
         runtimes[runtime] = entry
-    return dict(runtimes=runtimes, warnings=warnings)
+        account.update(available=True, model_count=len(entry['models']),
+                       reason='CLI-managed model/account; sign-in cannot be verified here.' if runtime == 'agy'
+                       else 'Available catalog; provider entitlements and quotas are not verified.' if runtime == 'opencode'
+                       else 'CLI reports signed in; individual model entitlements are not verified.')
+    return dict(runtimes=runtimes, warnings=warnings, accounts=accounts)
 
 
 def family(model):
@@ -302,6 +320,7 @@ def validate(body):
     if not isinstance(policy, str) or policy not in POLICIES:
         raise ValueError('Choose a supported model policy.')
     preferences(body)
+    template_resources.validate(body.get('resource_limits'))
     if 'team_members' in body:
         specs = member_specs(body)
         derived = list(dict.fromkeys(s['template_role'] for s in specs))
@@ -356,10 +375,12 @@ def plan(body, available):
                             **chosen))
     digest = hashlib.sha256(json.dumps([policy, members], sort_keys=True).encode()).hexdigest()
     return dict(members=members, warnings=available.get('warnings', []), model_policy=policy,
-                runtime_preferences=preferences(body), template_plan=digest, member_specs=specs, runtimes=available['runtimes'])
+                runtime_preferences=preferences(body), resource_limits=template_resources.validate(body.get('resource_limits')),
+                accounts=available.get('accounts', []), template_plan=digest, member_specs=specs, runtimes=available['runtimes'])
 
 
 def snapshot():
     return dict(roles=[dict(role, minimum_capability=ROLE_MINIMUMS[role['id']], persona_instruction=role['persona'],
                            persona=role['persona'] + '\n\n' + COMMON) for role in ROLES],
-                policies=POLICIES, runtime_names=RUNTIME_NAMES, max_members=MAX_MEMBERS, bundles=BUNDLES)
+                policies=POLICIES, runtime_names=RUNTIME_NAMES, max_members=MAX_MEMBERS, bundles=BUNDLES,
+                resource_defaults=template_resources.DEFAULTS, resource_ranges=template_resources.RANGES)

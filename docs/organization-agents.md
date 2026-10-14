@@ -98,6 +98,20 @@ with explicitly insufficient context or no tool calling are excluded; unfamiliar
 models need positive tool/context metadata to establish compatibility. Capability
 tiers are maintained policy heuristics, not measured model benchmarks.
 
+Creation also exposes maximum concurrent sessions (0–50), concurrent meetings
+(0–10), and session starts per rolling 24 hours (0–500). Zero means unlimited.
+Custom teams default to 4 sessions, 1 meeting and 20 starts; team presets supply
+size-appropriate recommendations. These initial limits are saved atomically with
+the roster and are enforced by the existing shared session budget, including
+idle sessions and review helpers. Later administrator changes to automation
+policy take precedence. Changing limits requires another preview.
+
+The preview's CLI account check lists available and excluded CLIs, with reasons
+such as missing installation, missing integration, unknown sign-in or failed
+model discovery. It never copies credentials into a team or template. Reported
+sign-in and catalog availability do not claim that subscription quotas or every
+model entitlement have been verified.
+
 These policies are deterministic recommendations, not billing guarantees or
 benchmarks. They compare reported input/output costs when available; account
 subscriptions, quotas and unknown prices cannot be compared reliably. Free

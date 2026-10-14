@@ -575,7 +575,12 @@ class OrganizationStore:
         project = self.project(text(body, 'project', 2000))
         if self.template_catalog is None:
             raise ValueError('Team presets require CLI account discovery on this gateway.')
-        result = team_templates.plan(dict(body, project=project), self.template_catalog(project))
+        available = self.template_catalog(project)
+        try:
+            result = team_templates.plan(dict(body, project=project), available)
+        except ValueError as error:
+            details = '; '.join(a['name'] + ': ' + a.get('reason', '')[:65] for a in available.get('accounts', []) if not a.get('available'))
+            raise ValueError(str(error) + (' CLI accounts: ' + details if details else '')) from error
         for member in result['members']:
             model_settings(member, member['runtime'])
             if self.model_validator is not None:
@@ -584,7 +589,7 @@ class OrganizationStore:
         result['workflow_plan'], notes = template_workflows.preview(project, self.projects, result['members'])
         result['warnings'] = [*result['warnings'], *notes]
         result['template_plan'] = hashlib.sha256(json.dumps(
-            [policy, result['members'], result['workflow_plan']], sort_keys=True).encode()).hexdigest()
+            [policy, result['members'], result['workflow_plan'], result['resource_limits']], sort_keys=True).encode()).hexdigest()
         return result
 
     def _action(self, action, body):
@@ -625,7 +630,7 @@ class OrganizationStore:
                         return json.loads(existing['response'])
                 planned = self.team_plan(plan_body)
                 if body.get('template_plan') and body['template_plan'] != planned['template_plan']:
-                    raise ValueError('CLI accounts or models changed since the team preview. Preview the team again before creating the organization.')
+                    raise ValueError('Team settings or CLI accounts/models changed since the team preview. Preview the team again before creating the organization.')
         submitted = None
         with self.lock, closing(self.connect()) as db, db:
             existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
@@ -641,10 +646,11 @@ class OrganizationStore:
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
                 if previous_org:
-                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset') if k in previous_org})
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset', 'resource_limits') if k in previous_org})
                 if planned:
                     item.update(template_roles=list(dict.fromkeys(m['template_role'] for m in planned['members'])), model_policy=planned['model_policy'],
                                 runtime_preferences=planned['runtime_preferences'], team_preset=body.get('team_preset', ''))
+                    item['resource_limits'] = planned['resource_limits']
                 self.put(db, 'organizations', item)
                 if planned:
                     ids = {m['template_key']: uuid.uuid4().hex for m in planned['members']}

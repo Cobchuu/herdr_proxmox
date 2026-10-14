@@ -272,6 +272,30 @@ class TeamTemplateTests(unittest.TestCase):
         profiles = [p for p in self.store.profile_records() if p['organization_id'] == result['id']]
         self.assertEqual([p['name'] for p in profiles], ['Solo specialist'])
 
+    def test_resource_limits_are_validated_and_part_of_the_preview(self):
+        for limits in ({'max_active_sessions': True}, {'daily_session_cap': 501}, {'unknown': 1}, {'max_active_meetings': -1}):
+            with self.subTest(limits=limits), self.assertRaises(ValueError):
+                self.store.team_plan(dict(self.body, resource_limits=limits))
+        preview = self.store.team_plan(self.body)
+        with self.assertRaisesRegex(ValueError, 'changed since.*preview'):
+            self.store.action('save', dict(self.body, template_plan=preview['template_plan'], resource_limits={'max_active_sessions': 2}))
+        body = dict(self.body, resource_limits={'max_active_sessions': 2, 'max_active_meetings': 0, 'daily_session_cap': 10})
+        self.store.action('save', body)
+        self.assertEqual(self.store.organization_records()[0]['resource_limits'], body['resource_limits'])
+
+    def test_account_diagnostics_explain_exclusions_without_exposing_credentials(self):
+        cli = Mock()
+        cli.status.side_effect = lambda r: {'installed': r != 'codex', 'status': 'not_configured', 'secret': 'never-echo-this'}
+        cli.ready.side_effect = lambda r: 'Herdr integration missing' if r == 'claude' else None
+        with patch.object(model_catalog, 'discover_models', side_effect=ValueError('Discovery failed')):
+            catalog = templates.catalog(cli, self.projects, str(self.projects))
+        accounts = {a['runtime']: a for a in catalog['accounts']}
+        self.assertIn('not installed', accounts['codex']['reason'])
+        self.assertIn('integration missing', accounts['claude']['reason'])
+        self.assertIn('discovery failed', accounts['opencode']['reason'])
+        self.assertIn('cannot be verified', accounts['agy']['reason'])
+        self.assertNotIn('never-echo-this', json.dumps(catalog))
+
 
 if __name__ == '__main__':
     unittest.main()

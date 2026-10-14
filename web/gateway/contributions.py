@@ -1225,6 +1225,8 @@ class Contributions:
     def policy(self, organization_id):
         """Organization follow-up automation policy with defaults applied."""
         merged = dict(AUTOMATION_DEFAULTS)
+        import template_resources
+        merged.update(template_resources.saved(self.store, organization_id))
         with closing(self.connect()) as db:
             row = db.execute('SELECT data FROM policies WHERE id=?', (organization_id,)).fetchone()
         if row:

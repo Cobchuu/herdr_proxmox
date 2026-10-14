@@ -195,6 +195,23 @@ Future<Json?> organizationForm([
     maxMembers: templates?['max_members'] as int? ?? 20,
   );
   final bundles = records(templates?['bundles']);
+  final resourceDefaults = Json.from(
+    templates?['resource_defaults'] ??
+        {
+          'max_active_sessions': 4,
+          'max_active_meetings': 1,
+          'daily_session_cap': 20,
+        },
+  );
+  const resourceLabels = {
+    'max_active_sessions': 'Maximum concurrent sessions',
+    'max_active_meetings': 'Maximum concurrent meetings',
+    'daily_session_cap': 'Sessions per 24 hours',
+  };
+  Json resources(Json values) => {
+    for (final key in resourceLabels.keys)
+      key: int.tryParse('${values[key]}') ?? -1,
+  };
   Json? team;
   Json? lastPreview;
   String? previewError;
@@ -220,6 +237,7 @@ Future<Json?> organizationForm([
       'model_policy': 'balanced',
       'preferred_runtime': '',
       'team_preset': '',
+      ...resourceDefaults,
       'project': '',
     },
     {
@@ -232,6 +250,7 @@ Future<Json?> organizationForm([
         'project': 'Team project directory',
         'model_policy': 'Model policy',
         'preferred_runtime': 'Preferred CLI',
+        ...resourceLabels,
       },
     },
     required: {'name', 'purpose'},
@@ -256,7 +275,12 @@ Future<Json?> organizationForm([
       },
     },
     visible: (key, v) =>
-        !{'project', 'model_policy', 'preferred_runtime'}.contains(key) ||
+        !{
+          'project',
+          'model_policy',
+          'preferred_runtime',
+          ...resourceLabels.keys,
+        }.contains(key) ||
         selected(v).isNotEmpty,
     changed: (key, value, v) {
       if (key == 'team_preset') {
@@ -268,13 +292,18 @@ Future<Json?> organizationForm([
               role['id'],
             );
           v['model_policy'] = bundle['model_policy'];
+          for (final key in resourceLabels.keys)
+            v[key] =
+                (bundle['resource_limits'] as Map?)?[key] ??
+                resourceDefaults[key];
         }
         invalidate();
       }
       if (key.startsWith('preset_') ||
           key == 'project' ||
           key == 'model_policy' ||
-          key == 'preferred_runtime') {
+          key == 'preferred_runtime' ||
+          resourceLabels.containsKey(key)) {
         final withinLimit =
             !key.startsWith('preset_') || draft.syncRoles(selected(v));
         invalidate();
@@ -305,6 +334,9 @@ Future<Json?> organizationForm([
       for (final bundle in bundles.where((b) => b['id'] == v['team_preset']))
         prose(bundle['description']),
       if (selected(v).isNotEmpty) ...[
+        prose(
+          'Resource limits cover every launched session, including idle sessions and review helpers. Use 0 for unlimited.',
+        ),
         button(
           loading ? 'Checking CLI accounts…' : 'Preview team',
           () async {
@@ -322,6 +354,7 @@ Future<Json?> organizationForm([
                   if (v['preferred_runtime'] != '') v['preferred_runtime'],
                 ],
                 'team_preset': v['team_preset'],
+                'resource_limits': resources(v),
               });
               if (epoch == revision) {
                 team = result;
@@ -412,6 +445,13 @@ Future<Json?> organizationForm([
           ]),
         ],
         if (previewError != null) errorLine(previewError),
+        if (lastPreview != null)
+          details('CLI account check from last preview', [
+            for (final account in records(lastPreview?['accounts']))
+              prose(
+                '${account['name']}: ${account['available'] == true ? 'Available' : 'Excluded'} · ${account['reason']}',
+              ),
+          ]),
         for (final warning in team?['warnings'] as List? ?? []) prose(warning),
         for (final member in records(team?['members']))
           details(
@@ -441,6 +481,7 @@ Future<Json?> organizationForm([
       ],
       'template_plan': team!['template_plan'],
       'team_preset': result['team_preset'],
+      'resource_limits': resources(result),
     },
   };
 }

@@ -234,6 +234,18 @@ void main() {
             return {
               'template_plan': 'preview-digest',
               'warnings': [],
+              'accounts': [
+                {
+                  'name': 'Codex',
+                  'available': true,
+                  'reason': 'CLI reports signed in.',
+                },
+                {
+                  'name': 'Claude Code',
+                  'available': false,
+                  'reason': 'Herdr integration missing.',
+                },
+              ],
               'members': [
                 {
                   'name': 'Lead Developer',
@@ -260,6 +272,8 @@ void main() {
       (control('Lead Developer') as web.HTMLInputElement).click();
       await settle();
       await input('Team project directory', '/projects/app');
+      await input('Maximum concurrent sessions', '2');
+      await input('Sessions per 24 hours', '10');
       await choose('Preferred CLI', 'codex');
       await click('Save');
       expect(actions('save'), isEmpty);
@@ -268,6 +282,10 @@ void main() {
         contains('Preview the selected team'),
       );
       await click('Preview team');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Claude Code: Excluded'),
+      );
       expect(
         web.document.getElementById('org-dom-test')!.textContent,
         contains('Lead Developer · claude · Sonnet'),
@@ -286,6 +304,11 @@ void main() {
       expect(saved['project'], '/projects/other');
       expect(saved['model_policy'], 'balanced');
       expect(saved['runtime_preferences'], ['codex']);
+      expect(saved['resource_limits'], {
+        'max_active_sessions': 2,
+        'max_active_meetings': 1,
+        'daily_session_cap': 10,
+      });
       expect(saved['template_plan'], 'preview-digest');
       expect(saved.containsKey('preset_lead_developer'), false);
       expect(actions('hire'), isEmpty);

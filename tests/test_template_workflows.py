@@ -91,6 +91,32 @@ class TemplateWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.organization_records()[0]['team_workflows'], original)
         self.assertEqual(len(self.store.profile_records()), 5)
 
+    def test_saved_resource_limits_enforce_admission_and_policy_overrides(self):
+        body = dict(self.body, request_id='resource-team', resource_limits={
+            'max_active_sessions': 1, 'max_active_meetings': 1, 'daily_session_cap': 1})
+        org = self.store.action('save', body)['id']
+        profiles = [p for p in self.store.profile_records() if p['organization_id'] == org]
+        api = Mock()
+        api.settings.return_value = {}
+        api.status.return_value = {}
+        tasks = Contributions(self.root / 'budget-tasks.sqlite3', self.projects, self.store, api)
+        self.addCleanup(tasks.close)
+        self.assertEqual(tasks.policy(org)['max_active_sessions'], 1)
+        self.assertEqual(tasks.policy(org)['daily_session_cap'], 1)
+        self.store.execute = Mock()  # Exercise admission, not a live CLI.
+        first = self.store.action('launch', dict(request_id='budget-first', organization_id=org, profile_id=profiles[0]['id']))
+        self.store.wait_idle()
+        with self.assertRaisesRegex(ValueError, 'session budget'):
+            self.store.action('launch', dict(request_id='budget-second', organization_id=org, profile_id=profiles[1]['id']))
+        self.store.update_job(first['id'], state='finished')
+        with self.assertRaisesRegex(ValueError, 'daily session budget'):
+            self.store.action('launch', dict(request_id='budget-daily', organization_id=org, profile_id=profiles[1]['id']))
+        tasks.set_automation_policy(dict(organization_id=org, max_active_sessions=0, daily_session_cap=0), 'admin')
+        self.assertEqual(tasks.policy(org)['max_active_sessions'], 0)
+        self.store.action('launch', dict(request_id='budget-override', organization_id=org, profile_id=profiles[1]['id']))
+        self.store.wait_idle()
+        self.command.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
