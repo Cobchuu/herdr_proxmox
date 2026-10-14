@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:math' as math;
 import 'package:web/web.dart' as web;
 import '../ui.dart';
@@ -12,6 +13,21 @@ const chartNodeHeight = 144.0;
 const chartColumnGap = 36.0;
 const chartRowGap = 56.0;
 const chartPadding = 24.0;
+
+// PointerEvent coordinates can be fractional (e.g. browser zoom/DPI scaling),
+// while web 1.1.1 inherits int getters from MouseEvent. Read the JS numbers
+// directly rather than throwing on a real pointer's intermediate positions.
+final class _ClientPosition {
+  const _ClientPosition(this.x, this.y);
+
+  factory _ClientPosition.fromEvent(web.MouseEvent event) => _ClientPosition(
+    event.getProperty<JSNumber>('clientX'.toJS).toDartDouble,
+    event.getProperty<JSNumber>('clientY'.toJS).toDartDouble,
+  );
+
+  final double x;
+  final double y;
+}
 
 /// The original leaf-centred forest layout, using the same fixed geometry for
 /// HTML cards and SVG connector anchors. Only saved manager IDs create edges.
@@ -144,8 +160,8 @@ class _OrgChartState extends State<OrgChart> {
   Timer? mounting;
   double zoom = 1, offsetX = 0, offsetY = 0;
   double measuredWidth = 0, measuredHeight = 0;
-  final pointers = <int, (double, double)>{};
-  final pointerOrigins = <int, (double, double)>{};
+  final pointers = <int, _ClientPosition>{};
+  final pointerOrigins = <int, _ClientPosition>{};
   bool dragging = false;
   bool suppressPointerClick = false;
   Timer? clickSuppression;
@@ -284,7 +300,7 @@ class _OrgChartState extends State<OrgChart> {
     // drag or text selection and cancel the pointer sequence mid-pan, which a
     // synthetic-event test never reproduces.
     e.preventDefault();
-    pointers[e.pointerId] = (e.clientX.toDouble(), e.clientY.toDouble());
+    pointers[e.pointerId] = _ClientPosition.fromEvent(e);
     pointerOrigins[e.pointerId] = pointers[e.pointerId]!;
     // Captured while the pointer is definitely active. Capturing later, from the
     // first move, can fail once the browser has already claimed the gesture, and
@@ -314,11 +330,11 @@ class _OrgChartState extends State<OrgChart> {
     final e = event as web.PointerEvent;
     var previous = pointers[e.pointerId];
     if (previous == null) return;
-    final next = (e.clientX.toDouble(), e.clientY.toDouble());
+    final next = _ClientPosition.fromEvent(e);
     if (!dragging) {
       final origin = pointerOrigins[e.pointerId]!;
       if (math.sqrt(
-            math.pow(next.$1 - origin.$1, 2) + math.pow(next.$2 - origin.$2, 2),
+            math.pow(next.x - origin.x, 2) + math.pow(next.y - origin.y, 2),
           ) <
           5) {
         pointers[e.pointerId] = next;
@@ -333,21 +349,20 @@ class _OrgChartState extends State<OrgChart> {
           .firstWhere((p) => p.key != e.pointerId)
           .value;
       final oldDistance = math.sqrt(
-        math.pow(previous.$1 - other.$1, 2) +
-            math.pow(previous.$2 - other.$2, 2),
+        math.pow(previous.x - other.x, 2) + math.pow(previous.y - other.y, 2),
       );
       final distance = math.sqrt(
-        math.pow(next.$1 - other.$1, 2) + math.pow(next.$2 - other.$2, 2),
+        math.pow(next.x - other.x, 2) + math.pow(next.y - other.y, 2),
       );
       final rect = (e.currentTarget as web.HTMLElement).getBoundingClientRect();
       if (oldDistance > 0)
         zoomAt(
           zoom * distance / oldDistance,
-          (next.$1 + other.$1) / 2 - rect.left,
-          (next.$2 + other.$2) / 2 - rect.top,
+          (next.x + other.x) / 2 - rect.left,
+          (next.y + other.y) / 2 - rect.top,
         );
     } else {
-      final deltaX = next.$1 - previous.$1, deltaY = next.$2 - previous.$2;
+      final deltaX = next.x - previous.x, deltaY = next.y - previous.y;
       setState(() {
         fitting = false;
         offsetX += deltaX;
@@ -742,10 +757,11 @@ class _OrgChartState extends State<OrgChart> {
             e.preventDefault();
             final rect = (e.currentTarget as web.HTMLElement)
                 .getBoundingClientRect();
+            final position = _ClientPosition.fromEvent(e);
             zoomAt(
               zoom * math.exp(-e.deltaY * .0015),
-              e.clientX - rect.left,
-              e.clientY - rect.top,
+              position.x - rect.left,
+              position.y - rect.top,
             );
           },
           'keydown': (event) {

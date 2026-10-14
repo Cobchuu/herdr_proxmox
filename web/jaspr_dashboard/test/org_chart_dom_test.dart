@@ -677,4 +677,56 @@ void main() {
       expectFitted();
     },
   );
+  test(
+    'fractional browser pointer coordinates pan without integer binding errors',
+    () async {
+      await mount(
+        () => OrgChart(
+          profiles: [profile('One')],
+          agents: const [],
+          jobs: const [],
+          onSelect: (_) {},
+        ),
+      );
+      final beforeX = offset('x'), beforeY = offset('y');
+      web.PointerEvent fractional(String type, double x, double y) =>
+          web.PointerEvent(
+            type,
+            {
+                  'pointerId': 31,
+                  'pointerType': 'mouse',
+                  'button': 0,
+                  'buttons': type == 'pointerup' ? 0 : 1,
+                  'clientX': x,
+                  'clientY': y,
+                  'bubbles': true,
+                  'cancelable': true,
+                }.jsify()
+                as web.PointerEventInit,
+          );
+      viewport.dispatchEvent(fractional('pointerdown', 100.25, 120.5));
+      viewport.dispatchEvent(fractional('pointermove', 160.75, 151.25));
+      viewport.dispatchEvent(fractional('pointerup', 160.75, 151.25));
+      await settle();
+      expect(offset('x'), closeTo(beforeX + 60.5, .01));
+      expect(offset('y'), closeTo(beforeY + 30.75, .01));
+      expect(viewport.hasAttribute('data-panning'), false);
+      final oldZoom = zoom();
+      viewport.dispatchEvent(
+        web.WheelEvent(
+          'wheel',
+          {
+                'clientX': 150.25,
+                'clientY': 170.75,
+                'deltaY': -40,
+                'bubbles': true,
+                'cancelable': true,
+              }.jsify()
+              as web.WheelEventInit,
+        ),
+      );
+      await settle();
+      expect(zoom(), greaterThan(oldZoom));
+    },
+  );
 }
