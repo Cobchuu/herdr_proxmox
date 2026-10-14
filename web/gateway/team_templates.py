@@ -73,6 +73,33 @@ ROLE_MINIMUMS = {r['id']: (1 if r['id'] == 'qa_engineer' else 2) for r in ROLES}
 MAX_MEMBERS = 20
 MEMBER_FIELDS = {'key', 'template_role', 'name', 'persona', 'runtime', 'provider', 'model', 'reasoning',
                  'manager_key', 'permission_mode', 'accessible_paths', 'use_worktree'}
+BUNDLES = [
+    dict(id='solo_developer', name='Solo developer', description='One full-stack member for small projects; the owner handles acceptance.',
+         roles=['full_stack_developer']),
+    dict(id='small_product', name='Small product team', description='A lead, a full-stack implementer and an independent reviewer.',
+         roles=['lead_developer', 'full_stack_developer', 'reviewer']),
+    dict(id='frontend_backend', name='Frontend/backend team', description='Separate frontend/backend specialists with leadership, review and integration.',
+         roles=['lead_developer', 'frontend_developer', 'backend_developer', 'reviewer', 'integration_engineer']),
+    dict(id='full_engineering', name='Full engineering team', description='All eight roles, including independent QA and DevOps.',
+         roles=[r['id'] for r in ROLES]),
+]
+for bundle in BUNDLES:
+    bundle.update(model_policy='balanced', version=1,
+                  members=[dict(key=r, template_role=r) for r in bundle['roles']])
+BY_BUNDLE = {b['id']: b for b in BUNDLES}
+
+
+def expand(body):
+    identifier = body.get('team_preset', '')
+    if not isinstance(identifier, str) or identifier and identifier not in BY_BUNDLE:
+        raise ValueError('Choose a supported team preset.')
+    if not identifier:
+        return dict(body)
+    bundle = BY_BUNDLE[identifier]
+    result = {'model_policy': bundle['model_policy'], **body}
+    if 'template_roles' not in body and 'team_members' not in body:
+        result.update(template_roles=list(bundle['roles']), team_members=[dict(s) for s in bundle['members']])
+    return result
 
 
 def member_specs(body):
@@ -266,6 +293,7 @@ def selection(role, policy, available, preferred=()):
 
 
 def validate(body):
+    body = expand(body)
     roles = body.get('template_roles', [])
     if (not isinstance(roles, list) or len(roles) > len(ROLES) or
             any(not isinstance(r, str) or r not in BY_ID for r in roles) or len(set(roles)) != len(roles)):
@@ -284,6 +312,7 @@ def validate(body):
 
 
 def plan(body, available):
+    body = expand(body)
     roles, policy = validate(body)
     specs = member_specs(dict(body, template_roles=roles))
     lead = next((s['key'] for s in specs if s['template_role'] == 'lead_developer'), '')
@@ -333,4 +362,4 @@ def plan(body, available):
 def snapshot():
     return dict(roles=[dict(role, minimum_capability=ROLE_MINIMUMS[role['id']], persona_instruction=role['persona'],
                            persona=role['persona'] + '\n\n' + COMMON) for role in ROLES],
-                policies=POLICIES, runtime_names=RUNTIME_NAMES, max_members=MAX_MEMBERS)
+                policies=POLICIES, runtime_names=RUNTIME_NAMES, max_members=MAX_MEMBERS, bundles=BUNDLES)

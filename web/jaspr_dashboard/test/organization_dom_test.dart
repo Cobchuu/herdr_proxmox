@@ -390,6 +390,74 @@ void main() {
   );
 
   test(
+    'team preset fills the draft and selected roles can still be changed',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {'id': 'lead_developer', 'name': 'Lead Developer'},
+                  {'id': 'backend_developer', 'name': 'Backend Developer'},
+                ],
+                'policies': {'balanced': 'Balanced'},
+                'bundles': [
+                  {
+                    'id': 'frontend_backend',
+                    'name': 'Frontend/backend team',
+                    'description': 'A focused engineering team.',
+                    'model_policy': 'balanced',
+                    'members': [
+                      {
+                        'key': 'lead_developer',
+                        'template_role': 'lead_developer',
+                      },
+                      {
+                        'key': 'backend_developer',
+                        'template_role': 'backend_developer',
+                      },
+                    ],
+                  },
+                ],
+              };
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            return {
+              'template_plan': 'bundle-plan',
+              'members': [],
+              'member_specs': body['team_members'],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Preset team');
+      await input('Purpose', 'Build tools');
+      await choose('Team preset', 'frontend_backend');
+      expect((control('Lead Developer') as web.HTMLInputElement).checked, true);
+      expect(
+        (control('Backend Developer') as web.HTMLInputElement).checked,
+        true,
+      );
+      (control('Backend Developer') as web.HTMLInputElement).click();
+      await settle();
+      await input('Team project directory', '/projects/app');
+      await click('Preview team');
+      await click('Save');
+      final saved = actions('save').single;
+      expect(saved['team_preset'], 'frontend_backend');
+      expect(saved['template_roles'], ['lead_developer']);
+      expect((saved['team_members'] as List).length, 1);
+    },
+  );
+
+  test(
     'hire preserves CLI model, worktree and permission defaults when runtime changes',
     () async {
       await mount(const OrganizationPage(initialView: 'team'));

@@ -21,6 +21,22 @@ void main() {
     expect(draft.members.every((m) => !m.containsKey('manager_key')), true);
     expect(draft.payload['template_roles'], ['backend_developer']);
   });
+  test('applying a team bundle replaces the roster and remains editable', () {
+    final draft = TeamTemplateDraft(roles);
+    draft.syncRoles(['backend_developer']);
+    draft.members.first['name'] = 'Old draft';
+    draft.applyBundle({
+      'members': [
+        {'key': 'lead_developer', 'template_role': 'lead_developer'},
+        {'key': 'backend_developer', 'template_role': 'backend_developer'},
+      ],
+    });
+    expect(draft.members.length, 2);
+    expect(draft.members.any((m) => m['name'] == 'Old draft'), false);
+    expect(draft.selectedRoles, ['lead_developer', 'backend_developer']);
+    draft.add('backend_developer');
+    expect(draft.members.length, 3);
+  });
   test(
     'hydrated drafts preserve automatic choices and avoid duplicate keys',
     () {

@@ -1159,6 +1159,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
   final selectedRoles = <String>{};
   String policy = 'balanced';
   String preferredRuntime = '';
+  String teamPreset = '';
   Map<String, dynamic>? team;
   Map<String, dynamic>? lastPreview;
   String? previewError;
@@ -1196,6 +1197,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
         'runtime_preferences': [
           if (preferredRuntime.isNotEmpty) preferredRuntime,
         ],
+        'team_preset': teamPreset,
       });
       if (mounted && epoch == revision)
         setState(() {
@@ -1435,6 +1437,42 @@ class _OrganizationFormState extends State<OrganizationForm> {
                   widget.templates?['error'] != null)
                 Text('${widget.templates!['error']}'),
               if (roles.isNotEmpty) ...[
+                if ((widget.templates?['bundles'] as List? ?? []).isNotEmpty)
+                  DropdownButtonFormField<String>(
+                    initialValue: teamPreset,
+                    decoration: const InputDecoration(labelText: 'Team preset'),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Custom team'),
+                      ),
+                      for (final bundle in widget.templates!['bundles'] as List)
+                        DropdownMenuItem(
+                          value: '${bundle['id']}',
+                          child: Text('${bundle['name']}'),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() {
+                      teamPreset = v ?? '';
+                      final bundle =
+                          (widget.templates?['bundles'] as List? ?? [])
+                              .where((b) => b['id'] == teamPreset)
+                              .firstOrNull;
+                      if (bundle != null) {
+                        draft.applyBundle(Map<String, dynamic>.from(bundle));
+                        selectedRoles
+                          ..clear()
+                          ..addAll(draft.selectedRoles);
+                        policy = '${bundle['model_policy']}';
+                      }
+                      invalidate();
+                    }),
+                  ),
+                for (final bundle
+                    in (widget.templates?['bundles'] as List? ?? []).where(
+                      (b) => b['id'] == teamPreset,
+                    ))
+                  Text('${bundle['description']}'),
                 const Text(
                   'Select roles to create with this organization. Profiles are ready for tasks; sessions start when launched.',
                 ),
@@ -1471,6 +1509,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                         : null,
                   ),
                   DropdownButtonFormField<String>(
+                    key: ValueKey('model-policy-$policy'),
                     initialValue: policy,
                     decoration: const InputDecoration(
                       labelText: 'Model policy',
@@ -1580,6 +1619,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                   if (preferredRuntime.isNotEmpty) preferredRuntime,
                 ],
                 'template_plan': team!['template_plan'],
+                'team_preset': teamPreset,
               },
             });
           }

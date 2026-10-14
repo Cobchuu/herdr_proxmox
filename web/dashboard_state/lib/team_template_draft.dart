@@ -46,6 +46,8 @@ class TeamTemplateDraft {
       ..addAll([for (final spec in specs) Map<String, dynamic>.from(spec)]);
   }
 
+  void applyBundle(Map<String, dynamic> bundle) => hydrate(bundle['members']);
+
   String name(Map<String, dynamic> member) {
     if (member['name'] != null) return '${member['name']}';
     final same = members

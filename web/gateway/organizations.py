@@ -568,6 +568,7 @@ class OrganizationStore:
 
     def team_plan(self, body):
         import team_templates
+        body = team_templates.expand(body)
         roles, policy = team_templates.validate(body)
         if not roles:
             return dict(members=[], warnings=[], model_policy=policy)
@@ -607,9 +608,10 @@ class OrganizationStore:
                 return collaboration_action(self, snapshot, action, body, org)
         fingerprint = hashlib.sha256(json.dumps([action, body], sort_keys=True).encode()).hexdigest()
         planned = None
-        if action == 'save' and ('template_roles' in body or 'team_members' in body):
+        if action == 'save' and ('template_roles' in body or 'team_members' in body or 'team_preset' in body):
             import team_templates
-            roles, _ = team_templates.validate(body)
+            plan_body = team_templates.expand(body)
+            roles, _ = team_templates.validate(plan_body)
             if roles:
                 if body.get('id'):
                     raise ValueError('Team presets can only be applied when creating an organization.')
@@ -621,7 +623,7 @@ class OrganizationStore:
                         if existing['fingerprint'] != fingerprint:
                             raise ValueError('Request ID already used for different content.')
                         return json.loads(existing['response'])
-                planned = self.team_plan(body)
+                planned = self.team_plan(plan_body)
                 if body.get('template_plan') and body['template_plan'] != planned['template_plan']:
                     raise ValueError('CLI accounts or models changed since the team preview. Preview the team again before creating the organization.')
         submitted = None
@@ -639,10 +641,10 @@ class OrganizationStore:
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
                 if previous_org:
-                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows') if k in previous_org})
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset') if k in previous_org})
                 if planned:
                     item.update(template_roles=list(dict.fromkeys(m['template_role'] for m in planned['members'])), model_policy=planned['model_policy'],
-                                runtime_preferences=planned['runtime_preferences'])
+                                runtime_preferences=planned['runtime_preferences'], team_preset=body.get('team_preset', ''))
                 self.put(db, 'organizations', item)
                 if planned:
                     ids = {m['template_key']: uuid.uuid4().hex for m in planned['members']}

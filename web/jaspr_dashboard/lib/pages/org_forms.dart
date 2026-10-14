@@ -194,6 +194,7 @@ Future<Json?> organizationForm([
     roles,
     maxMembers: templates?['max_members'] as int? ?? 20,
   );
+  final bundles = records(templates?['bundles']);
   Json? team;
   Json? lastPreview;
   String? previewError;
@@ -218,6 +219,7 @@ Future<Json?> organizationForm([
       ...?org,
       'model_policy': 'balanced',
       'preferred_runtime': '',
+      'team_preset': '',
       'project': '',
     },
     {
@@ -225,6 +227,7 @@ Future<Json?> organizationForm([
       'purpose': 'Purpose',
       'instructions': 'Shared instructions',
       if (roles.isNotEmpty) ...{
+        if (bundles.isNotEmpty) 'team_preset': 'Team preset',
         for (final role in roles) 'preset_${role['id']}': '${role['name']}',
         'project': 'Team project directory',
         'model_policy': 'Model policy',
@@ -247,11 +250,27 @@ Future<Json?> organizationForm([
         '': 'Automatic',
         ...Map<String, String>.from(templates?['runtime_names'] ?? {}),
       },
+      'team_preset': {
+        '': 'Custom team',
+        for (final bundle in bundles) '${bundle['id']}': '${bundle['name']}',
+      },
     },
     visible: (key, v) =>
         !{'project', 'model_policy', 'preferred_runtime'}.contains(key) ||
         selected(v).isNotEmpty,
     changed: (key, value, v) {
+      if (key == 'team_preset') {
+        final bundle = bundles.where((b) => b['id'] == value).firstOrNull;
+        if (bundle != null) {
+          draft.applyBundle(bundle);
+          for (final role in roles)
+            v['preset_${role['id']}'] = draft.selectedRoles.contains(
+              role['id'],
+            );
+          v['model_policy'] = bundle['model_policy'];
+        }
+        invalidate();
+      }
       if (key.startsWith('preset_') ||
           key == 'project' ||
           key == 'model_policy' ||
@@ -283,6 +302,8 @@ Future<Json?> organizationForm([
         prose(
           'Select roles to create with this organization. Profiles are ready for tasks; sessions start when launched.',
         ),
+      for (final bundle in bundles.where((b) => b['id'] == v['team_preset']))
+        prose(bundle['description']),
       if (selected(v).isNotEmpty) ...[
         button(
           loading ? 'Checking CLI accounts…' : 'Preview team',
@@ -300,6 +321,7 @@ Future<Json?> organizationForm([
                 'runtime_preferences': [
                   if (v['preferred_runtime'] != '') v['preferred_runtime'],
                 ],
+                'team_preset': v['team_preset'],
               });
               if (epoch == revision) {
                 team = result;
@@ -418,6 +440,7 @@ Future<Json?> organizationForm([
         if (result['preferred_runtime'] != '') result['preferred_runtime'],
       ],
       'template_plan': team!['template_plan'],
+      'team_preset': result['team_preset'],
     },
   };
 }

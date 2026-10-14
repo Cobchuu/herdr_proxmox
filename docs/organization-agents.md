@@ -33,6 +33,12 @@ Frontend Developer, Backend Developer, Full-stack Developer, Reviewer,
 Integration Engineer, QA Engineer and DevOps Engineer. Select an existing
 project directory and a model policy, then use **Preview team** to inspect
 personas, CLI/model/effort choices and reporting relationships before saving.
+The **Team preset** selector can fill that draft with Solo developer (one member),
+Small product team (three), Frontend/backend team (five), or Full engineering team
+(all eight roles). All presets start with the balanced model policy. Applying a
+preset replaces the draft roster; the resulting members can still be edited,
+duplicated or removed before preview and creation. API clients may supply just
+`team_preset` instead of an explicit roster, or override its recommended members.
 Organization creation saves all selected profiles in the same SQLite transaction;
 a failed save creates no partial team, and retrying the same request cannot
 duplicate hires. Existing organizations and manually hired profiles retain their

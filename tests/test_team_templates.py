@@ -248,6 +248,30 @@ class TeamTemplateTests(unittest.TestCase):
         self.assertEqual(self.store.profile_records(), [])
         self.assertEqual(self.store.organization_records(), [])
 
+    def test_team_bundles_expand_and_create_expected_rosters(self):
+        expected = {'solo_developer': 1, 'small_product': 3, 'frontend_backend': 5, 'full_engineering': 8}
+        for identifier, count in expected.items():
+            body = dict(request_id='bundle-' + identifier, name=identifier, purpose='Build',
+                        project=str(self.projects), team_preset=identifier)
+            preview = self.store.team_plan(body)
+            self.assertEqual(len(preview['members']), count)
+            result = self.store.action('save', dict(body, template_plan=preview['template_plan']))
+            profiles = [p for p in self.store.profile_records() if p['organization_id'] == result['id']]
+            self.assertEqual(len(profiles), count)
+            org = next(o for o in self.store.organization_records() if o['id'] == result['id'])
+            self.assertEqual(org['team_preset'], identifier)
+        self.assertEqual(len(templates.snapshot()['bundles']), 4)
+        with self.assertRaises(ValueError):
+            self.store.team_plan(dict(self.body, team_preset='unknown'))
+
+    def test_bundle_customizations_override_recommended_members(self):
+        body = dict(request_id='custom-bundle', name='Custom', purpose='Build', project=str(self.projects),
+                    team_preset='small_product', team_members=[
+                        dict(key='worker', template_role='full_stack_developer', name='Solo specialist')])
+        result = self.store.action('save', body)
+        profiles = [p for p in self.store.profile_records() if p['organization_id'] == result['id']]
+        self.assertEqual([p['name'] for p in profiles], ['Solo specialist'])
+
 
 if __name__ == '__main__':
     unittest.main()
