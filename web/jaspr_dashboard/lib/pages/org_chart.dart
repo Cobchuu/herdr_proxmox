@@ -280,8 +280,21 @@ class _OrgChartState extends State<OrgChart> {
         target.closest('.org-chart-node__configure') != null)
       return;
     final viewport = e.currentTarget as web.HTMLElement;
+    // The chart owns this gesture. Without this the browser can start its own
+    // drag or text selection and cancel the pointer sequence mid-pan, which a
+    // synthetic-event test never reproduces.
+    e.preventDefault();
     pointers[e.pointerId] = (e.clientX.toDouble(), e.clientY.toDouble());
     pointerOrigins[e.pointerId] = pointers[e.pointerId]!;
+    // Captured while the pointer is definitely active. Capturing later, from the
+    // first move, can fail once the browser has already claimed the gesture, and
+    // a move that leaves the viewport would then be lost.
+    try {
+      viewport.setPointerCapture(e.pointerId);
+    } catch (_) {}
+    // preventDefault suppresses the default focus, so focus explicitly to keep
+    // the keyboard pan controls reachable.
+    viewport.focus();
     if (pointers.length > 1) beginDrag(viewport);
   }
 

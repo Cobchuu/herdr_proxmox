@@ -1080,8 +1080,10 @@ class AlertDialog extends StatelessComponent {
   @override
   Component build(BuildContext context) => Column(
     children: [
-      title,
-      if (content != null) content!,
+      // Styled as the dialog's heading rather than body text: this component
+      // renders inside the dialog body, so an unstyled title reads as the first
+      // paragraph of the content.
+      dom.h2([title], classes: 'dialog__title'),      if (content != null) content!,
       Wrap(children: actions),
     ],
   );

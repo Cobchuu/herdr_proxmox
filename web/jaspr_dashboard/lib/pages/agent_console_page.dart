@@ -307,16 +307,19 @@ class _AgentConsolePageState extends State<AgentConsolePage> {
   }
 
   /// Label, tone and dot shape for an inspected terminal status.
-  (String, String, String) stateOf(String? status) => switch (status) {
-    null => ('Unavailable', 'neutral', 'dash'),
-    'working' ||
-    'running' ||
-    'busy' ||
-    'thinking' => ('Working', 'success', 'filled'),
-    'blocked' => ('Needs attention', 'danger', 'diamond'),
-    'idle' || 'done' => (capitalized(status), 'neutral', 'hollow'),
-    _ => (capitalized(status), 'neutral', 'dash'),
-  };
+    (String, String, String) stateOf(String? status) => switch (status) {
+      null => ('Unavailable', 'neutral', 'dash'),
+      // Tone comes from the shared palette (agentActivityTone): idle green,
+      // working blue, attention amber. A private table here drifted from it and
+      // silently flipped the live ring below.
+      'working' ||
+      'running' ||
+      'busy' ||
+      'thinking' => ('Working', agentActivityTone('working'), 'filled'),
+      'blocked' => ('Needs attention', agentActivityTone('attention'), 'diamond'),
+      'idle' || 'done' => (capitalized(status), agentActivityTone('idle'), 'filled'),
+      _ => (capitalized(status), 'neutral', 'dash'),
+    };
 
   String capitalized(String value) => value.isEmpty
       ? value
@@ -357,10 +360,15 @@ class _AgentConsolePageState extends State<AgentConsolePage> {
 
     final cadence = agentConsoleRefreshInterval(status).inSeconds;
 
+    // Keyed off the activity, like every other role tile in the app. Keying it
+    // off the tone made the breathing ring follow the palette rather than the
+    // agent, so restoring the palette silently stopped it flashing while working.
+    final live = const ['working', 'running', 'busy', 'thinking'].contains(status);
+
     return opsPage([
       el('div', [
         if (profile != null)
-          roleTile(name, role: profile!['role'], live: state.$2 == 'success'),
+          roleTile(name, role: profile!['role'], live: live),
         pageHeader(
           name,
           overline: 'Agent console',

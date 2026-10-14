@@ -566,7 +566,10 @@ Component buildDialogs() => el('div', [
           'section',
           [
             el('div', [
-              el('h2', [text(dialog.title)]),
+              // Only when there is one: an empty heading still takes space and
+              // leaves a gap under the close button. Dialogs built through the
+              // Flutter-shaped AlertDialog carry their own title instead.
+              if (dialog.title.isNotEmpty) el('h2', [text(dialog.title)]),
               if (dialog.dismissible) button('Close', dialog.close),
             ], classes: 'dialog__header'),
             dialog.content(),
