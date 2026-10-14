@@ -139,6 +139,8 @@ records in `~/.config/herdr-web/organizations.sqlite3`. SQLite is built into
 Python; no database service or extra Python package is required. Include this
 file in container backups. Manager cycles and cross-organization references are
 rejected. Assigned directories must already exist beneath `~/projects`.
+Launch searches for repository roots only within that managed projects directory;
+a `.git` above it (such as a home-directory repository) cannot own a launch.
 
 Launch and delegation return immediately with a durable job ID and run in a
 single background worker. The UI disables concurrent form actions and retains

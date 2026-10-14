@@ -808,6 +808,19 @@ class OrganizationTests(unittest.TestCase):
             run.pop('worktree_path')
             self.assertTrue(self.store.checkout_in_use(self.projects))
 
+    def test_launch_ignores_repository_outside_managed_projects(self):
+        # Deterministic even when the developer's real home is a repository.
+        (self.root / '.git').mkdir()
+        org = self.organization()
+        profile = self.hire(org)
+        job_id = self.action('launch', organization_id=org, profile_id=profile)
+        self.drain()
+        job = next(j for j in self.store.job_records() if j['id'] == job_id)
+        self.assertEqual(job['state'], 'persona_sent', job.get('error'))
+        self.assertEqual(job['workspace_mode'], 'workspace')
+        self.assertTrue(any(args[:2] == ('workspace', 'create') for args, _ in self.calls))
+        self.assertFalse(any(args[:2] == ('worktree', 'create') for args, _ in self.calls))
+
     def test_worktree_can_be_explicitly_disabled(self):
         (self.projects / '.git').mkdir()
         org = self.organization()

@@ -1430,7 +1430,11 @@ class OrganizationStore:
                 job = self.update_job(job_id, launch_stage='workspace_preparing')
                 project = self.project(profile['project'])
                 source = Path(project)
-                repository = any((parent / '.git').exists() for parent in (source, *source.parents))
+                # Only a repository inside managed projects may own this launch.
+                # A home-directory repository must not turn an unrelated project
+                # into a worktree of that repository (or fail on its permissions).
+                repository = any((parent / '.git').exists() for parent in (source, *source.parents)
+                                 if parent.is_relative_to(self.projects))
                 if job.get('reuse_checkout'):
                     checkout = Path(job.get('worktree_path') or job.get('source_project', project)).resolve()
                     if not checkout.is_relative_to(self.projects) or not checkout.is_dir():
