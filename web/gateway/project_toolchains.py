@@ -32,6 +32,10 @@ OUTPUT_LIMIT = 4000
 # unmeasured rather than guessed at. A tool with no entry gets the common form.
 PROBES = {'go': ('version',)}
 DEFAULT_PROBE = ('--version',)
+# The requirement identifies a runtime, not necessarily its command spelling.
+# Debian commonly provides python3 without a python alias; retain both probes
+# rather than declaring the runtime absent or assuming they are the same SDK.
+EXECUTABLES = {'python': ('python3', 'python')}
 
 
 def probe_arguments(name):
@@ -107,9 +111,10 @@ def locate(name, entry, which=None):
     if isinstance(configured, str) and configured:
         found.append(dict(kind='release', path=configured,
                           present=Path(configured).is_file(), measured=None, error=''))
-    on_path = which(name)
-    if on_path and on_path not in [item['path'] for item in found]:
-        found.append(dict(kind='path', path=on_path, present=True, measured=None, error=''))
+    for command in EXECUTABLES.get(name, (name,)):
+        on_path = which(command)
+        if on_path and on_path not in [item['path'] for item in found]:
+            found.append(dict(kind='path', path=on_path, present=True, measured=None, error=''))
     return found
 
 

@@ -118,6 +118,11 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
         if ((requirement['resolution'] as Map)['reason'] != null)
           meta('${(requirement['resolution'] as Map)['reason']}'),
       ],
+      if (requirement['selection_lookup'] is Map)
+        meta(
+          'FVM lookup: ${(requirement['selection_lookup'] as Map)['directory']} · '
+          '${(requirement['selection_lookup'] as Map)['evidence']} · boundary: repository root',
+        ),
       for (final conflict in (requirement['conflicts'] as List? ?? []))
         callout([
           calloutText('${(conflict as Map)['reason']}'),
@@ -194,10 +199,11 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
           '${(item['frameworks'] as List).map((entry) => (entry as Map)['label']).join(', ')}',
           classes: 'org-note',
         ),
-      if ((item['candidate_commands'] as List? ?? []).isNotEmpty)
+      for (final command
+          in (item['candidate_commands'] as List? ?? []).cast<Map>())
         meta(
-          'Candidate commands: '
-          '${(item['candidate_commands'] as List).map((entry) => (entry as Map)['command']).join(' ')}',
+          'Candidate command: ${command['command'] is List ? (command['command'] as List).join(' ') : command['command']}'
+          ' (${command['source'] ?? 'convention'})',
           classes: 'org-note',
         ),
       for (final finding in (item['unresolved'] as List? ?? []))
@@ -280,7 +286,9 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
         )
       else ...[
         meta(
-          'Source: ${(analysis['source'] as Map?)?['scope'] ?? 'unknown'} · ${(analysis['source'] as Map?)?['revision'] ?? ''} · assessed ${(analysis['source'] as Map?)?['at'] ?? 'unknown'}',
+          'Source: ${(analysis['source'] as Map?)?['scope'] ?? 'unknown'}'
+          '${'${(analysis['source'] as Map?)?['revision'] ?? ''}'.isEmpty ? '' : ' · ${(analysis['source'] as Map)['revision']}'}'
+          ' · assessed ${(analysis['source'] as Map?)?['at'] ?? 'unknown'}',
         ),
         if (requirements.isNotEmpty) ...[
           el('h3', [text('Host readiness')], classes: 'overline'),

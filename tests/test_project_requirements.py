@@ -291,6 +291,76 @@ class OtherEcosystemTests(unittest.TestCase):
         self.assertEqual(dart['constraint'], '^3.5.0')
         self.assertEqual(dart['observations'][0]['file'], 'pubspec.yaml')
 
+    def test_nested_flutter_reads_the_nearest_ancestor_pin_but_pure_dart_does_not(self):
+        write(self.root, {
+            '.fvmrc': '{"flutter":"3.44.8"}',
+            'web/app/pubspec.yaml': 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n',
+            'web/app/pubspec.lock': '',
+            'web/state/pubspec.yaml': 'name: state\nenvironment:\n  sdk: ^3.12.0\n',
+        })
+        report = analyse(self.root)
+        flutter = requirement(component(report, 'web/app'), 'flutter')
+        self.assertEqual(flutter['selected'], '3.44.8')
+        self.assertEqual(flutter['observations'][0]['file'], '.fvmrc')
+        self.assertEqual(flutter['selection_lookup']['boundary'], 'repository root')
+        self.assertNotIn('flutter', [item['tool'] for item in component(report, 'web/state')['requirements']])
+        self.assertNotIn('unregistered manifests', [item['what'] for item in report['unresolved']])
+
+    def test_nearer_fvm_pin_shadows_ancestors_even_when_unreadable(self):
+        write(self.root, {'.fvmrc': '{"flutter":"3.44.8"}',
+            'web/.fvmrc': '{"flutter":"3.40.0"}',
+            'web/app/pubspec.yaml': 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n'})
+        flutter = requirement(component(analyse(self.root), 'web/app'), 'flutter')
+        self.assertEqual(flutter['selected'], '3.40.0')
+        self.assertEqual(flutter['selection_lookup']['shadowed'], ['.fvmrc'])
+        (self.root / 'web/.fvmrc').write_text('{malformed', encoding='utf-8')
+        flutter = requirement(component(analyse(self.root), 'web/app'), 'flutter')
+        self.assertEqual(flutter['selected'], '')
+        self.assertFalse(flutter['established'])
+        self.assertEqual(flutter['selection_lookup']['status'], 'unresolved')
+        self.assertTrue(flutter['observations'][0]['unreadable'])
+
+    def test_fvm_lookup_does_not_read_above_repository_root(self):
+        write(self.root, {'.fvmrc': '{"flutter":"3.44.8"}',
+            'isolated/pubspec.yaml': 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n'})
+        flutter = requirement(component(analyse(self.root / 'isolated')), 'flutter')
+        self.assertEqual(flutter['selected'], '')
+        self.assertFalse(flutter['established'])
+
+    def test_fvm_missing_flutter_key_reports_missing_selection_not_unreadable_file(self):
+        write(self.root, {'.fvmrc': '{"flavors":{}}',
+            'pubspec.yaml': 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n'})
+        flutter = requirement(component(analyse(self.root)), 'flutter')
+        self.assertFalse(flutter['established'])
+        self.assertIn('no readable Flutter selection', flutter['reason'])
+        self.assertNotIn('could not be read', flutter['reason'])
+
+    def test_known_computed_manifest_is_not_reported_as_unregistered(self):
+        write(self.root, {'app.csproj': '<Project />', 'Directory.Build.props': '<Project />'})
+        report = analyse(self.root)
+        self.assertNotIn('unregistered manifests', [item['what'] for item in report['unresolved']])
+        item = component(report)
+        self.assertIn('msbuild', [entry['id'] for entry in item['configured_tooling']])
+        self.assertIn('Directory.Build.props requirements', [entry['what'] for entry in item['unresolved']])
+
+    def test_fvm_ancestor_search_uses_indexed_paths(self):
+        # A large inventory may be iterated for census, but ancestor lookup
+        # must reuse that index rather than scan every filename per component.
+        from unittest.mock import patch
+        write(self.root, {'.fvmrc': '{"flutter":"3.44.8"}',
+            'web/pubspec.yaml': 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n'})
+        inventory = project_inventory.scan(self.root, include_paths=True)
+        original = project_requirements.requirements_for
+
+        def indexed(ecosystem, present, read, directory, paths):
+            self.assertIsInstance(paths, dict)
+            self.assertIn('web/pubspec.yaml', paths)
+            return original(ecosystem, present, read, directory, paths)
+
+        with patch.object(project_requirements, 'requirements_for', side_effect=indexed):
+            flutter = requirement(component(analyse(self.root, inventory=inventory), 'web'), 'flutter')
+        self.assertEqual(flutter['selected'], '3.44.8')
+
     def test_rust_version_is_a_compiler_minimum_not_cargo(self):
         write(self.root, {'Cargo.toml': '[package]\nname = "x"\nrust-version = "1.75"\n'})
         rust = requirement(component(analyse(self.root)), 'rust')

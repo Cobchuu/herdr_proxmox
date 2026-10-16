@@ -164,6 +164,74 @@ class EffectiveReportTests(unittest.TestCase):
         self.assertEqual(tools['php']['assessment']['installer'], True)
         self.assertTrue(tools['php']['assessment']['selected'])
 
+    def test_fvm_pin_is_assessed_even_beside_a_satisfied_flutter_range(self):
+        write(self.projects, {'flutter-app/.fvmrc': '{"flutter":"3.44.8"}',
+            'flutter-app/web/pubspec.yaml': 'name: app\nenvironment:\n  flutter: ">=3.0.0"\n'
+                                          'dependencies:\n  flutter:\n    sdk: flutter\n'})
+        analysis = ProjectAnalysis(self.projects,
+            toolchains=lambda: {'flutter': {'required': '3.40.0', 'executable': ''}},
+            catalog=lambda: {'flutter': {}})
+        report = analysis.effective('flutter-app', which=lambda name: '/usr/bin/' + name,
+                                    run=fake_run('3.40.0'))
+        flutter = next(item for item in report['requirements'] if item['tool'] == 'flutter')
+        self.assertEqual(flutter['assessment']['verdict'], 'violated')
+        self.assertFalse(flutter['assessment']['provisionable'])
+        self.assertEqual(report['provisionable'], [])
+
+    def test_fvm_selection_without_range_is_not_treated_as_unconstrained(self):
+        write(self.projects, {'flutter-app/.fvmrc': '{"flutter":"3.44.8"}',
+            'flutter-app/web/pubspec.yaml': 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n'})
+        report = self.analysis.effective('flutter-app', which=lambda name: '/usr/bin/' + name,
+                                         run=fake_run('3.40.0'))
+        flutter = next(item for item in report['requirements'] if item['tool'] == 'flutter')
+        self.assertEqual(flutter['constraint'], '3.44.8')
+        self.assertEqual(flutter['assessment']['verdict'], 'violated')
+
+    def test_every_component_range_is_checked_in_the_host_summary(self):
+        write(self.projects, {'app/nested/package.json': '{"engines":{"node":">=22"}}'})
+        node = next(item for item in self.effective()['requirements'] if item['tool'] == 'node')
+        self.assertEqual(node['assessment']['verdict'], 'violated')
+        self.assertFalse(node['assessment']['provisionable'])
+
+    def test_missing_release_version_keeps_its_specific_installation_refusal(self):
+        analysis = ProjectAnalysis(self.projects,
+            toolchains=lambda: {'node': {'executable': ''}}, catalog=lambda: {'node': {}})
+        report = analysis.effective('app', which=lambda name: '/usr/bin/' + name,
+                                    run=fake_run('20.11.1'))
+        node = next(item for item in report['requirements'] if item['tool'] == 'node')
+        self.assertEqual(node['assessment']['offer']['reason'],
+                         'This release declares no version for node, so it cannot install it.')
+        self.assertFalse(node['assessment']['provisionable'])
+
+    def test_disagreeing_pins_preserve_a_certain_failure(self):
+        write(self.projects, {
+            'flutter-app/one/.fvmrc': '{"flutter":"3.44.8"}',
+            'flutter-app/two/.fvmrc': '{"flutter":"3.40.0"}',
+            'flutter-app/one/pubspec.yaml': 'name: one\ndependencies:\n  flutter:\n    sdk: flutter\n',
+            'flutter-app/two/pubspec.yaml': 'name: two\ndependencies:\n  flutter:\n    sdk: flutter\n',
+        })
+        for measured in ('3.30.0', '3.40.0'):
+            with self.subTest(measured=measured):
+                report = self.analysis.effective('flutter-app',
+                    which=lambda name: '/usr/bin/' + name, run=fake_run(measured))
+                flutter = next(item for item in report['requirements'] if item['tool'] == 'flutter')
+                self.assertEqual(flutter['assessment']['verdict'], 'violated')
+                self.assertIn('does not satisfy every component', flutter['assessment']['detail'])
+                self.assertFalse(flutter['assessment']['provisionable'])
+
+    def test_uninterpretable_disagreeing_selections_remain_undecidable(self):
+        write(self.projects, {
+            'flutter-app/one/.fvmrc': '{"flutter":"stable"}',
+            'flutter-app/two/.fvmrc': '{"flutter":"beta"}',
+            'flutter-app/one/pubspec.yaml': 'name: one\ndependencies:\n  flutter:\n    sdk: flutter\n',
+            'flutter-app/two/pubspec.yaml': 'name: two\ndependencies:\n  flutter:\n    sdk: flutter\n',
+        })
+        report = self.analysis.effective('flutter-app',
+            which=lambda name: '/usr/bin/' + name, run=fake_run('3.44.8'))
+        flutter = next(item for item in report['requirements'] if item['tool'] == 'flutter')
+        self.assertEqual(flutter['assessment']['verdict'], 'undecidable')
+        self.assertFalse(flutter['assessment']['provisionable'])
+
     def test_an_override_supplements_and_is_reported_when_it_disagrees(self):
         self.overrides['app'] = dict(repository='app', origin='operator_override',
                                      toolchain='node', constraint='>=22', notation='semver',

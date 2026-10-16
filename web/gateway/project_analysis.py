@@ -21,6 +21,7 @@ from pathlib import Path
 import threading
 import time
 
+import dependency_constraints
 import project_inventory
 import project_requirements
 
@@ -30,7 +31,7 @@ WORKING_TREE_TTL = 30.0
 CACHE_LIMIT = 64
 # Bumped whenever a change alters what a report means, so old entries are unused
 # rather than reinterpreted.
-ANALYZER_VERSION = 3
+ANALYZER_VERSION = 4
 
 
 def stamp():
@@ -195,6 +196,7 @@ class ProjectAnalysis:
                                                 notation=requirement['notation'],
                                                 selected=requirement.get('selected', ''),
                                                 resolution=requirement.get('resolution'),
+                                                selection_lookup=requirement.get('selection_lookup'),
                                                 established=requirement['established'],
                                                 observations=requirement['observations']))
                 entry['observations'].extend(requirement['observations'])
@@ -220,8 +222,12 @@ class ProjectAnalysis:
 
         for entry in resolved.values():
             override = entry['override']
+            # A selected SDK is evidence too. Ignoring it would call any
+            # installed Flutter satisfactory even when FVM pins another one.
+            selections = sorted({item['selected'] for item in entry['discovered'] if item['selected']})
             constraint = (override['constraint'] if override else
-                          next((item['constraint'] for item in entry['discovered'] if item['constraint']), ''))
+                          next((item['constraint'] for item in entry['discovered'] if item['constraint']),
+                               selections[0] if len(selections) == 1 else ''))
             notation = (override['notation'] if override else
                         next((item['notation'] for item in entry['discovered']), 'semver'))
             entry['constraint'] = constraint
@@ -231,6 +237,38 @@ class ProjectAnalysis:
                      toolchain=entry['tool'], constraint=constraint, notation=notation,
                      actor=override['actor'] if override else '', at=''),
                 environment.get(entry['tool']), catalog, which, run, force)
+            if not override:
+                # Compatibility ranges and SDK selections both apply, across
+                # every component. The summary must not bless just the first
+                # component's declaration or lose a pin beside a broad range.
+                checks = [(item[key], item['notation']) for item in entry['discovered']
+                          for key in ('constraint', 'selected') if item[key]]
+                assessment = entry['assessment']
+                if assessment['measured'] and checks:
+                    verdicts = [dependency_constraints.evaluate(value, assessment['measured'], notation)
+                                for value, notation in checks]
+                    if 'violated' in verdicts:
+                        assessment.update(verdict='violated',
+                            detail=f"Measured {entry['tool']} {assessment['measured']} does not satisfy "
+                                   'every component declaration and SDK selection.')
+                    elif 'undecidable' in verdicts:
+                        assessment.update(verdict='undecidable',
+                            detail='The measured SDK cannot be assessed against every declaration and selection.')
+                offer = assessment.get('offer')
+                if offer and offer['version'] and not all(
+                        dependency_constraints.evaluate(value, offer['version'], notation) == 'satisfied'
+                        for value, notation in checks):
+                    assessment['offer'] = dict(offer, satisfies=False,
+                        reason='The release SDK does not satisfy every component declaration and selection.')
+                    assessment['provisionable'] = False
+            if not override and (len(selections) > 1 or any(
+                    item.get('selection_lookup', {}).get('status') == 'unresolved'
+                    for item in entry['discovered'] if item.get('selection_lookup'))):
+                entry['assessment']['provisionable'] = False
+                # Unknown selections cannot erase an already proven failure.
+                if entry['assessment']['verdict'] != 'violated':
+                    entry['assessment'].update(verdict='undecidable',
+                        detail='SDK selections disagree or could not be read; no single host verdict is established.')
             if any(item.get('resolution') is not None for item in entry['discovered']):
                 # A probe from the gateway's cwd cannot establish which .NET
                 # SDK would be selected for a component invocation context.

@@ -256,7 +256,10 @@ void main() {
                   {'label': 'ASP.NET Core'},
                 ],
                 'candidate_commands': [
-                  {'command': 'dotnet test'},
+                  {
+                    'command': ['dotnet', 'test'],
+                    'source': 'convention',
+                  },
                 ],
                 'requirements': [
                   {
@@ -295,7 +298,8 @@ void main() {
       expect(content, contains('Component: Api'));
       expect(content, contains('.NET · C#'));
       expect(content, contains('Frameworks: ASP.NET Core'));
-      expect(content, contains('Candidate commands: dotnet test'));
+      expect(content, contains('Candidate command: dotnet test (convention)'));
+      expect(content, isNot(contains(' ·  · ')));
       expect(content, isNot(contains("Instance of 'Text'")));
       expect(
         content,

@@ -472,11 +472,40 @@ def manifest_reader(root):
     return read
 
 
-def requirements_for(ecosystem, present, read):
+def requirements_for(ecosystem, present, read, component='.', paths=()):
     """Every requirement one component states, with its competing declarations."""
     resolved = []
     for requirement in ecosystem.get('requirements', ()):
-        observations = _observations(requirement, present, read)
+        sources = present
+        lookup = None
+        if requirement['tool'] == 'flutter':
+            # FVM searches the invocation directory and its ancestors. Assume
+            # the component directory and stop at the repository boundary;
+            # neither a gateway cwd nor a host-global pin describes this repo.
+            location = PurePosixPath(component)
+            search = []
+            while True:
+                search.append((location / '.fvmrc').as_posix())
+                if location == PurePosixPath('.'):
+                    break
+                location = location.parent
+            candidates = [name for name in search if name in paths]
+            if '.fvmrc' in present and present['.fvmrc'] not in candidates:
+                candidates.insert(0, present['.fvmrc'])
+            sources = dict(present)
+            if candidates:
+                sources['.fvmrc'] = candidates[0]
+                lookup = dict(directory=component, evidence=candidates[0],
+                              shadowed=candidates[1:], boundary='repository root',
+                              status='resolved')
+        observations = _observations(requirement, sources, read)
+        if lookup and not any(item['file'] == lookup['evidence'] and not item['unreadable']
+                              for item in observations):
+            lookup['status'] = 'unresolved'
+            observations.append(dict(file=lookup['evidence'], field='flutter', value=None,
+                                     role='selection', unreadable=True,
+                                     reason='The nearest .fvmrc has no readable Flutter selection; '
+                                            'ancestor pins are not substituted.'))
         readable = [item for item in observations if not item['unreadable']]
         constraint = next((item['value'] for item in readable if item['role'] == 'constraint'), '')
         selection = next((item['value'] for item in readable if item['role'] == 'selection'), '')
@@ -488,19 +517,21 @@ def requirements_for(ecosystem, present, read):
         if established:
             reason = ''
         elif observations:
-            reason = 'A declaration exists but could not be read: ' + ', '.join(
-                item['file'] for item in observations) + '.'
+            reason = ' '.join(dict.fromkeys(item['reason'] for item in observations if item['reason']))
         else:
             tried = [source['file'] + ('#' + source['field'] if source.get('field') else '')
                      for source in requirement.get('sources', ())]
             reason = 'No version declaration was found in ' + ', '.join(tried) + '.'
-        resolved.append(dict(tool=requirement['tool'], label=requirement['label'],
+        item = dict(tool=requirement['tool'], label=requirement['label'],
                              purpose=requirement.get('purpose', ''),
                              notation=requirement.get('notation', ''),
                              executable=requirement.get('executable', ''),
                              constraint=constraint, selected=selection,
                              observations=observations, conflicts=conflicts,
-                             established=established, reason=reason))
+                             established=established, reason=reason)
+        if lookup:
+            item['selection_lookup'] = lookup
+        resolved.append(item)
     return resolved
 
 
@@ -848,8 +879,11 @@ def analyse(root, inventory=None, read=None, lookup_context=None):
         lockfiles, frameworks = set(), {}
         for ecosystem in ecosystems:
             applicable = applicability(ecosystem, present, read)
-            requirements = ([dotnet_sdk(path, paths, read, lookup_context)]
-                             if ecosystem['id'] == 'dotnet' else requirements_for(ecosystem, present, read))
+            # Reuse the census index: ancestor membership must not rescan the
+            # entire inventory for each component's lookup directory.
+            requirements = ([dotnet_sdk(path, classification, read, lookup_context)]
+                             if ecosystem['id'] == 'dotnet' else
+                             requirements_for(ecosystem, present, read, path, classification))
             for requirement in requirements:
                 if requirement['tool'] not in applicable:
                     continue
@@ -896,9 +930,18 @@ def analyse(root, inventory=None, read=None, lookup_context=None):
 
     components.extend(inferred_components(classification, components))
 
-    registered = {marker.lower() for ecosystem in ECOSYSTEMS for marker in ecosystem['markers']}
+    # Markers create components; auxiliary declarations and lockfiles are also
+    # understood inputs, without themselves proving another component exists.
+    registered = {name.lower() for ecosystem in ECOSYSTEMS for name in (
+        *ecosystem['markers'], *ecosystem.get('managers', {}),
+        *(source['file'] for requirement in ecosystem['requirements']
+          for source in requirement.get('sources', ())))}
+    registered.update(PurePosixPath(name).name.lower() for name, _, _ in CONFIGURED)
+    registered.update(PurePosixPath(name).name.lower() for name in COMPUTED)
     unregistered = sorted({PurePosixPath(name).name for name in inventory['manifests']
-                           if PurePosixPath(name).name.lower() not in registered})
+                           if PurePosixPath(name).name.lower() not in registered
+                           and not any(PurePosixPath(name).name.lower().endswith(ecosystem.get('suffix_markers', ()))
+                                       for ecosystem in ECOSYSTEMS)})
     unresolved = []
     if unregistered:
         unresolved.append(dict(what='unregistered manifests',

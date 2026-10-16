@@ -88,6 +88,21 @@ class ProbeArgumentTests(unittest.TestCase):
 
 
 class AssessmentTests(unittest.TestCase):
+    def test_python3_is_detected_without_a_python_alias(self):
+        report = project_toolchains.assess(saved('python', '>=3.11', 'pep440'),
+            which=which('python3'), run=fake_run('3.12.2'))
+        self.assertEqual(report['verdict'], 'satisfied')
+        self.assertEqual(report['selected'], '/usr/bin/python3')
+
+    def test_python_aliases_are_all_measured_and_duplicate_paths_are_not_repeated(self):
+        report = project_toolchains.assess(saved('python'),
+            which=lambda name: '/usr/bin/' + name, run=fake_run('3.12.2'))
+        self.assertEqual([item['path'] for item in report['candidates']],
+                         ['/usr/bin/python3', '/usr/bin/python'])
+        report = project_toolchains.assess(saved('python'),
+            which=lambda name: '/usr/bin/python3', run=fake_run('3.12.2'))
+        self.assertEqual(len(report['candidates']), 1)
+
     def assess(self, record, entry=None, catalog=None, name='node', version='20.11.1'):
         return project_toolchains.assess(record, entry, catalog,
                                          which=which(name), run=fake_run(version))

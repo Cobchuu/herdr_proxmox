@@ -246,6 +246,11 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
               Text('Shadowed declarations: ${resolution['shadowed']}'),
             if (resolution['reason'] != null) Text('${resolution['reason']}'),
           ],
+          if (item['selection_lookup'] is Map)
+            Text(
+              'FVM lookup: ${(item['selection_lookup'] as Map)['directory']} · '
+              '${(item['selection_lookup'] as Map)['evidence']} · boundary: repository root',
+            ),
         ],
       ),
     );
@@ -278,9 +283,14 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
             ),
           ),
           if (components.isNotEmpty) Text('Component: $components'),
-          Text(measured.isEmpty ? 'No installed version was measured.' : 'Measured $measured'),
+          Text(
+            measured.isEmpty
+                ? 'No installed version was measured.'
+                : 'Measured $measured',
+          ),
           Text('${assessment['detail'] ?? ''}'),
-          if (assessment['installer'] == true && assessment['provisionable'] != true)
+          if (assessment['installer'] == true &&
+              assessment['provisionable'] != true)
             Text('${(assessment['offer'] as Map?)?['reason'] ?? ''}'),
         ],
       ),
@@ -322,7 +332,9 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                     )
                   else if (loaded != null) ...[
                     Text(
-                      'Source: ${source['scope']} · ${source['revision'] ?? ''} · assessed ${source['at']}',
+                      'Source: ${source['scope']}'
+                      '${'${source['revision'] ?? ''}'.isEmpty ? '' : ' · ${source['revision']}'}'
+                      ' · assessed ${source['at']}',
                     ),
                     Text(
                       'Boundary: ${source['boundary'] ?? 'repository root'} · cache ${source['cache_seconds'] ?? 0}s',

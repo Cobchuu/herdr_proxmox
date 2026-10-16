@@ -227,6 +227,16 @@ are refused, and only regular manifests are read within the byte budget. Native
 access requires a Linux gateway and fails closed on unsupported platforms.
 Committed discovery continues to use the pinned Git tree.
 
+Flutter components also consult the nearest `.fvmrc` in their ancestor chain,
+starting at the component directory and stopping at the repository root. This
+models [FVM's ancestor lookup](https://fvm.app/documentation/guides/running-flutter)
+within an explicit boundary; it does not prove a later command invokes FVM.
+A nearer unreadable pin stays unresolved instead of falling back to an ancestor.
+Pure Dart packages do not acquire a Flutter requirement just because an ancestor
+pins Flutter. Host assessment checks selected versions as well as compatibility
+ranges, across all components. Python probes include both `python3` and `python`;
+an installed runtime still does not establish an undeclared project version.
+
 .NET SDK discovery starts its `global.json` search at the component directory
 unless the analyzer receives an explicit CLI lookup directory. This is a stated
 lookup assumption, not proof of the cwd a later build will use. The nearest
