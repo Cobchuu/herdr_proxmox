@@ -7,39 +7,10 @@ import 'task_timeline.dart';
 import 'task_workflow.dart';
 import 'task_clipboard.dart';
 import 'task_list.dart';
+import 'task_state.dart';
+export 'task_state.dart';
 import '../ui.dart' as ui;
 import '../overview.dart' show activityFor;
-
-/// Task lifecycle labels. The gateway owns these states; an unknown value is
-/// shown verbatim rather than guessed.
-const taskStates = <String, String>{
-  'completed': 'Done',
-  'draft': 'Draft',
-  'implementing': 'Implementing',
-  'review_ready': 'Review ready',
-  'published': 'Published',
-  'pr_open': 'Pull request open',
-  'merged': 'Merged',
-  'closed': 'Closed',
-};
-
-/// Whether the assigned agent has committed and only the capture step remains.
-///
-/// `implementing` covers two very different situations: the agent is still
-/// working, and the agent has committed a candidate that needs an operator to
-/// capture it. The gateway reports the second as `awaiting_candidate`, because
-/// the execution stays bound to the task in both cases, availability reports
-/// `working` for both, and the completion receipt is only written at capture
-/// time — so nothing else on the task distinguishes them.
-bool candidateWaiting(Map<String, dynamic> task) =>
-    '${task['state']}' == 'implementing' && task['awaiting_candidate'] == true;
-
-String taskState(Map<String, dynamic> task) =>
-    (task['assignment'] as Map?)?['state'] == 'queued'
-    ? 'Queued'
-    : candidateWaiting(task)
-    ? 'Need candidate'
-    : taskStates['${task['state']}'] ?? '${task['state']}';
 
 bool needsPrAuthentication(Map github, String? repository) =>
     (github['publication']

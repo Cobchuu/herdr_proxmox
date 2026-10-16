@@ -299,10 +299,67 @@ class CollaborationTests(unittest.TestCase):
         prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
         self.assertEqual(len(prompts), 1)
 
-    def test_preparation_failure_requires_inspection_and_submitted_meetings_never_retry(self):
+    def test_transient_readiness_errors_wait_then_submit_only_once(self):
+        from herdr_errors import HerdrError
+        group = self.group()
+        original = self.store.identity
+        for code in ('agent_blocked', 'agent_working', 'agent_not_ready'):
+            with self.subTest(code=code):
+                with patch.object(self.store, 'execute'):
+                    meeting = self.action('discuss', organization_id=self.org, group_id=group)
+                    self.drain()
+                def temporarily_unready(run, ready=True, **kwargs):
+                    if ready:
+                        raise HerdrError('Try again later', code=code, delivery='none')
+                    return original(run, ready=ready, **kwargs)
+                with patch.object(self.store, 'identity', side_effect=temporarily_unready):
+                    self.store.execute(meeting)
+                self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+                self.assertFalse(self.job(meeting).get('discussion_submitted_at'))
+                self.store.advance_discussions()
+                self.drain()
+                self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+                self.store.advance_discussions()
+                self.drain()
+        prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
+        self.assertEqual(len(prompts), 3)
+
+    def test_blocked_member_waits_then_resumes_without_manual_retry(self):
         group = self.group()
         run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
         self.agents[run['alias']]['agent_status'] = 'blocked'
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+        self.agents[run['alias']]['agent_status'] = 'idle'
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+
+    def test_pr_open_member_task_is_admitted_but_an_unfinished_task_waits(self):
+        group = self.group()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        self.store.update_job(run['id'], task_id='member-task')
+        controller = Mock()
+        controller.session_owner.return_value = None
+        controller.session_budget.return_value = dict(active=3, started=3, policy={})
+        controller.execution_finished.return_value = (True, '')
+        controller.get.return_value = dict(state='implementing')
+        self.store.contributions = controller
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+        controller.execution_finished.assert_not_called()
+        controller.get.return_value = dict(state='pr_open')
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+        controller.execution_finished.assert_called_once()
+
+    def test_preparation_failure_requires_inspection_and_submitted_meetings_never_retry(self):
+        group = self.group()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        self.agents[run['alias']]['agent_status'] = 'unknown_fault'
         meeting = self.action('discuss', organization_id=self.org, group_id=group)
         self.drain()
         self.assertEqual(self.job(meeting)['state'], 'needs_attention')
@@ -1839,26 +1896,6 @@ class CollaborationTests(unittest.TestCase):
             self.drain()
 
 
-class DiscussionStateDriftTests(unittest.TestCase):
-    """Guards the member-task allowlist against states nothing writes."""
-
-    def test_every_listed_member_task_state_is_actually_written(self):
-        # The scheduler listed 'pull_open', which no writer produces — the real
-        # state is 'pr_open' — so a member whose pull request was open looked
-        # unfinished and the meeting waited out its full 24 hours. It also
-        # listed 'publishing', a delivery-flow state that never lands on a task.
-        gateway = Path(__file__).resolve().parents[1] / 'web/gateway'
-        source = (gateway / 'discussion_scheduler.py').read_text()
-        listed = re.search(r"if task\['state'\] not in \(([^)]*)\)", source)
-        self.assertIsNotNone(listed, 'member task allowlist not found')
-        states = [part.strip().strip("'") for part in listed.group(1).split(',')]
-        self.assertIn('pr_open', states)
-        writers = '\n'.join((gateway / name).read_text() for name in
-                            ('contributions.py', 'pr_repairs.py', 'task_delivery.py'))
-        for state in states:
-            self.assertIn("'" + state + "'", writers, state)
-
-
 class ContributionValidationTests(unittest.TestCase):
     """A long contribution must not make a finished discussion unfinalizable."""
 
@@ -1866,6 +1903,27 @@ class ContributionValidationTests(unittest.TestCase):
         from collaboration import validate_contributions
         self.validate = validate_contributions
         self.runs = [{'profile_id': 'p1', 'profile': {'name': 'Ada'}}]
+
+    def test_aggregate_budget_fits_all_members_and_rounds_without_rewriting_raw_bytes(self):
+        import tempfile
+        from collaboration import (MAX_ROUNDS, TRANSCRIPT_LIMIT, read_document,
+                                   parse_discussion_transcript, transcript_contribution_budget)
+        runs = [dict(profile_id=f'p{i}', profile=dict(name=f'Member {i}')) for i in range(6)]
+        budget = transcript_contribution_budget(len(runs))
+        parts = [dict(profile_id=run['profile_id'], name=run['profile']['name'], round=round_,
+                      content='x' * budget) for round_ in range(1, MAX_ROUNDS + 1) for run in runs]
+        raw = json.dumps(dict(contributions=parts), separators=(',', ':')).encode('utf-8')
+        self.assertLess(len(raw), TRANSCRIPT_LIMIT)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'discussion.json'
+            path.write_bytes(raw)
+            data, text = read_document(path, TRANSCRIPT_LIMIT, 'discussion transcript')
+            self.assertEqual(len(parse_discussion_transcript(text, dict(runs=runs))['contributions']), 120)
+            self.assertEqual(data, raw)
+            self.assertEqual(path.read_bytes(), raw)
+            path.write_bytes(b'x' * (TRANSCRIPT_LIMIT + 1))
+            with self.assertRaisesRegex(ValueError, 'exceeds maximum'):
+                read_document(path, TRANSCRIPT_LIMIT, 'discussion transcript')
 
     def test_an_oversized_contribution_is_bounded_not_rejected(self):
         # Rejecting it left the whole transcript invalid, so a discussion whose

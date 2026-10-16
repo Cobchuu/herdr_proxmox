@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'dart:math';
-
 import '../services.dart';
 
 import '../ui.dart';
@@ -9,9 +7,6 @@ import '../ui.dart';
 import 'org_forms.dart';
 
 import 'org_ui.dart';
-
-String newRequestId() =>
-    '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(0x7fffffff)}';
 
 class OrganizationAutomation extends StatefulComponent {
   const OrganizationAutomation({super.key, required this.organizationId});
@@ -118,7 +113,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
 
       ...chosen,
 
-      'request_id': newRequestId(),
+      'request_id': requestId(),
     };
 
     await save();
@@ -179,7 +174,11 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
     final admin =
         connection.state.connected &&
         connection.operator.value['role'] == 'admin';
-    final entries = policy?.entries.toList() ?? const [];
+    final entries =
+        policy?.entries
+            .where((e) => automationLabels.containsKey(e.key))
+            .toList() ??
+        const [];
     final switches = entries.where((e) => e.value is bool).toList();
     final limits = entries.where((e) => e.value is! bool).toList();
 
@@ -196,10 +195,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
                 el('h3', [text('Automation')], classes: 'overline'),
                 factList([
                   for (final entry in switches)
-                    (
-                      automationLabels[entry.key] ?? humanize(entry.key),
-                      value(entry.value),
-                    ),
+                    (automationLabels[entry.key]!, value(entry.value)),
                 ], classes: 'org-policy__list'),
               ], classes: 'org-policy__group'),
             if (limits.isNotEmpty)
@@ -207,10 +203,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
                 el('h3', [text('Limits')], classes: 'overline'),
                 factList([
                   for (final entry in limits)
-                    (
-                      automationLabels[entry.key] ?? humanize(entry.key),
-                      value(entry.value),
-                    ),
+                    (automationLabels[entry.key]!, value(entry.value)),
                 ], classes: 'org-policy__list'),
               ], classes: 'org-policy__group'),
           ], classes: 'org-policy'),

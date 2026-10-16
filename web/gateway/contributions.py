@@ -1246,21 +1246,25 @@ class Contributions:
         with self.operation('policy:' + organization_id):
             policy = self.policy(organization_id)
             was_enabled = policy['auto_queue_proposals']
+            previous = dict(policy)
             for key in ('auto_queue_proposals', 'paused', 'reap_finished_sessions', 'reap_orphaned_panes',
                         'auto_validate', 'auto_publish'):
                 if key in body:
                     if not isinstance(body[key], bool):
                         raise ValueError('Invalid automation policy value.')
                     policy[key] = body[key]
-            # The same gates the per-task settings apply. Accepting a delivery
-            # default nothing can honour would promise work that never happens,
-            # which is worse than leaving the task manual and saying so.
-            if policy['auto_validate'] and (self.validation is None
-                                            or self.validation.snapshot().get('executor') != 'service'):
+            # Enabling delivery needs its dependencies. Pausing, disabling and
+            # changing unrelated limits must remain possible during an outage.
+            enabling_delivery = any(policy[key] and not previous[key]
+                                    for key in ('auto_validate', 'auto_publish'))
+            if enabling_delivery and (self.validation is None
+                                      or self.validation.snapshot().get('executor') != 'service'):
                 raise ValueError('Automatic capture and validation needs the durable build service; '
                                  'install it under Builds & deployments first.')
             if policy['auto_publish'] and not policy['auto_validate']:
                 raise ValueError('Automatic publication requires automatic capture and validation.')
+            if policy['auto_publish'] and not previous['auto_publish'] and not self.github.snapshot().get('configured'):
+                raise ValueError('Configure GitHub publishing before enabling automatic publication.')
             for key, low, high in AUTOMATION_LIMITS:
                 if key in body:
                     if type(body[key]) is not int or not low <= body[key] <= high:
@@ -1751,6 +1755,7 @@ class Contributions:
     def snapshot(self, role='admin'):
         with closing(self.connect()) as db:
             tasks = [json.loads(row[0]) for row in db.execute('SELECT data FROM tasks ORDER BY rowid DESC LIMIT 100')]
+        common_dirs = {}  # Request-scoped only: never reuse live readiness across polls.
         for task in tasks:
             task.pop('diff', None)  # Fetch the candidate only when reviewing it.
             # The frozen dispatch payload is server-side retry state, not evidence.
@@ -1761,7 +1766,7 @@ class Contributions:
             # The workflow and list views read this same snapshot, so the label
             # has to be derivable here too — only for tasks in flight, which is
             # normally the one being worked on.
-            task['awaiting_candidate'] = self.awaiting_candidate(task)
+            task['awaiting_candidate'] = self.awaiting_candidate(task, common_dirs)
         try:
             github = self.github.snapshot()
         except ValueError as error:
@@ -1784,7 +1789,7 @@ class Contributions:
                           for organization, policy in automation.items()}
         return dict(tasks=tasks, github=github, executor=executor, automation=automation)
 
-    def awaiting_candidate(self, task):
+    def awaiting_candidate(self, task, common_dirs=None):
         """Whether an agent has committed and only the capture step remains.
 
         'implementing' covers both an agent still working and an agent whose
@@ -1800,14 +1805,21 @@ class Contributions:
         if not baseline:
             return False
         try:
-            tree = self.tree_for(task)
-            head = project_git.git(tree, 'rev-parse', 'HEAD').strip()
-            if not head or head == baseline:
+            tree = project_directory(self.projects, task['worktree'])
+            repository = self.path_for(task)
+            # One status provides HEAD, branch and dirtiness. A collapsed
+            # untracked directory is already enough to reject readiness.
+            status = project_git.git(tree, 'status', '--porcelain=v2', '--branch',
+                                     '--untracked-files=normal').splitlines()
+            headers = dict(line[2:].split(' ', 1) for line in status if line.startswith('# '))
+            head = headers.get('branch.oid') or ''
+            branch = headers.get('branch.head')
+            if (not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', head) or head == baseline
+                    or branch != task['branch'] or any(not line.startswith('# ') for line in status)):
                 return False
-            # Capture rejects uncommitted changes, including unfinished work
-            # after an intermediate commit. Do not label those ready to capture.
-            return (not project_git.merge_state(tree) and
-                    not project_git.git(tree, 'status', '--porcelain=v1', '--untracked-files=all').strip())
+            _, _, absolute = project_git.checkout_identity(
+                tree, repository, common_dirs=common_dirs, branch=branch)
+            return not project_git.merge_state(tree, gitdir=absolute)
         except (KeyError, TypeError, ValueError, OSError):
             # A task with no recorded checkout, or an unreadable one, simply has
             # no candidate to report.
@@ -1947,12 +1959,9 @@ class Contributions:
 
     def tree_for(self, task):
         path = project_directory(self.projects, task['worktree'])
-        if project_git.git(path, 'symbolic-ref', '--short', 'HEAD').strip() != task['branch']:
+        branch, _, _ = project_git.checkout_identity(path, self.path_for(task))
+        if branch != task['branch']:
             raise ValueError('Task checkout changed branch; inspect it first.')
-        repository = self.path_for(task)
-        if project_git.git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir').strip() != project_git.git(
-                repository, 'rev-parse', '--path-format=absolute', '--git-common-dir').strip():
-            raise ValueError('Task checkout belongs to a different repository.')
         return path
 
     def action(self, action, body, actor, role):
@@ -2617,6 +2626,30 @@ class Contributions:
             self.store.update_job(job_id, manual_proposal_starts=starts)
             return made
 
+    def delivery_settings(self, task, automatic, publish, actor, organization_policy=None):
+        """Prepare the same delivery contract for inherited and explicit policy."""
+        if not isinstance(automatic, bool) or not isinstance(publish, bool):
+            raise ValueError('Choose whether automatic validation and publication are enabled.')
+        if automatic and (self.validation is None or self.validation.snapshot().get('executor') != 'service'):
+            raise ValueError('Install the durable build service before enabling automatic task validation.')
+        if publish and not automatic:
+            raise ValueError('Automatic publication requires automatic capture and validation.')
+        settings = dict(auto_validate=automatic, auto_publish=publish, await_verification=automatic)
+        if publish:
+            if not self.github.snapshot().get('configured'):
+                raise ValueError('Configure GitHub publishing before enabling automatic publication.')
+            settings['publication_preflight'] = dict(self.github.publication_preflight(
+                task['github_repository'], publishing_repository(task)), at=stamp())
+            authorization = dict(actor=actor, at=stamp(), upstream=task['github_repository'],
+                                 repository=publishing_repository(task), branch=task['branch'])
+            if organization_policy is not None:
+                authorization['organization_policy'] = dict(
+                    organization_id=task['organization_id'],
+                    updated_by=organization_policy.get('updated_by'),
+                    updated_at=organization_policy.get('updated_at'))
+            settings['publication_authorization'] = authorization
+        return settings
+
     def perform(self, action, body, task_id, actor, automation_policy=None):
         if action == 'automation':
             return self.set_automation_policy(body, actor)
@@ -2650,7 +2683,6 @@ class Contributions:
                 raise ValueError('Select a worktree agent assigned to this repository.')
             if profile.get('group_id'):
                 raise ValueError('Assign an individual worker, not a discussion group.')
-            project_git.configured_base(repository, base)
             # Delivery automation comes from the organisation policy, so a task
             # created from a discussion is not silently manual. Seeded only when
             # the durable build service can honour it: a task claiming automatic
@@ -2664,10 +2696,11 @@ class Contributions:
                         publishing_repository=self.publishing_default(remote),
                         base_ref=base, base_sha=sha, branch='herdr/task-' + task_id[:12],
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
-                           created_at=stamp(), checks=[], audit=[], auto_validate=automatic,
-                           auto_publish=automatic and bool(delivery.get('auto_publish')),
-                           await_verification=False,
+                        created_at=stamp(), checks=[], audit=[],
                         assigned_agent={k: profile.get(k) for k in ('id', 'name', 'role', 'runtime')}, participants=[])
+            task.update(self.delivery_settings(task, automatic, automatic and bool(delivery.get('auto_publish')),
+                                               actor, organization_policy=delivery))
+            project_git.configured_base(repository, base)
             return self.save(task, 'create', actor)
         task = self.get(task_id)
         had_error = task.pop('error', None) is not None
@@ -2900,21 +2933,10 @@ class Contributions:
                     raise ValueError('Restore the original task session before enabling verification and inspection.')
             if not isinstance(body.get('auto_validate'), bool):
                 raise ValueError('Choose whether automatic capture and validation is enabled.')
-            if body['auto_validate'] and (not self.validation or self.validation.snapshot().get('executor') != 'service'):
-                raise ValueError('Install the durable build service before enabling automatic task validation.')
             automatic_publication = body.get('auto_publish', task.get('auto_publish', False))
             if not isinstance(automatic_publication, bool):
                 raise ValueError('Choose whether automatic draft PR publication is enabled.')
-            if automatic_publication and not body['auto_validate']:
-                raise ValueError('Automatic publication requires automatic verification.')
-            if automatic_publication:
-                if not self.github.snapshot().get('configured'):
-                    raise ValueError('Configure GitHub publishing before enabling automatic publication.')
-                # Preflight includes the local upstream/destination allowlist checks.
-                task['publication_preflight'] = dict(
-                    self.github.publication_preflight(task['github_repository'], publishing_repository(task)), at=stamp())
-                task['publication_authorization'] = dict(actor=actor, at=stamp(),
-                    upstream=task['github_repository'], repository=publishing_repository(task), branch=task['branch'])
+            settings = self.delivery_settings(task, body['auto_validate'], automatic_publication, actor)
             if body.get('retry_delivery') is True:
                 if not body['auto_validate']:
                     raise ValueError('Enable verification before retrying delivery.')
@@ -2932,8 +2954,7 @@ class Contributions:
                     attempt=old.get('attempt', 0) + 1, previous_state=old.get('state'), started_at=stamp())
             if stopping_delivery and old:
                 old.update(state='cancelled', cancelled_by=actor, cancelled_at=stamp())
-            task.update(auto_validate=body['auto_validate'], auto_publish=automatic_publication,
-                        await_verification=body['auto_validate'])
+            task.update(settings)
         elif action == 'candidate':
             path = self.tree_for(task)
             run = next((j for j in self.store.snapshot(live_status=False)['jobs'] if j['id'] == task.get('run_id')), None)

@@ -471,7 +471,18 @@ class ContributionTests(unittest.TestCase):
         self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent')]
         return self.service.action('candidate', dict(request_id='candidate-1', task_id=self.task['id']), 'admin', 'admin')
 
-    def _delivery_task(self, publish=True, build_state='complete', verified=True):
+    def inherited_task(self, publish=False):
+        self.store.snapshot.return_value['organizations'] = [dict(id='org')]
+        self.service.validation = MagicMock()
+        self.service.validation.snapshot.return_value = dict(executor='service')
+        self.service.set_automation_policy(dict(organization_id='org', auto_validate=True,
+                                               auto_publish=publish), 'policy-admin')
+        self.task = self.service.action('create', dict(self.body, request_id='inherited-task'), 'scheduler', 'admin')
+        return self.task
+
+    def _delivery_task(self, publish=True, build_state='complete', verified=True, inherited=False):
+        if inherited:
+            self.inherited_task(publish)
         task = self.candidate()
         run = self.store.snapshot.return_value['jobs'][0]
         run.update(profile_id='worker', kind='launch', task_id=task['id'], completion_token='handoff-token', alias='worker-alias')
@@ -480,8 +491,9 @@ class ContributionTests(unittest.TestCase):
         self.store.action.return_value = dict(id='feedback')
         self.service.validation = MagicMock()
         self.service.validation.snapshot.return_value = dict(executor='service')
-        task = self.service.action('policy', dict(request_id='delivery-policy', task_id=task['id'],
-                                    auto_validate=True, auto_publish=publish), 'admin', 'admin')
+        if not inherited:
+            task = self.service.action('policy', dict(request_id='delivery-policy', task_id=task['id'],
+                                        auto_validate=True, auto_publish=publish), 'admin', 'admin')
         task['builds'] = {task['head_sha']: dict(target=task['head_sha'], state=build_state,
                                                 required_checks_verified=verified, checks=[dict(id='tests', status='passed')],
                                                 # Evidence carries the policy it was produced
@@ -505,6 +517,88 @@ class ContributionTests(unittest.TestCase):
         result.update(changes)
         self.store.snapshot.return_value['jobs'].append(dict(id='feedback', kind='chat', state='answered',
             profile_id='worker', runs=[run], result=json.dumps(result), delivery=dict(stage='reply_verified')))
+
+    def assert_inherited_publication(self, fork=False):
+        import task_delivery
+        destination = 'contributor/repo' if fork else 'owner/repo'
+        self.api.publication_settings.return_value = {
+            'owner/repo': dict(mode='fork' if fork else 'direct', publishing_repository=destination)}
+        task, run, pull = self._delivery_task(inherited=True)
+        authorization = task['publication_authorization']
+        self.assertEqual((authorization['repository'], authorization['branch']), (destination, task['branch']))
+        self.assertEqual(authorization['organization_policy']['updated_by'], 'policy-admin')
+        remote = [None]
+        def pushed(*args):
+            remote[0] = task['head_sha']
+        with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', side_effect=lambda t: remote[0]), \
+                patch('contributions.push', side_effect=pushed) as push:
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['state'], 'pr_open')
+            self.assertFalse(self.service.execution_finished(waiting, run)[0])
+            self._delivery_reply(task, run)
+            task_delivery.advance(self.service)
+            done = self.service.get(task['id'])
+            self.assertEqual(done['delivery_workflow']['state'], 'complete')
+            self.assertTrue(self.service.execution_finished(done, run)[0])
+            push.assert_called_once()
+            self.assertEqual(push.call_args.args[-1], destination)
+        task['publishing_repository'] = 'changed/repo'
+        with self.assertRaisesRegex(ValueError, 'destination changed'):
+            task_delivery.verify_authorization(task)
+
+    def test_inherited_direct_publication_completes_and_binds_authorization(self):
+        self.assert_inherited_publication()
+
+    def test_inherited_fork_publication_completes_and_binds_authorization(self):
+        self.assert_inherited_publication(fork=True)
+
+    def test_inherited_verification_reserves_agent_until_build_and_inspection_finish(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False, inherited=True, build_state='queued', verified=False)
+        self.assertTrue(task['await_verification'])
+        with patch('collaboration.current_run'):
+            self.assertFalse(self.service.execution_finished(task, run)[0])
+            task_delivery.advance(self.service)
+            self.store.action.assert_not_called()
+            evidence = task['builds'][task['head_sha']]
+            evidence.update(state='complete', required_checks_verified=True)
+            self.service.save(task, 'build_complete', 'tests')
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['delivery_workflow']['state'], 'waiting_agent')
+            self.assertFalse(self.service.execution_finished(waiting, run)[0])
+            self._delivery_reply(task, run)
+            task_delivery.advance(self.service)
+            self.assertTrue(self.service.execution_finished(self.service.get(task['id']), run)[0])
+        self.api.publication_preflight.assert_not_called()
+
+    def test_organization_pause_and_limit_edits_survive_executor_loss(self):
+        self.inherited_task(publish=True)
+        self.service.validation.snapshot.return_value = dict(executor='gateway')
+        self.service.set_automation_policy(dict(organization_id='org', paused=True), 'admin')
+        self.service.set_automation_policy(dict(organization_id='org', daily_cap=3), 'admin')
+        policy = self.service.policy('org')
+        self.assertTrue(policy['paused'])
+        self.assertTrue(policy['auto_validate'])
+        self.assertEqual(policy['daily_cap'], 3)
+        self.service.set_automation_policy(dict(organization_id='org', auto_publish=False, auto_validate=False), 'admin')
+        with self.assertRaisesRegex(ValueError, 'durable build service'):
+            self.service.set_automation_policy(dict(organization_id='org', auto_validate=True), 'admin')
+
+    def test_inherited_publication_requires_publishing_configuration_and_preflight(self):
+        self.inherited_task()
+        self.api.snapshot.return_value = dict(configured=False)
+        with self.assertRaisesRegex(ValueError, 'Configure GitHub'):
+            self.service.set_automation_policy(dict(organization_id='org', auto_publish=True), 'admin')
+        self.api.snapshot.return_value = dict(configured=True)
+        self.service.set_automation_policy(dict(organization_id='org', auto_publish=True), 'admin')
+        self.api.publication_preflight.side_effect = ValueError('Destination is not allowlisted')
+        base_configuration = self.repo / '.git' / 'herdr-base.json'
+        base_configuration.unlink()
+        with self.assertRaisesRegex(ValueError, 'not allowlisted'):
+            self.service.action('create', dict(self.body, request_id='invalid-destination'), 'admin', 'admin')
+        self.assertFalse(base_configuration.exists(), 'Rejected creation must not write repository configuration.')
 
     def test_delivery_automatically_publishes_exact_sha_then_waits_for_agent_inspection(self):
         import task_delivery
@@ -837,7 +931,7 @@ class ContributionTests(unittest.TestCase):
             self.service.action('policy', body, 'admin', 'admin')
         self.api.snapshot.return_value = dict(configured=True)
         body.update(request_id='disable-verify', auto_validate=False)
-        with self.assertRaisesRegex(ValueError, 'requires automatic verification'):
+        with self.assertRaisesRegex(ValueError, 'requires automatic capture and validation'):
             self.service.action('policy', body, 'admin', 'admin')
 
     def test_automatic_receipt_capture_and_build_are_exact_and_deduplicated(self):
@@ -1307,6 +1401,47 @@ class ContributionTests(unittest.TestCase):
         self.assertFalse(self.service.awaiting_candidate(dict(self.task, base_sha=None)))
         self.assertFalse(self.service.awaiting_candidate(dict(self.task, worktree=None)))
         self.assertFalse(self.service.awaiting_candidate(dict(self.task, state='completed')))
+
+    def test_candidate_waiting_rejects_an_unborn_branch(self):
+        unborn = self.root / 'unborn'
+        unborn.mkdir()
+        self.git('init', '-b', self.task['branch'], path=unborn)
+        status = self.git('status', '--porcelain=v2', '--branch', path=unborn)
+        self.assertIn('# branch.oid (initial)', status)
+        task = dict(self.task, state='implementing', repository='unborn', worktree=str(unborn))
+        self.assertFalse(self.service.awaiting_candidate(task))
+
+    def test_candidate_and_tree_checks_reject_the_same_foreign_checkout(self):
+        foreign = self.root / 'foreign'
+        foreign.mkdir()
+        self.git('init', '-b', self.task['branch'], path=foreign)
+        self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+                 'commit', '--allow-empty', '-m', 'Foreign history', path=foreign)
+        task = dict(self.task, state='implementing', worktree=str(foreign))
+        with self.assertRaisesRegex(ValueError, 'different repository'):
+            self.service.tree_for(task)
+        self.assertFalse(self.service.awaiting_candidate(task))
+
+    def test_candidate_snapshot_batches_git_metadata_without_caching_live_readiness(self):
+        candidate = self.candidate()
+        trees = []
+        for index in range(4):
+            tree, branch = self.root / f'bench-{index}', f'bench-{index}'
+            self.git('worktree', 'add', '-b', branch, str(tree), candidate['head_sha'])
+            task = dict(candidate, id=f'{index:032x}', branch=branch, worktree=str(tree),
+                        state='implementing', head_sha=None)
+            self.service.save(task, 'benchmark', 'tests')
+            trees.append(tree)
+        with patch.object(subprocess, 'run', wraps=subprocess.run) as git:
+            snapshot = self.service.snapshot()
+        active = [task for task in snapshot['tasks'] if task['state'] == 'implementing']
+        self.assertEqual(len(active), 4)
+        self.assertTrue(all(task['awaiting_candidate'] for task in active))
+        self.assertEqual(git.call_count, 9)  # Two commands per tree, one per shared repository.
+        (trees[0] / 'new-directory').mkdir()
+        (trees[0] / 'new-directory' / 'untracked').write_text('unfinished')
+        refreshed = {task['id']: task for task in self.service.snapshot()['tasks']}
+        self.assertFalse(refreshed['0' * 32]['awaiting_candidate'])
 
     def test_task_captures_explicit_base_and_launch_parameters(self):
         self.store.action.return_value = dict(id='run')

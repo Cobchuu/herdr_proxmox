@@ -9,6 +9,7 @@ import 'package:jaspr/dom.dart' as dom;
 import 'package:web/web.dart' as web;
 import '../ui.dart' as ui;
 import '../navigation.dart' as navigation;
+import 'package:herdr_dashboard_state/request_id.dart' as ids;
 export 'dart:async';
 export 'package:jaspr/client.dart';
 
@@ -1096,10 +1097,44 @@ class AlertDialog extends StatelessComponent {
       // Styled as the dialog's heading rather than body text: this component
       // renders inside the dialog body, so an unstyled title reads as the first
       // paragraph of the content.
-      dom.h2([title], classes: 'dialog__title'), if (content != null) content!,
+      _DialogHeading(title),
+      if (content != null) content!,
       Wrap(children: actions),
     ],
   );
+}
+
+class _DialogHeading extends StatefulComponent {
+  const _DialogHeading(this.title);
+  final Component title;
+  @override
+  State<_DialogHeading> createState() => _DialogHeadingState();
+}
+
+class _DialogHeadingState extends State<_DialogHeading> {
+  ui.DialogLabel? label;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final next = context
+        .dependOnInheritedComponentOfExactType<_DialogScope>()
+        ?.label;
+    if (next != label) {
+      label?.headings.value--;
+      label = next;
+      label?.headings.value++;
+    }
+  }
+
+  @override
+  void dispose() {
+    label?.headings.value--;
+    super.dispose();
+  }
+
+  @override
+  Component build(BuildContext context) =>
+      dom.h2([component.title], id: label?.headingId, classes: 'dialog__title');
 }
 
 class _DialogScope extends InheritedComponent {
@@ -1107,26 +1142,36 @@ class _DialogScope extends InheritedComponent {
     required super.child,
     required this.close,
     required this.completed,
+    required this.label,
   });
   final void Function(dynamic) close;
   final Future<void> completed;
+  final ui.DialogLabel label;
   @override
-  bool updateShouldNotify(_DialogScope oldComponent) => false;
+  bool updateShouldNotify(_DialogScope oldComponent) =>
+      oldComponent.label != label;
 }
 
 Future<T?> showDialog<T>({
   required BuildContext context,
   required Component Function(BuildContext) builder,
+  String semanticLabel = 'Dialog',
 }) async {
   final completed = Completer<void>();
+  final label = ui.DialogLabel(
+    'dialog-title-${ids.newRequestId()}',
+    fallback: semanticLabel,
+  );
   try {
     return await ui.showDialog<T>(
       '',
       (close) => _DialogScope(
         close: (value) => close(value as T?),
         completed: completed.future,
+        label: label,
         child: Builder(builder: builder),
       ),
+      label: label,
     );
   } finally {
     if (!completed.isCompleted) completed.complete();
@@ -1230,5 +1275,5 @@ class OrganizationRoute extends _Route {
   final String section;
   @override
   String get path =>
-      '/organization${section.isEmpty ? '' : '?section=${Uri.encodeQueryComponent(section)}'}';
+      '/organization${section.isEmpty ? '' : '?view=${Uri.encodeQueryComponent(section)}'}';
 }

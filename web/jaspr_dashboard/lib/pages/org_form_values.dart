@@ -1,4 +1,4 @@
-﻿/// Framework-independent form rules copied from the existing dashboard UI.
+/// Framework-independent form rules copied from the existing dashboard UI.
 /// They prepare form values; gateway repositories and blocs still own actions.
 void updateHireRuntime(
   Map<String, dynamic> values,
@@ -63,6 +63,9 @@ Map<String, String> runtimeChoices(
     } else if (id == current) {
       choices[id] = '$label - not ready: $problem';
     }
+  }
+  if (current.isNotEmpty && !choices.containsKey(current)) {
+    choices[current] = 'Runtime $current - readiness unavailable';
   }
   if (choices.isEmpty) {
     // Saying so beats an empty list: the reason is always something the

@@ -87,8 +87,9 @@ DOM renderer. No Canvas/WebGL terminal addon is included.
   port 8793. Use the printed demo token. Operational actions are simulated;
   do not enter real provider credentials into this preview.
 
-Verified locally: preserved Flutter suite **188 tests**, Jaspr VM suite **10 tests**,
-Chrome workflow suites (**56 tests**, run serially for shared browser focus), clean analyzers, optimized compilation, production asset
+At the initial migration checkpoint, `c721d84` on **13 October 2026**,
+local verification recorded **188 Flutter tests**, **10 Jaspr VM tests** and
+**56 Chrome tests** (run serially for shared browser focus), clean analyzers, optimized compilation, production asset
 packaging, version-guard mock build, and unchanged shared implementation contents.
 Browser inspection includes desktop/mobile layouts and zero iframe/canvas elements.
 The browser suites cover permissions, inspection/approval gates, stale accounts,
@@ -112,6 +113,8 @@ refresh when disclosures reopen, and remain bound to each stream across polling
 and reordering. Chart pan gestures work from the background, cards and names;
 a completed drag does not open a console or group by accident.
 
-The regression run passed 85 isolated Chrome tests, 10 VM tests, repository-wide
-Dart analysis and optimized compilation. Browser regressions use independent
+At the later checkpoint, `2cd84bf` on **14 October 2026**,
+the regression run passed **85 Chrome tests** and **10 VM tests**, repository-wide
+Dart analysis and optimized compilation. These counts describe historical runs;
+use the commands above for the current suite. Browser regressions use independent
 fixtures with simulated API responses, including real xterm DOM rendering.

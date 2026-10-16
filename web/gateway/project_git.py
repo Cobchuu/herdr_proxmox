@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import json
 from project_files import project_directory
-from repository_lock import repository_lock
+from repository_lock import common_directory, repository_lock
 
 
 def git(path, *arguments, timeout=15, index_file=None):
@@ -49,6 +49,30 @@ def _git(path, *arguments, timeout=15, index_file=None):
     return result.stdout.decode('utf-8', errors='replace')
 
 
+def checkout_identity(path, repository, *, common_dirs=None, branch=None):
+    """Validate ownership and return branch, common directory and Git directory.
+
+    A caller with a fresh porcelain status can supply its branch header to avoid
+    a second branch query. Only repository metadata is shared within a request.
+    """
+    if branch is None:
+        branch = git(path, 'symbolic-ref', '--short', 'HEAD').strip()
+    directories = git(path, 'rev-parse', '--path-format=absolute',
+                      '--git-common-dir', '--absolute-git-dir').splitlines()
+    if len(directories) != 2:
+        raise ValueError('Cannot resolve checkout metadata.')
+    common, absolute = (Path(directory).resolve() for directory in directories)
+    common_dirs = {} if common_dirs is None else common_dirs
+    if repository not in common_dirs:
+        try:
+            common_dirs[repository] = common_directory(repository)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError('Git is unavailable or the checkout inspection timed out.') from error
+    if common != common_dirs[repository]:
+        raise ValueError('Task checkout belongs to a different repository.')
+    return branch, common, absolute
+
+
 def checkout(root, path, base=None):
     records = git(path, 'status', '--porcelain=v1', '-z', '--untracked-files=normal').split('\0')
     changes = []
@@ -80,9 +104,9 @@ def checkout(root, path, base=None):
                 counts={kind: sum(c['kind'] == kind for c in changes) for kind in ('added', 'deleted', 'modified')})
 
 
-def merge_state(path):
+def merge_state(path, gitdir=None):
     """True when this checkout is in the middle of a merge, rebase or cherry-pick."""
-    gitdir = Path(git(path, 'rev-parse', '--absolute-git-dir').strip())
+    gitdir = Path(gitdir) if gitdir is not None else Path(git(path, 'rev-parse', '--absolute-git-dir').strip())
     return any((gitdir / name).exists()
                for name in ('MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD'))
 

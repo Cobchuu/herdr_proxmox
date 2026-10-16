@@ -83,10 +83,18 @@ void main() {
     test('offers only runtimes the gateway reports as ready', () {
       final choices = runtimeChoices([
         cli('codex', 'Codex'),
-        cli('claude', 'Claude Code', 'Claude Code has no Herdr integration, so its '
-            'sessions cannot report state or be resumed.'),
-        cli('agy', 'Antigravity', 'Antigravity is not installed. Install the CLI '
-            'before adding an agent.'),
+        cli(
+          'claude',
+          'Claude Code',
+          'Claude Code has no Herdr integration, so its '
+              'sessions cannot report state or be resumed.',
+        ),
+        cli(
+          'agy',
+          'Antigravity',
+          'Antigravity is not installed. Install the CLI '
+              'before adding an agent.',
+        ),
       ], null);
       expect(choices.keys, containsAll(['', 'codex']));
       expect(choices.keys, isNot(contains('claude')));
@@ -95,10 +103,13 @@ void main() {
     });
 
     test('an edited agent keeps its runtime, labelled with the reason', () {
-      final choices = runtimeChoices([
-        cli('codex', 'Codex'),
-        cli('agy', 'Antigravity', 'Antigravity has no Herdr integration.'),
-      ], {'runtime': 'agy'});
+      final choices = runtimeChoices(
+        [
+          cli('codex', 'Codex'),
+          cli('agy', 'Antigravity', 'Antigravity has no Herdr integration.'),
+        ],
+        {'runtime': 'agy'},
+      );
       expect(choices['agy'], contains('Antigravity'));
       expect(choices['agy'], contains('no Herdr integration'));
       expect(choices['codex'], 'Codex');
@@ -112,10 +123,16 @@ void main() {
       expect(choices[''], contains('No runtime is ready'));
     });
 
-    test('a missing snapshot leaves the choice open to the server', () {
+    test('a successful empty snapshot has no ready runtime', () {
       expect(runtimeChoices(const [], null), {
         '': 'No runtime is ready - connect a CLI account first',
       });
+    });
+
+    test('an edited runtime missing from the response stays visible', () {
+      final choices = runtimeChoices(const [], {'runtime': 'codex'});
+      expect(choices['codex'], 'Runtime codex - readiness unavailable');
+      expect(choices.keys, ['', 'codex']);
     });
   });
 }

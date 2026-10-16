@@ -16,6 +16,15 @@ from herdr_errors import HerdrError, parse_completion
 # decides when a discussion has finished; this only prevents a hung call from
 # occupying the worker indefinitely.
 DISCUSSION_WAIT_SECONDS = 7200
+TRANSCRIPT_LIMIT = 750000  # Raw UTF-8 bytes, including JSON and optional knowledge.
+MAX_CONTRIBUTIONS = 120
+MAX_ROUNDS = 20
+
+
+def transcript_contribution_budget(member_count):
+    """Reserve JSON/knowledge space even for the largest permitted discussion."""
+    entries = min(MAX_CONTRIBUTIONS, max(1, member_count) * MAX_ROUNDS)
+    return min(8000, (TRANSCRIPT_LIMIT - 50000) // entries)
 
 
 def console_token(run, output):
@@ -459,11 +468,11 @@ def truncate_contribution(text, limit=CONTRIBUTION_LIMIT):
 
 def validate_contributions(contributions, runs):
     ids = {r['profile_id']: r['profile']['name'] for r in runs}
-    if not isinstance(contributions, list) or not 1 <= len(contributions) <= 120:
+    if not isinstance(contributions, list) or not 1 <= len(contributions) <= MAX_CONTRIBUTIONS:
         raise ValueError('Group agent did not provide a valid discussion transcript.')
     for part in contributions:
         if (not isinstance(part, dict) or part.get('profile_id') not in ids or
-            type(part.get('round')) is not int or not 1 <= part['round'] <= 20 or
+            type(part.get('round')) is not int or not 1 <= part['round'] <= MAX_ROUNDS or
             not isinstance(part.get('content'), str) or not part['content'].strip()):
             raise ValueError('Invalid member contribution in group transcript.')
         # Bound the content instead of rejecting it. A contribution over the
@@ -519,7 +528,7 @@ def parse_discussion_transcript(text, job):
 def discussion_transcript(store, job):
     """Normalized export; the original agent-written document stays untouched."""
     return parse_discussion_transcript(
-        read_contribution(discussion_directory(store, job) / 'discussion.json', 750000), job)
+        read_contribution(discussion_directory(store, job) / 'discussion.json', TRANSCRIPT_LIMIT), job)
 
 
 def discussion_documents(store, job):
@@ -659,7 +668,7 @@ def finalize_discussion(store, job_id, actor):
     # Output. The receipt is hashed over the exact bytes the agent wrote, so
     # verification uses those bytes rather than a normalized copy.
     artifact_bytes, artifact_text = read_document(discussion_directory(store, job) / 'action-plan.md')
-    transcript_bytes, transcript_text = read_document(discussion_directory(store, job) / 'discussion.json', 750000,
+    transcript_bytes, transcript_text = read_document(discussion_directory(store, job) / 'discussion.json', TRANSCRIPT_LIMIT,
                                         'discussion transcript')
     result = artifact_text.strip()
     if not result:
@@ -980,7 +989,11 @@ def execute(store, job):
         "Set needs_review=true for anything that changes scope, adds dependencies or touches sensitive areas; those "
         "stay drafts for an operator. An empty array is a valid and common outcome. "
         f"Also write {transcript} as JSON with a contributions array. Each entry must have "
-        "profile_id (from the roster below), name, round (integer 1 to 20), and content (Markdown, aim for under 8 KB). "
+        f"profile_id (from the roster below), name, round (integer 1 to {MAX_ROUNDS}), and content (Markdown). "
+        f"Budget at most {transcript_contribution_budget(len(job['runs']))} UTF-8 bytes per contribution, "
+        f"at most {MAX_CONTRIBUTIONS} entries, and {TRANSCRIPT_LIMIT} UTF-8 bytes for the ENTIRE discussion.json, "
+        "including JSON formatting and optional knowledge. Summarize lengthy replies and use compact JSON "
+        "to stay within that total. Finish all compaction before hashing the exact final bytes in the receipt. "
         f"Profile IDs: {json.dumps({r['alias']: r['profile_id'] for r in job['runs']})}. "
         "Record actual member responses, never invent them. Update discussion.json after each member reply "
         "using a complete valid JSON document so the dashboard can show rounds as they arrive. "
