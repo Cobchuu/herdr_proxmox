@@ -188,7 +188,7 @@ void main() {
       : {'workspaces': [], 'agents': []};
 
   test(
-    'capture can be enabled while validation is disabled without a build service',
+    'capture and validation can be enabled independently with the gateway executor',
     () async {
       final task = <String, dynamic>{
         'id': 'task',
@@ -223,7 +223,7 @@ void main() {
               as web.HTMLInputElement;
       expect(
         toggle('Automatically validate captured candidates').disabled,
-        isTrue,
+        isFalse,
       );
       final capture = toggle('Automatically capture completed candidates');
       expect(capture.disabled, isFalse);
@@ -233,6 +233,12 @@ void main() {
       expect(posts.single['auto_capture'], true);
       expect(posts.single['auto_validate'], false);
       expect(posts.single['auto_publish'], false);
+      toggle('Automatically validate captured candidates').click();
+      await settle();
+      expect(posts.last['path'], '/api/tasks/policy');
+      expect(posts.last['auto_capture'], true);
+      expect(posts.last['auto_validate'], true);
+      expect(task['auto_publish'], false);
     },
   );
 

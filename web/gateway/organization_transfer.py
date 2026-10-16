@@ -3,6 +3,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 import json
 import re
+from pathlib import PurePosixPath
 
 from organizations import model_settings
 
@@ -45,7 +46,7 @@ def export_configuration(store):
         # Stored JSON can use six-byte Unicode escapes. Reject grossly oversized
         # stores before loading any historical rosters, without rejecting a
         # compact UTF-8 backup merely because SQLite stores ASCII escapes.
-        tables = (*TABLES, 'team_templates', 'team_template_versions')
+        tables = (*TABLES, 'team_templates', 'team_template_versions', 'project_toolchains')
         stored_bytes = sum(db.execute(f'SELECT COALESCE(SUM(length(CAST(data AS BLOB))),0) FROM {table}').fetchone()[0]
                            for table in tables)
         if stored_bytes > MAX_TRANSFER_BYTES * 6:
@@ -69,12 +70,46 @@ def export_configuration(store):
     return result
 
 
+def validate_overrides(bundle):
+    """Every imported override, validated as one collection before anything is written.
+
+    An import is not a privileged rewrite. Each record must satisfy the same
+    rules the override API enforces, and a collision with different content is
+    refused rather than silently applied — otherwise a backup could replace a
+    project's requirement without an operator ever asking for it.
+    """
+    import project_toolchains
+    values = bundle.get('project_toolchains')
+    if values is None:
+        return {}
+    if not isinstance(values, list) or len(values) > 1000:
+        raise ValueError('Invalid project toolchain collection.')
+    mapped = {}
+    for item in values:
+        if not isinstance(item, dict):
+            raise ValueError('Invalid project toolchain record.')
+        repository = item.get('repository')
+        if (not isinstance(repository, str) or not repository or len(repository) > 2000
+                or '\\' in repository or '\x00' in repository
+                or PurePosixPath(repository).is_absolute() or '..' in PurePosixPath(repository).parts):
+            raise ValueError('Invalid project path in the toolchain collection.')
+        saved = project_toolchains.normalized(item)
+        project_toolchains.tool_name(saved['toolchain'])
+        project_toolchains.tool_constraint(saved['constraint'])
+        project_toolchains.tool_notation(saved['notation'])
+        if repository in mapped:
+            raise ValueError('Duplicate project in the toolchain collection.')
+        mapped[repository] = saved
+    return mapped
+
+
 def import_configuration(store, bundle):
     transfer_size(bundle)
     if not isinstance(bundle, dict) or bundle.get('format') != 'herdr-configuration' or bundle.get('version') != 1:
         raise ValueError('Unsupported configuration export format or version.')
     import team_template_library
     library = team_template_library.validate_import(bundle)
+    overrides = validate_overrides(bundle)
     records = {}
     for table in TABLES:
         values = bundle.get(table)
@@ -146,5 +181,13 @@ def import_configuration(store, bundle):
             for item in records[table].values():
                 store.put(db, table, item)
         team_template_library.import_records(db, library)
+        existing_overrides = {row[0]: json.loads(row[1]) for row in db.execute('SELECT repository, data FROM project_toolchains')}
+        for repository, saved in overrides.items():
+            current = existing_overrides.get(repository)
+            if current is not None and current != saved:
+                raise ValueError('Project toolchain overrides already exist with different content; existing records will not be overwritten.')
+            db.execute('INSERT OR REPLACE INTO project_toolchains VALUES (?,?)',
+                       (repository, json.dumps(saved)))
     return {'imported': {**{table: len(records[table]) for table in TABLES},
+                         'project_toolchains': len(bundle.get('project_toolchains') or []),
                          'team_templates': len(library[0]), 'team_template_versions': len(library[1])}}

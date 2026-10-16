@@ -12,7 +12,7 @@ import server
 
 
 class PolicyFieldErrorTests(unittest.TestCase):
-    def test_service_dependency_identifies_only_newly_enabled_rules(self):
+    def test_missing_validator_identifies_only_newly_enabled_rules(self):
         with contribution_case() as case:
             case.store.snapshot.return_value['organizations'] = [dict(id='org')]
             for changes, fields in ((dict(auto_capture=True, auto_validate=True), {'auto_validate'}),
@@ -20,7 +20,7 @@ class PolicyFieldErrorTests(unittest.TestCase):
                 with self.assertRaises(FieldValidationError) as refused:
                     case.service.set_automation_policy(dict(organization_id='org', **changes), 'admin')
                 self.assertEqual(set(refused.exception.field_errors), fields)
-                self.assertIn('durable build service', str(refused.exception))
+                self.assertIn('Validation is unavailable', str(refused.exception))
                 self.assertFalse(case.service.policy('org')['auto_capture'])
                 self.assertFalse(case.service.policy('org')['auto_validate'])
 
@@ -64,7 +64,7 @@ class PolicyFieldErrorTests(unittest.TestCase):
                 with refused.exception as response:
                     result = json.load(response)
                     self.assertEqual(response.code, 400)
-                self.assertIn('durable build service', result['error'])
+                self.assertIn('Validation is unavailable', result['error'])
                 self.assertEqual(result['field_errors'], dict(auto_validate=result['error']))
                 self.assertFalse(case.service.policy('org')['auto_capture'])
             finally:

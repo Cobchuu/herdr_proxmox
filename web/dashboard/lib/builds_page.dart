@@ -326,7 +326,7 @@ class _BuildsPageState extends State<BuildsPage> {
           leading: const Icon(Icons.warning_amber_outlined),
           title: const Text('Durable build service not installed'),
           subtitle: const Text(
-            'Automatic capture is available. Automatic validation needs this service. Installing it restarts the gateway; automation stays opt-in.',
+            'Automatic capture and validation are available with the gateway executor. Gateway builds stop on restart; install this service for restart resilience. Installing it restarts the gateway; automation stays opt-in.',
           ),
         ),
       if (executor != 'service' &&

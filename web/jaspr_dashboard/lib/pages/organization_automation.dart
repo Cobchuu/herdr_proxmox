@@ -333,7 +333,7 @@ Future<Json?> editOrganizationAutomation(
     },
     extra: (v) => [
       note(
-        'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Capture checks the agent receipt and committed candidate without a build service. Automatic validation needs the durable build service; publication requires automatic validation. Install the service under Builds & deployments.',
+        'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Capture checks the agent receipt and committed candidate without a build service. Automatic validation uses the current build executor. Gateway builds stop on restart; install the durable build service under Builds & deployments for restart resilience. Automatic publication requires that service and automatic validation.',
       ),
     ],
     validateFields: (v) {

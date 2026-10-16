@@ -1,0 +1,429 @@
+import 'package:juice/juice.dart';
+import 'package:herdr_dashboard_state/project_analysis.dart';
+import 'dashboard_bloc.dart';
+
+/// Repository discovery is separate from the release's Herdr build tools.
+class ProjectAnalysisCard extends StatefulWidget {
+  const ProjectAnalysisCard({super.key, required this.path});
+  final String path;
+  @override
+  State<ProjectAnalysisCard> createState() => _ProjectAnalysisCardState();
+}
+
+class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
+  late final DashboardBloc connection;
+  ProjectAnalysisLoad? loaded;
+  String? failure;
+  bool refreshing = false;
+  bool saving = false;
+  int requestId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    connection = BlocScope.get<DashboardBloc>();
+    refresh();
+  }
+
+  @override
+  void didUpdateWidget(covariant ProjectAnalysisCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) {
+      requestId++;
+      loaded = null;
+      failure = null;
+      refreshing = false;
+      refresh();
+    }
+  }
+
+  bool get admin => connection.operator.value['role'] == 'admin';
+
+  Future<void> refresh({bool force = false}) async {
+    if (refreshing || !connection.state.connected) return;
+    refreshing = true;
+    final epoch = connection.generation;
+    final current = ++requestId;
+    try {
+      final result = await loadProjectAnalysis(
+        connection.request,
+        widget.path,
+        force: force,
+      );
+      if (mounted && epoch == connection.generation && current == requestId) {
+        setState(() {
+          loaded = result;
+          failure = null;
+        });
+      }
+    } catch (error) {
+      if (mounted && epoch == connection.generation && current == requestId)
+        setState(() => failure = '$error');
+    } finally {
+      if (mounted && epoch == connection.generation && current == requestId)
+        setState(() => refreshing = false);
+    }
+  }
+
+  Future<void> editOverride() async {
+    final current = loaded?.override ?? {};
+    final tool = TextEditingController(text: '${current['toolchain'] ?? ''}');
+    final constraint = TextEditingController(
+      text: '${current['constraint'] ?? ''}',
+    );
+    var notation = '${current['notation'] ?? 'semver'}';
+    String? error;
+    var submitting = false;
+    Future<dynamic>? closed;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        closed = ModalRoute.of(context)?.completed;
+        return StatefulBuilder(
+          builder: (context, update) => PopScope(
+            canPop: !submitting,
+            child: AlertDialog(
+              title: const Text('Project requirement override'),
+              content: SizedBox(
+                width: 460,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (error != null)
+                        Text(
+                          error!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      TextField(
+                        controller: tool,
+                        enabled: !submitting,
+                        decoration: const InputDecoration(
+                          labelText: 'Tool (for example php or node)',
+                        ),
+                      ),
+                      TextField(
+                        controller: constraint,
+                        enabled: !submitting,
+                        decoration: const InputDecoration(
+                          labelText: 'Version constraint (optional)',
+                        ),
+                      ),
+                      DropdownButtonFormField<String>(
+                        initialValue: notation,
+                        decoration: const InputDecoration(
+                          labelText: 'Version notation',
+                        ),
+                        items:
+                            [
+                                  'semver',
+                                  'pep440',
+                                  'composer',
+                                  'pub',
+                                  'dotnet',
+                                  'gomod',
+                                  'rubygems',
+                                ]
+                                .map(
+                                  (value) => DropdownMenuItem(
+                                    value: value,
+                                    child: Text(value),
+                                  ),
+                                )
+                                .toList(),
+                        onChanged: submitting
+                            ? null
+                            : (value) => update(() => notation = value!),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'An operator override supplements discovery. Repository declarations and disagreements remain visible.',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: submitting ? null : () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: submitting
+                      ? null
+                      : () async {
+                          if (tool.text.trim().isEmpty) {
+                            update(() => error = 'Enter a tool identifier.');
+                            return;
+                          }
+                          update(() {
+                            submitting = true;
+                            error = null;
+                          });
+                          try {
+                            await connection.request('projects/toolchain', {
+                              'repository': widget.path,
+                              'toolchain': tool.text.trim(),
+                              'constraint': constraint.text.trim(),
+                              'notation': notation,
+                            });
+                            if (context.mounted) Navigator.pop(context);
+                          } catch (exception) {
+                            if (context.mounted)
+                              update(() {
+                                error = '$exception';
+                                submitting = false;
+                              });
+                          }
+                        },
+                  child: Text(submitting ? 'Saving…' : 'Save override'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    await closed;
+    tool.dispose();
+    constraint.dispose();
+    await refresh(force: true);
+  }
+
+  Future<void> removeOverride() async {
+    setState(() => saving = true);
+    try {
+      await connection.request('projects/toolchain', {
+        'repository': widget.path,
+        'toolchain': '',
+      });
+      await refresh(force: true);
+    } catch (error) {
+      if (mounted) setState(() => failure = '$error');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  Widget requirement(Map item) {
+    final conflicts = item['conflicts'] as List? ?? [];
+    final resolution = item['resolution'] as Map?;
+    final state = conflicts.isNotEmpty
+        ? 'Conflict'
+        : item['established'] != true
+        ? 'Unresolved'
+        : 'Declared';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${item['label'] ?? item['tool']}: ${item['constraint'] ?? ''}'
+            '${(item['selected'] ?? '') == '' ? '' : ' selected ${item['selected']}'} · $state',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: conflicts.isNotEmpty
+                  ? Theme.of(context).colorScheme.error
+                  : null,
+            ),
+          ),
+          for (final observation in item['observations'] as List? ?? [])
+            Text('Evidence: ${observation['file']}#${observation['field']}'),
+          if (item['established'] != true)
+            Text('${item['reason'] ?? 'No declaration was found.'}'),
+          for (final conflict in conflicts) Text('${conflict['reason']}'),
+          if (resolution != null) ...[
+            Text(
+              'SDK lookup: ${(resolution['context'] as Map?)?['directory']} · boundary: ${resolution['boundary']}',
+            ),
+            Text('${resolution['boundary_note']}'),
+            if ((resolution['shadowed'] as List? ?? []).isNotEmpty)
+              Text('Shadowed declarations: ${resolution['shadowed']}'),
+            if (resolution['reason'] != null) Text('${resolution['reason']}'),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Whether this host can provide what the requirement states.
+  ///
+  /// Discovery answers what the project needs; this answers whether the machine
+  /// running Herdr can supply it. They are different questions and a page that
+  /// answers only the first leaves the operator to find out by trying a build.
+  Widget readiness(Map item) {
+    final assessment = loaded?.assessmentOf(item as Map<String, dynamic>) ?? {};
+    final verdict = '${assessment['verdict'] ?? 'unknown'}';
+    final components = (item['components'] as List? ?? []).join(', ');
+    final measured = '${assessment['measured'] ?? ''}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${item['label'] ?? item['tool']}: ${item['constraint'] ?? ''} · $verdict'
+            '${item['override'] is Map ? ' · override' : ''}'
+            '${assessment['provisionable'] == true ? ' · installable' : ''}',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: verdict == 'violated' || verdict == 'missing'
+                  ? Theme.of(context).colorScheme.error
+                  : null,
+            ),
+          ),
+          if (components.isNotEmpty) Text('Component: $components'),
+          Text(measured.isEmpty ? 'No installed version was measured.' : 'Measured $measured'),
+          Text('${assessment['detail'] ?? ''}'),
+          if (assessment['installer'] == true && assessment['provisionable'] != true)
+            Text('${(assessment['offer'] as Map?)?['reason'] ?? ''}'),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final report = loaded?.report ?? {};
+    final coverage = report['coverage'] as Map? ?? {};
+    final source = report['source'] as Map? ?? {};
+    final components = report['components'] as List? ?? [];
+    final requirements = loaded?.requirements ?? const <Map<String, dynamic>>[];
+    final provisionable = report['provisionable'] as List? ?? [];
+    return Card(
+      child: ExpansionTile(
+        title: const Text('Discovered requirements'),
+        subtitle: Text(
+          refreshing
+              ? 'Analysing repository…'
+              : failure != null
+              ? 'Analysis unavailable'
+              : '${components.length} components · ${coverage['files'] ?? 0} files${coverage['truncated'] == true ? ' · partial scan' : ''}',
+        ),
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 340),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (failure != null)
+                    Text(
+                      'Could not analyse this project: $failure. This does not mean no requirements exist.',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    )
+                  else if (loaded != null) ...[
+                    Text(
+                      'Source: ${source['scope']} · ${source['revision'] ?? ''} · assessed ${source['at']}',
+                    ),
+                    Text(
+                      'Boundary: ${source['boundary'] ?? 'repository root'} · cache ${source['cache_seconds'] ?? 0}s',
+                    ),
+                    if (requirements.isNotEmpty) ...[
+                      const Divider(),
+                      Text(
+                        'Host readiness',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      Text(
+                        'Whether this machine can provide each requirement. A measured version '
+                        'is not a verdict; only the evaluator decides satisfaction.',
+                      ),
+                      for (final item in requirements) readiness(item),
+                      Text(
+                        provisionable.isEmpty
+                            ? 'No requirement of this project is installable by this release; '
+                                  'a missing tool must be provided on the host.'
+                            : 'This release can install: ${provisionable.join(', ')}.',
+                      ),
+                    ],
+                    if (components.isEmpty)
+                      const Text(
+                        'No component was recognised. Review the coverage and unresolved findings below.',
+                      ),
+                    for (final component in components) ...[
+                      const Divider(),
+                      Text(
+                        '${component['path']}${component['basis'] == 'inferred' ? ' (inferred from source)' : ''}',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      Text(
+                        'Languages: ${(component['languages'] as List? ?? []).map((e) => e['label']).join(', ')}',
+                      ),
+                      for (final item
+                          in component['requirements'] as List? ?? [])
+                        requirement(item as Map),
+                      if ((component['frameworks'] as List? ?? []).isNotEmpty)
+                        Text(
+                          'Frameworks: ${(component['frameworks'] as List).map((e) => e['label']).join(', ')}',
+                        ),
+                      for (final tool
+                          in component['configured_tooling'] as List? ?? [])
+                        Text(
+                          'Configured tooling: ${tool['id']} (${tool['evidence']})',
+                        ),
+                      for (final command
+                          in component['candidate_commands'] as List? ?? [])
+                        Text(
+                          'Candidate command: ${(command['command'] as List).join(' ')} (${command['source']})',
+                        ),
+                      for (final finding
+                          in component['unresolved'] as List? ?? [])
+                        Text('${finding['what']}: ${finding['reason']}'),
+                    ],
+                    for (final finding in report['unresolved'] as List? ?? [])
+                      Text('${finding['what']}: ${finding['reason']}'),
+                    Text(
+                      'Scanned ${coverage['files']} files in ${coverage['directories']} directories · '
+                      '${coverage['unknown'] ?? 0} unrecognised${coverage['truncated'] == true ? ' · scan incomplete' : ''}',
+                    ),
+                    if (loaded?.override != null)
+                      Text(
+                        'Operator override: ${loaded!.override!['toolchain']} '
+                        '${loaded!.override!['constraint']} [${loaded!.override!['notation']}] · by ${loaded!.override!['actor']}',
+                      ),
+                  ],
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton.icon(
+                        onPressed: refreshing
+                            ? null
+                            : () {
+                                setState(() {});
+                                refresh(force: true);
+                              },
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Re-analyse'),
+                      ),
+                      if (admin)
+                        TextButton(
+                          onPressed: refreshing || saving ? null : editOverride,
+                          child: const Text('Add override'),
+                        ),
+                      if (admin && loaded?.override != null)
+                        TextButton(
+                          onPressed: refreshing || saving
+                              ? null
+                              : removeOverride,
+                          child: const Text('Remove override'),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

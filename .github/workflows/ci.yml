@@ -34,7 +34,7 @@ jobs:
       - name: Python compile and gateway tests
         run: |
           python3 -m compileall -q web/gateway tests/ci
-          python3 -m unittest discover -s tests
+          python3 scripts/test-project-discovery.py --all
       - name: Lint GitHub workflow definitions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= .github/workflows/ci.yml
 

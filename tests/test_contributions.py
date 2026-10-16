@@ -583,8 +583,10 @@ class ContributionTests(unittest.TestCase):
         self.assertTrue(policy['auto_validate'])
         self.assertEqual(policy['daily_cap'], 3)
         self.service.set_automation_policy(dict(organization_id='org', auto_publish=False, auto_validate=False), 'admin')
+        self.service.set_automation_policy(dict(organization_id='org', auto_validate=True), 'admin')
+        self.assertTrue(self.service.policy('org')['auto_validate'])
         with self.assertRaisesRegex(ValueError, 'durable build service'):
-            self.service.set_automation_policy(dict(organization_id='org', auto_validate=True), 'admin')
+            self.service.set_automation_policy(dict(organization_id='org', auto_publish=True), 'admin')
 
     def test_inherited_publication_requires_publishing_configuration_and_preflight(self):
         self.inherited_task()
@@ -968,7 +970,7 @@ class ContributionTests(unittest.TestCase):
             self.service.advance_automatic()
         self.assertEqual(self.service.validation.submit.call_count, 1)
 
-    def test_automatic_receipt_rejects_stale_token_and_missing_service(self):
+    def test_automatic_receipt_rejects_stale_token_and_allows_gateway_validation(self):
         task = self.candidate()
         task.update(auto_capture=True, auto_validate=True, state='implementing')
         task.pop('head_sha')
@@ -1002,8 +1004,8 @@ class ContributionTests(unittest.TestCase):
         self.service.validation.snapshot.return_value = {'executor': 'gateway'}
         self.service.action('policy', dict(request_id='disable-validation', task_id=task['id'],
             auto_capture=True, auto_validate=False, auto_publish=False), 'admin', 'admin')
-        with self.assertRaisesRegex(ValueError, 'durable build service'):
-            self.service.action('policy', dict(request_id='policy-guard', task_id=task['id'], auto_validate=True), 'admin', 'admin')
+        enabled = self.service.action('policy', dict(request_id='policy-guard', task_id=task['id'], auto_validate=True), 'admin', 'admin')
+        self.assertTrue(enabled['auto_validate'])
 
     def test_captured_history_has_git_metadata_even_in_list_fallback(self):
         task = self.candidate()

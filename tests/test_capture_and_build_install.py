@@ -78,7 +78,7 @@ class IndependentCaptureTests(unittest.TestCase):
                 case.service.advance_automatic()
             self.assertEqual(case.service.validation.submit.call_count, 1)
 
-    def test_organization_capture_inherits_without_service_and_validation_stays_gated(self):
+    def test_organization_capture_and_validation_inherit_with_gateway_executor(self):
         with contribution_case() as case:
             case.store.snapshot.return_value['organizations'] = [dict(id='org')]
             policy = case.service.set_automation_policy(dict(organization_id='org', auto_capture=True), 'admin')
@@ -86,10 +86,43 @@ class IndependentCaptureTests(unittest.TestCase):
             task = case.service.action('create', dict(case.body, request_id='capture-inherited'), 'admin', 'admin')
             self.assertTrue(task['auto_capture'])
             self.assertFalse(task['auto_validate'])
-            with self.assertRaisesRegex(ValueError, 'durable build service'):
-                case.service.set_automation_policy(dict(organization_id='org', auto_capture=True, auto_validate=True), 'admin')
+            case.service.validation = Mock()
+            case.service.validation.snapshot.return_value = dict(executor='gateway')
+            case.service.set_automation_policy(dict(organization_id='org', auto_capture=True, auto_validate=True), 'admin')
             self.assertTrue(case.service.policy('org')['auto_capture'])
-            self.assertFalse(case.service.policy('org')['auto_validate'])
+            self.assertTrue(case.service.policy('org')['auto_validate'])
+            task = case.service.action('create', dict(case.body, request_id='gateway-inherited'), 'admin', 'admin')
+            self.assertTrue(task['auto_capture'])
+            self.assertTrue(task['auto_validate'])
+
+    def test_automatic_capture_submits_gateway_validation_once_for_receipt_commit(self):
+        with contribution_case() as case:
+            task = case.candidate()
+            head = case._receipt(task)
+            run = case.store.snapshot.return_value['jobs'][0]
+            run.update(profile_id='worker', completion_token='handoff-token')
+            task.update(state='implementing')
+            task.pop('head_sha')
+            case.service.save(task, 'launch', 'admin')
+            case.service.validation = Mock()
+            case.service.validation.snapshot.return_value = dict(executor='gateway')
+            case.service.validation.submit.return_value = dict(id='build', state='queued', checks=[])
+            case.service.action('policy', dict(request_id='gateway-auto-validation', task_id=task['id'],
+                auto_capture=True, auto_validate=True, auto_publish=False), 'admin', 'admin')
+            with patch('collaboration.current_run'):
+                case.service.advance_automatic()
+                case.service.advance_automatic()
+            captured = case.service.get(task['id'])
+            self.assertEqual(captured['head_sha'], head)
+            self.assertEqual(captured['completion_receipt']['commit'], head)
+            self.assertIn(head, captured['builds'])
+            self.assertNotIn('automation_error', captured)
+            self.assertEqual(case.service.validation.submit.call_count, 1)
+            captured['builds'][head]['state'] = 'interrupted'
+            case.service.save(captured, 'build_result', 'runner')
+            with patch('collaboration.current_run'):
+                case.service.advance_automatic()
+            self.assertEqual(case.service.validation.submit.call_count, 1)
 
     def test_legacy_policy_still_enables_both_and_explicit_capture_false_is_respected(self):
         with contribution_case() as case:

@@ -519,7 +519,7 @@ class _BuildsState extends OperationsState<BuildsPage> {
     if (executor != 'service')
       callout('warning', 'triangle-alert', [
         paragraph(
-          'Manual capture and builds are available. Automatic capture works without this service; automatic validation requires it. Installation restarts the gateway and keeps automation opt-in.',
+          'Manual capture and builds are available. Automatic capture works without this service, and automatic validation uses the gateway executor. Gateway builds stop on restart; install this service for restart resilience. Installation restarts the gateway and keeps automation opt-in.',
         ),
         if (buildService?['supported'] == true && admin)
           button(

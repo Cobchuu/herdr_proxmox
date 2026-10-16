@@ -2629,7 +2629,7 @@ class _TasksPageState extends State<TasksPage> {
                     subtitle: Text(
                       executor == 'service'
                           ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
-                          : 'Install the durable build service under Builds & deployments to enable automatic validation.',
+                          : 'Uses the gateway build executor. Builds stop if the gateway restarts; install the durable build service for restart resilience.',
                     ),
                     value: task['auto_validate'] == true,
                     onChanged:
@@ -2639,9 +2639,7 @@ class _TasksPageState extends State<TasksPage> {
                               'merged',
                               'closed',
                               'completed',
-                            ].contains(task['state']) &&
-                            (task['auto_validate'] == true ||
-                                executor == 'service')
+                            ].contains(task['state'])
                         ? (value) => act('policy', {
                             'task_id': task['id'],
                             'auto_capture': taskAutoCapture(task),

@@ -135,15 +135,42 @@ Three files, easy to confuse by name. Only one writes each file:
 An agent never runs these installers. An administrator can request provisioning
 or opt into the existing automatic SDK policy; the root worker executes it.
 
-In the dashboard, provisioning lives on the **Settings** page under
-"Development toolchains", next to the other host-environment cards, because it
-concerns the container rather than any one repository. The Integration
-coordinator keeps only the automatic-installation policy: whether a build
-blocked on `missing_toolchain` should queue a request.
+In the dashboard, provisioning lives under **Herdr build tools**, next to the
+other host-environment cards on the CLI accounts page (`/configuration`). It is
+scoped and labelled as Herdr's own build requirements because it concerns
+building Herdr itself from source, not any one repository. That label matters:
+a project may be written in any language, and a card titled after "development
+toolchains" reads as a statement about the project the operator has open.
 The card refreshes every five seconds while installation is queued or running,
 and periodically while idle. **Refresh toolchain status** requests an immediate
 update. Failed requests remain visible after refreshing; completed installations
 offer their bounded output for inspection.
+
+## Project requirements are a separate scope
+
+Herdr's build stack is not evidence about a managed project. A project states
+its own requirement in the project explorer, on its repository root, under
+**Project toolchains**: a tool name (`php`, `flutter`, `go`, …) and optionally a
+version the project declares. Herdr reports what that project needs and how the
+host stands against it — ready, not installed, version mismatch or unreadable —
+by locating the executable and asking it for its real version.
+
+Discovery and installation capability stay apart. A project may declare a tool
+the release ships no installer for; that is reported as *this release ships no
+installer for X* with the requirement still visible, and nothing is installed.
+`GET /api/projects/toolchains` returns the per-project findings alongside the
+release-scoped catalogue so a client cannot present one as the other.
+`POST /api/projects/toolchain` (administrator) sets or clears one declaration;
+an empty tool clears it.
+
+Automatic provisioning consumes a verified identity. The Integration coordinator
+keeps only the policy — whether a build blocked on `missing_toolchain` should
+queue a request — and the tool it queues is the one the blocked project
+declared, re-checked against the release catalog before any request is written.
+A worker reports a blocker *category*, never a tool, so a build with no
+declaration, or one naming a tool the release cannot provision, records a
+specific reason and installs nothing. An install request must always name its
+toolchain; the gateway refuses a bare request rather than inferring it.
 
 ## What an agent does with a missing tool
 
@@ -184,3 +211,72 @@ lockfile are blocked for explicit review. This change does not add an
 in-dashboard policy-approval action: an operator must review and adopt the policy
 in the approved repository before rerunning verification. Manual reviewed
 publication retains its existing operator-controlled behavior.
+
+
+### Project discovery access and SDK lookup
+
+Both dashboards show **Discovered requirements** at a repository root in the
+project explorer. They share discovery requests and override-failure handling.
+Re-analyse bypasses the working-tree cache; source scope, revision, assessment
+time and partial coverage remain visible. A rejected override save retains its
+draft in the editor.
+
+Working-tree census and manifest reads share descriptor-anchored access with the
+file explorer. Every directory is opened relative to a pinned parent, symlinks
+are refused, and only regular manifests are read within the byte budget. Native
+access requires a Linux gateway and fails closed on unsupported platforms.
+Committed discovery continues to use the pinned Git tree.
+
+.NET SDK discovery starts its `global.json` search at the component directory
+unless the analyzer receives an explicit CLI lookup directory. This is a stated
+lookup assumption, not proof of the cwd a later build will use. The nearest
+file shadows ancestor files even if malformed or missing `sdk.version`. Reports
+retain the context, effective evidence, shadowed declarations and repository-root
+boundary; host configuration above that boundary is not read. `rollForward`,
+`allowPrerelease` and `paths` are retained as policy. SDK selection against
+installed SDKs remains unresolved rather than flattening those policies into a
+range or claiming a gateway-cwd probe proves compatibility.
+
+
+### Verifying project discovery on the correct host
+
+A Windows failure at `open_project` proves that the boundary fails closed; it
+does not verify Linux traversal. Do not mock `ANCHORED_ACCESS`, `O_NOFOLLOW` or
+`dir_fd` to make the security tests run. The existing **Installer and gateway
+checks** job runs on Ubuntu 24.04 and now checks the real native prerequisites
+and discovers the full Python suite through the strict runner. Any skip fails
+the job, including tests added outside the focused module list.
+
+From a disposable Linux checkout with Python 3.11+, Git and Bash installed, run:
+
+```sh
+python3 scripts/test-project-discovery.py -v
+```
+
+The focused runner includes access races, explorer, census, requirements,
+committed/working-tree analysis, constraints, .NET lookup, toolchain assessment
+and the entire coordinator suite. It rejects unsupported hosts and any skipped
+test. Its preflight checks the actual temporary filesystem: renaming a pinned
+directory must preserve the original read, and reopening its replacement symlink
+must be refused. Use native Linux storage for temporary fixtures; a Windows bind
+mount can have different rename semantics. The output identifies Python, kernel,
+uid, temporary storage and a scoped fingerprint of the current runner, gateway
+Python, Python tests and bundled skill Markdown bytes. This fingerprint does not
+cover every full-suite fixture, installer input or execution environment.
+Git HEAD alone would not identify an uncommitted or staged local run.
+
+For the complete integration gate, run:
+
+```sh
+python3 scripts/test-project-discovery.py --all
+```
+
+These checks create disposable fixtures and require neither a running gateway
+nor a real Proxmox host. A deployment smoke check is separate: on a test gateway,
+run the focused runner from a disposable checkout as the gateway service user,
+then use the authenticated project explorer to analyse a representative checkout.
+Confirm readable manifests, explicit permission failures, working-tree freshness,
+and committed reports that remain unchanged after an uncommitted manifest edit.
+This exercises the installed Python, service permissions and actual project
+storage. It does not require enabling automation or installing any project SDK.
+Do not run a deployment smoke test against a live task's checkout.

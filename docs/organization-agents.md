@@ -469,13 +469,15 @@ In a task's **Automation settings**, administrators can independently enable
 **Automatically capture completed candidates** and **Automatically validate
 captured candidates**. Capture checks the completion receipt, task session,
 branch and clean committed candidate; it needs no build service and does not
-claim that validation passed. Validation needs the durable build service and
+claim that validation passed. Validation uses the same executor as manual builds and
 retains the task session until exact-commit checks settle and the worker reviews
 the results in a separate, verified reply. With capture off, automatic validation
 waits for an operator to capture the candidate. Existing combined policies keep
 both behaviors until edited. Organization defaults apply to new tasks. The worker
 waits idle for dashboard feedback rather than polling or occupying a long-running
-gateway worker thread.
+gateway worker thread. Gateway-executed builds stop when the gateway restarts and
+are marked interrupted; they are not automatically retried. Install the durable
+build service to run builds independently of gateway restarts.
 
 When an organization policy save is rejected, its editor remains open with the
 draft intact. The issue appears at the top, and affected rules or limits are

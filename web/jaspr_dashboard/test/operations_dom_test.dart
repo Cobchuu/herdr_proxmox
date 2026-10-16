@@ -13,6 +13,7 @@ import 'package:web/web.dart' as web;
 import 'package:herdr_jaspr_dashboard/services.dart';
 import 'package:herdr_jaspr_dashboard/ui.dart' as ui;
 import 'package:herdr_jaspr_dashboard/pages/builds_page.dart';
+import 'package:herdr_jaspr_dashboard/pages/project_analysis_card.dart';
 import 'package:herdr_jaspr_dashboard/pages/update_card.dart';
 import 'package:herdr_jaspr_dashboard/pages/toolchain_card.dart';
 import 'package:herdr_jaspr_dashboard/pages/dashboard_access_controls.dart';
@@ -199,6 +200,116 @@ void main() {
       return http.Response.bytes([1, 2], 200);
     return {'workspaces': [], 'agents': []};
   }
+
+  test(
+    'discovery displays source, inherited SDK evidence and host readiness',
+    () async {
+      await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+        if (request.url.path.endsWith('/analysis')) {
+          return {
+            'source': {
+              'scope': 'working_tree',
+              'at': '2026-10-16',
+              'revision': '',
+            },
+            'coverage': {
+              'files': 2,
+              'directories': 1,
+              'unknown': 0,
+              'truncated': true,
+            },
+            // The resolved view the gateway serves: discovery plus the host
+            // assessment, so readiness is measured rather than declared.
+            'requirements': [
+              {
+                'tool': 'dotnet',
+                'label': '.NET SDK',
+                'constraint': '8.0.100',
+                'notation': 'dotnet',
+                'components': ['Api'],
+                'override': null,
+                'conflicts': [],
+                'assessment': {
+                  'verdict': 'undecidable',
+                  'measured': '8.0.400',
+                  'selected': '/usr/bin/dotnet',
+                  'detail':
+                      'SDK selection for the recorded lookup context has not been assessed.',
+                  'installer': false,
+                  'provisionable': false,
+                  'offer': null,
+                },
+              },
+            ],
+            'provisionable': [],
+            'components': [
+              {
+                'path': 'Api',
+                'basis': 'manifest',
+                'languages': [
+                  {'label': 'C#'},
+                ],
+                'ecosystems': [
+                  {'label': '.NET'},
+                ],
+                'frameworks': [
+                  {'label': 'ASP.NET Core'},
+                ],
+                'candidate_commands': [
+                  {'command': 'dotnet test'},
+                ],
+                'requirements': [
+                  {
+                    'tool': 'dotnet',
+                    'label': '.NET SDK',
+                    'selected': '8.0.100',
+                    'established': true,
+                    'observations': [
+                      {'file': 'global.json', 'field': 'sdk.version'},
+                    ],
+                    'resolution': {
+                      'context': {'directory': 'Api'},
+                      'shadowed': [],
+                      'boundary_note':
+                          'Host configuration above the repository root is not inspected.',
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        return {'workspaces': [], 'agents': []};
+      });
+      final content = web.document
+          .getElementById('operations-test')!
+          .textContent!;
+      expect(content, contains('Source: working_tree'));
+      expect(content, contains('global.json#sdk.version'));
+      expect(content, contains('SDK lookup: Api'));
+      expect(content, contains('Host configuration above the repository root'));
+      expect(content, contains('partial: a limit stopped the scan'));
+      expect(content, contains('Host readiness'));
+      expect(content, contains('Measured 8.0.400'));
+      expect(content, contains('/usr/bin/dotnet'));
+      expect(content, contains('Component: Api'));
+      expect(content, contains('.NET · C#'));
+      expect(content, contains('Frameworks: ASP.NET Core'));
+      expect(content, contains('Candidate commands: dotnet test'));
+      expect(content, isNot(contains("Instance of 'Text'")));
+      expect(
+        content,
+        contains('No requirement of this project is installable'),
+      );
+      await click('Re-analyse');
+      expect(
+        requests
+            .where((r) => r['endpoint'] == '/api/projects/analysis')
+            .last['query'],
+        contains('refresh=1'),
+      );
+    },
+  );
 
   test(
     'build service install queues once, shows failures and supports retry',

@@ -575,8 +575,8 @@ class Contributions:
                         self.materialize_follow_up(task, receipt, 'automatic_task_policy')
                     # Do not automatically retry failures. One durable identity per task+SHA.
                     if task.get('auto_validate'):
-                        if not self.validation or self.validation.snapshot().get('executor') != 'service':
-                            raise ValueError('Automatic validation needs the durable build service. Candidate capture remains available.')
+                        if self.validation is None:
+                            raise ValueError('Validation is unavailable. Candidate capture remains available.')
                     if task.get('auto_validate') and head not in task.get('builds', {}):
                         self.perform('build', {'target': head}, task['id'], 'automatic_task_policy')
                     task = self.get(task['id'])
@@ -1280,11 +1280,14 @@ class Contributions:
             # changing unrelated limits must remain possible during an outage.
             enabling_delivery = any(policy[key] and not previous[key]
                                     for key in ('auto_validate', 'auto_publish'))
-            if enabling_delivery and (self.validation is None
-                                      or self.validation.snapshot().get('executor') != 'service'):
-                raise FieldValidationError('Automatic validation needs the durable build service; '
-                                           'install it under Builds & deployments first.',
+            if enabling_delivery and self.validation is None:
+                raise FieldValidationError('Validation is unavailable.',
                                            [key for key in ('auto_validate', 'auto_publish') if policy[key] and not previous[key]])
+            # Turning automatic publication on is itself an enabling change, so
+            # the check above has already refused when validation is absent.
+            if policy['auto_publish'] and not previous['auto_publish'] and self.validation.snapshot().get('executor') != 'service':
+                raise FieldValidationError('Automatic publication needs the durable build service; '
+                                           'install it under Builds & deployments first.', ['auto_publish'])
             if policy['auto_publish'] and not policy['auto_validate']:
                 raise FieldValidationError('Automatic publication requires automatic validation.', ['auto_publish'])
             if policy['auto_publish'] and not previous['auto_publish'] and not self.github.snapshot().get('configured'):
@@ -2650,15 +2653,17 @@ class Contributions:
             self.store.update_job(job_id, manual_proposal_starts=starts)
             return made
 
-    def delivery_settings(self, task, automatic, publish, actor, organization_policy=None, capture=None, require_service=True):
+    def delivery_settings(self, task, automatic, publish, actor, organization_policy=None, capture=None, require_dependencies=True):
         """Prepare the same delivery contract for inherited and explicit policy."""
         if not isinstance(automatic, bool) or not isinstance(publish, bool):
             raise ValueError('Choose whether automatic validation and publication are enabled.')
         capture = automatic if capture is None else capture
         if not isinstance(capture, bool):
             raise ValueError('Choose whether automatic candidate capture is enabled.')
-        if automatic and require_service and (self.validation is None or self.validation.snapshot().get('executor') != 'service'):
-            raise ValueError('Install the durable build service before enabling automatic validation or publication.')
+        if automatic and require_dependencies and self.validation is None:
+            raise ValueError('Validation is unavailable.')
+        if publish and require_dependencies and (self.validation is None or self.validation.snapshot().get('executor') != 'service'):
+            raise ValueError('Install the durable build service before enabling automatic publication.')
         if publish and not automatic:
             raise ValueError('Automatic publication requires automatic validation.')
         settings = dict(auto_capture=capture, auto_validate=automatic, auto_publish=publish, await_verification=automatic)
@@ -2712,10 +2717,9 @@ class Contributions:
                 raise ValueError('Assign an individual worker, not a discussion group.')
             # Delivery automation comes from the organisation policy, so a task
             # created from a discussion is not silently manual. Capture needs no
-            # build worker; only seed validation when its service can run it.
+            # build worker; validation uses the same executor as manual builds.
             delivery = self.policy(profile['organization_id'])
-            automatic = (bool(delivery.get('auto_validate')) and self.validation is not None
-                         and self.validation.snapshot().get('executor') == 'service')
+            automatic = bool(delivery.get('auto_validate')) and self.validation is not None
             task = dict(id=task_id, title=body['title'].strip(), description=body['description'],
                         repository=repository.relative_to(self.projects).as_posix(), github_repository=remote,
                         publishing_repository=self.publishing_default(remote),
@@ -2727,7 +2731,9 @@ class Contributions:
             review = template_workflows.acceptance(self.store, profile['organization_id'], repository, profile['id'], profiles)
             if review:
                 task['acceptance'] = dict(review, at=stamp())
-            task.update(self.delivery_settings(task, automatic, automatic and bool(delivery.get('auto_publish')),
+            publish = (automatic and bool(delivery.get('auto_publish'))
+                       and self.validation.snapshot().get('executor') == 'service')
+            task.update(self.delivery_settings(task, automatic, publish,
                                                actor, organization_policy=delivery, capture=bool(delivery.get('auto_capture'))))
             project_git.configured_base(repository, base)
             return self.save(task, 'create', actor)
@@ -2971,9 +2977,9 @@ class Contributions:
             if not isinstance(automatic_publication, bool):
                 raise ValueError('Choose whether automatic draft PR publication is enabled.')
             settings = self.delivery_settings(task, automatic_validation, automatic_publication, actor, capture=capture,
-                                              # Capture needs no build worker; only newly turning on
-                                              # validation or publication, or retrying delivery, does.
-                                              require_service=enabling_validation or enabling_publication
+                                              # Recheck dependencies when enabling delivery or retrying;
+                                              # unrelated edits remain possible during an outage.
+                                              require_dependencies=enabling_validation or enabling_publication
                                               or body.get('retry_delivery') is True)
             if body.get('retry_delivery') is True:
                 if not automatic_validation:

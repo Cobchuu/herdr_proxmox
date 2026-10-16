@@ -2,6 +2,7 @@ import 'package:juice/juice.dart';
 import 'clipboard_copy.dart';
 import 'dashboard_bloc.dart';
 import 'project_git_panel.dart';
+import 'project_analysis_card.dart';
 
 class ProjectExplorerPage extends StatefulWidget {
   const ProjectExplorerPage({super.key, this.initialPath = ''});
@@ -99,9 +100,9 @@ class _ProjectExplorerPageState extends State<ProjectExplorerPage> {
                         'Clipboard unavailable over HTTP; path downloaded instead.',
                   );
                   if (context.mounted)
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(message)),
-                    );
+                    ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(SnackBar(content: Text(message)));
                 },
                 icon: const Icon(Icons.copy_outlined),
               ),
@@ -149,6 +150,11 @@ class _ProjectExplorerPageState extends State<ProjectExplorerPage> {
               '${e['name']}'.toLowerCase().contains(filter.toLowerCase()),
         )
         .toList();
+    final repositoryRoot =
+        path.isNotEmpty &&
+        (directory?['entries'] as List? ?? []).any(
+          (e) => e is Map && e['name'] == '.git',
+        );
     final segments = path
         .split('/')
         .where((p) => p.isNotEmpty && p != '.')
@@ -253,6 +259,8 @@ class _ProjectExplorerPageState extends State<ProjectExplorerPage> {
             ],
           ),
           const SizedBox(height: 12),
+          if (repositoryRoot)
+            ProjectAnalysisCard(key: ValueKey('analysis-$path'), path: path),
           if (busy) const LinearProgressIndicator(),
           if (error != null)
             Padding(

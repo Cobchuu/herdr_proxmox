@@ -84,10 +84,7 @@ void main() {
             ),
           );
           expect(capture.onChanged, isNotNull);
-          expect(
-            validation.onChanged,
-            executor == 'service' ? isNotNull : isNull,
-          );
+          expect(validation.onChanged, isNotNull);
           capture.onChanged!(true);
           await tester.pumpAndSettle();
           expect(posts.single['auto_capture'], true);

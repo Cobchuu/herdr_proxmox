@@ -205,9 +205,14 @@ void main() {
         scrollable: find.byType(Scrollable).first,
       );
       expect(find.textContaining('Deployment: idle'), findsOneWidget);
-      await tester.ensureVisible(find.text('Deploy this build'));
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Deploy this build'));
+      // Scroll to the action rather than assuming it sits in the same built
+      // range: the page grew, and a lazily built list drops off-screen rows.
+      await tester.scrollUntilVisible(
+        find.text('Deploy this build'),
+        150,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('Deploy this build'), findsOneWidget);
       await tester.tap(find.text('Deploy this build'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Approve and deploy'));

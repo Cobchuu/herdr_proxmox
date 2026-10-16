@@ -138,6 +138,7 @@ class OrganizationStore:
                 CREATE INDEX IF NOT EXISTS input_by_decision ON jobs(organization_id, json_extract(data, '$.decision_job_id'), json_extract(data, '$.kind'));
                 CREATE TABLE IF NOT EXISTS requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS session_archives (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_toolchains (repository TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
             from notifications import schema
             schema(db)
@@ -342,6 +343,67 @@ class OrganizationStore:
         import team_template_library
         with self.lock, closing(self.connect()) as db:
             return team_template_library.catalog(db)
+
+    def project_toolchains(self):
+        """Declared tool requirement per managed project, without probing anything."""
+        import project_toolchains
+        with self.lock, closing(self.connect()) as db:
+            return {row[0]: project_toolchains.normalized(json.loads(row[1]))
+                    for row in db.execute('SELECT repository, data FROM project_toolchains')}
+
+    def project_toolchain(self, repository):
+        """One project's override, or None when it states no requirement."""
+        import project_toolchains
+        if not isinstance(repository, str) or not repository:
+            return None
+        with self.lock, closing(self.connect()) as db:
+            row = db.execute('SELECT data FROM project_toolchains WHERE repository=?', (repository,)).fetchone()
+        return project_toolchains.normalized(json.loads(row[0])) if row else None
+
+    def set_project_toolchain(self, body, actor):
+        """Set, replace or clear one project's operator override.
+
+        An override is an operator statement in the same shape as a discovered
+        requirement — tool, notation, constraint — so the gateway interprets it
+        with the same evaluator. It supplements discovery; it does not maintain a
+        second requirement language, which is what a bare version field was.
+        Clearing is the empty toolchain.
+        """
+        import project_toolchains
+        from request_validation import FieldValidationError
+        if not isinstance(body, dict):
+            raise ValueError('Expected a JSON object.')
+        try:
+            # The dashboard browses relative to the projects root, so a value
+            # that is not absolute is resolved against it rather than against
+            # the gateway's working directory. Containment is still enforced,
+            # and the stored key is always the relative form.
+            value = Path(text(body, 'repository', 2000))
+            candidate = value if value.is_absolute() else Path(self.projects) / value
+            relative = Path(self.project(str(candidate))).relative_to(Path(self.projects).resolve()).as_posix()
+        except (ValueError, OSError) as error:
+            raise FieldValidationError(str(error) or 'Select a project directory.', ['repository']) from error
+        requested = body.get('toolchain')
+        if requested in (None, ''):
+            with self.lock, closing(self.connect()) as db, db:
+                db.execute('DELETE FROM project_toolchains WHERE repository=?', (relative,))
+            return dict(repository=relative, toolchain='', constraint='', notation='',
+                        origin='', actor='', at='')
+        for key in ('toolchain', 'constraint', 'version', 'notation'):
+            try:
+                if key == 'toolchain':
+                    project_toolchains.tool_name(requested)
+                elif key == 'notation':
+                    project_toolchains.tool_notation(body.get(key))
+                else:
+                    project_toolchains.tool_constraint(body.get(key))
+            except ValueError as error:
+                raise FieldValidationError(str(error), [key]) from error
+        with self.lock, closing(self.connect()) as db, db:
+            saved = project_toolchains.record(body, actor, now(), relative)
+            db.execute('INSERT OR REPLACE INTO project_toolchains VALUES (?,?)',
+                       (relative, json.dumps(saved)))
+            return saved
 
     def template_library(self, body, actor):
         import team_template_library
