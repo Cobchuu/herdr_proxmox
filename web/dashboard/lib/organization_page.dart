@@ -1,4 +1,7 @@
 import 'organization_automation.dart';
+import 'package:herdr_dashboard_state/team_template_draft.dart';
+import 'package:herdr_dashboard_state/template_library_state.dart';
+import 'package:herdr_dashboard_state/project_directory_choices.dart';
 import 'dart:convert';
 import 'artifact_download.dart';
 import 'permission_options.dart';
@@ -82,11 +85,64 @@ class _OrganizationPageState extends State<OrganizationPage> {
       bloc.send(OrganizationCommand(action, body));
 
   Future<void> editOrganization([Map<String, dynamic>? organization]) async {
+    final epoch = connection.generation;
+    Map<String, dynamic>? templates;
+    var projectFolders = <String, String>{};
+    String? projectFolderError;
+    if (organization == null) {
+      try {
+        templates = Map<String, dynamic>.from(
+          await connection.request('organizations/templates'),
+        );
+      } catch (e) {
+        templates = {'error': 'Role presets could not load: $e'};
+      }
+      try {
+        projectFolders = projectDirectoryChoices(
+          Map<String, dynamic>.from(
+            await connection.request('projects/browse', {'path': ''}),
+          ),
+        );
+      } catch (e) {
+        projectFolderError = 'Project folders could not load: $e';
+      }
+    }
+    if (!mounted || epoch != connection.generation) return;
     final values = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => OrganizationForm(organization: organization),
+      builder: (_) => OrganizationForm(
+        organization: organization,
+        templates: templates,
+        projectFolders: projectFolders,
+        projectFolderError: projectFolderError,
+        preview: (body) async {
+          final result = Map<String, dynamic>.from(
+            await connection.request('organizations/templates', body),
+          );
+          if (epoch != connection.generation)
+            throw StateError(
+              'Connection changed. Reopen the organization form.',
+            );
+          return result;
+        },
+        library: (body) async {
+          if (epoch != connection.generation || !connection.state.connected)
+            throw StateError(
+              'Connection changed. Reopen the organization form.',
+            );
+          final result = Map<String, dynamic>.from(
+            await connection.request('organizations/templates/library', body),
+          );
+          if (epoch != connection.generation)
+            throw StateError(
+              'Connection changed. Reopen the organization form.',
+            );
+          return result;
+        },
+        canManageTemplates: connection.operator.value['role'] == 'admin',
+      ),
     );
-    if (values != null && mounted) {
+    if (values != null && mounted && epoch == connection.generation) {
       final previous = bloc.state.organizations.map((org) => org['id']).toSet();
       await submit('save', values);
       if (mounted && organization == null && bloc.state.error == null) {
@@ -1107,8 +1163,23 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
 // Controllers belong to dialog states and are disposed when their route finishes.
 class OrganizationForm extends StatefulWidget {
-  const OrganizationForm({super.key, this.organization});
+  const OrganizationForm({
+    super.key,
+    this.organization,
+    this.templates,
+    this.preview,
+    this.library,
+    this.canManageTemplates = true,
+    this.projectFolders = const {},
+    this.projectFolderError,
+  });
   final Map<String, dynamic>? organization;
+  final Map<String, dynamic>? templates;
+  final Future<Map<String, dynamic>> Function(Map<String, dynamic>)? preview;
+  final Future<Map<String, dynamic>> Function(Map<String, dynamic>)? library;
+  final bool canManageTemplates;
+  final Map<String, String> projectFolders;
+  final String? projectFolderError;
   @override
   State<OrganizationForm> createState() => _OrganizationFormState();
 }
@@ -1122,11 +1193,409 @@ class _OrganizationFormState extends State<OrganizationForm> {
   late final instructions = TextEditingController(
     text: widget.organization?['instructions'],
   );
+  final project = TextEditingController();
+  final selectedRoles = <String>{};
+  String policy = 'balanced';
+  String preferredRuntime = '';
+  String teamPreset = '';
+  String savedChoice = '';
+  List<String>? loadedPreferences;
+  List<String> get preferredRuntimes =>
+      loadedPreferences ?? [if (preferredRuntime.isNotEmpty) preferredRuntime];
+  late final savedTemplates = [
+    for (final value in widget.templates?['saved_templates'] as List? ?? [])
+      Map<String, dynamic>.from(value),
+  ];
+  final templateName = TextEditingController(),
+      templateDescription = TextEditingController();
+  final libraryState = TemplateLibraryState();
+  String? libraryError, libraryNotice;
+  static const resourceLabels = {
+    'max_active_sessions': 'Maximum concurrent sessions',
+    'max_active_meetings': 'Maximum concurrent meetings',
+    'daily_session_cap': 'Sessions per 24 hours',
+  };
+  late final resourceControllers = {
+    for (final entry in {
+      'max_active_sessions': 4,
+      'max_active_meetings': 1,
+      'daily_session_cap': 20,
+    }.entries)
+      entry.key: TextEditingController(
+        text:
+            '${(widget.templates?['resource_defaults'] as Map?)?[entry.key] ?? entry.value}',
+      ),
+  };
+  Map<String, dynamic> get resources => {
+    for (final entry in resourceControllers.entries)
+      entry.key: int.tryParse(entry.value.text) ?? -1,
+  };
+  Map<String, dynamic>? team;
+  Map<String, dynamic>? lastPreview;
+  String? previewError;
+  bool loading = false;
+  int revision = 0;
+  List<Map<String, dynamic>> get roles => widget.organization == null
+      ? [
+          for (final r in widget.templates?['roles'] as List? ?? [])
+            Map<String, dynamic>.from(r),
+        ]
+      : [];
+  late final draft = TeamTemplateDraft(
+    roles,
+    maxMembers: widget.templates?['max_members'] as int? ?? 20,
+  );
+  void invalidate() {
+    revision++;
+    team = null;
+    previewError = null;
+    loading = false;
+  }
+
+  Future<void> previewTeam() async {
+    final epoch = ++revision;
+    setState(() {
+      loading = true;
+      team = null;
+      previewError = null;
+    });
+    try {
+      final result = await widget.preview!({
+        ...draft.payload,
+        'project': project.text.trim(),
+        'model_policy': policy,
+        'runtime_preferences': preferredRuntimes,
+        'team_preset': teamPreset,
+        'resource_limits': resources,
+        if (libraryState.source != null) ...{
+          'template_id': libraryState.source!['id'],
+          'template_version': libraryState.source!['version'],
+        },
+      });
+      if (mounted && epoch == revision)
+        setState(() {
+          team = result;
+          lastPreview = result;
+          draft.hydrate(result['member_specs']);
+        });
+    } catch (e) {
+      if (mounted && epoch == revision) setState(() => previewError = '$e');
+    } finally {
+      if (mounted && epoch == revision) setState(() => loading = false);
+    }
+  }
+
+  Future<void> loadSavedTemplate(String choice) async {
+    setState(() {
+      savedChoice = choice;
+      libraryState.source = null;
+      invalidate();
+    });
+    if (choice.isEmpty || widget.library == null) return;
+    final epoch = revision;
+    final operation = libraryState.begin();
+    setState(() {
+      libraryError = null;
+    });
+    final parts = choice.split('@');
+    try {
+      final record = await widget.library!({
+        'action': 'read',
+        'template_id': parts[0],
+        'version': int.parse(parts[1]),
+      });
+      if (!mounted || epoch != revision || !libraryState.current(operation))
+        return;
+      setState(() {
+        libraryState.source = record;
+        final definition = Map<String, dynamic>.from(record['definition']);
+        draft.hydrate(definition['team_members'], replace: true);
+        selectedRoles
+          ..clear()
+          ..addAll(draft.selectedRoles);
+        policy = '${definition['model_policy']}';
+        loadedPreferences = List<String>.from(
+          definition['runtime_preferences'] as List? ?? [],
+        );
+        preferredRuntime =
+            '${(definition['runtime_preferences'] as List? ?? []).firstOrNull ?? ''}';
+        teamPreset = '${definition['team_preset'] ?? ''}';
+        templateName.text = '${record['name']}';
+        templateDescription.text = '${record['description']}';
+        for (final entry in resourceControllers.entries)
+          entry.value.text = '${definition['resource_limits'][entry.key]}';
+        lastPreview = null;
+        invalidate();
+        libraryNotice =
+            'Loaded ${record['name']} · v${record['version']}. Re-preview for this project and its CLI accounts.';
+      });
+    } catch (e) {
+      if (mounted && libraryState.current(operation))
+        setState(() => libraryError = '$e');
+    } finally {
+      if (mounted) setState(() => libraryState.finish(operation));
+    }
+  }
+
+  Future<void> saveReusableTemplate(bool update) async {
+    if (libraryState.busy || widget.library == null) return;
+    final intent = <String, dynamic>{
+      'action': 'save',
+      'name': templateName.text.trim(),
+      'description': templateDescription.text.trim(),
+      'definition': {
+        ...draft.payload,
+        'model_policy': policy,
+        'runtime_preferences': preferredRuntimes,
+        'resource_limits': resources,
+        'team_preset': teamPreset,
+      },
+      if (update) ...{
+        'template_id': libraryState.source!['id'],
+        'expected_version': libraryState.source!['version'],
+      },
+    };
+    final request = libraryState.request(intent, newRequestId);
+    final selection = libraryState.selection;
+    final operation = libraryState.begin();
+    final epoch = revision;
+    setState(() {
+      libraryError = null;
+      libraryNotice = null;
+    });
+    try {
+      final saved = await widget.library!(request);
+      if (!mounted) return;
+      setState(() {
+        final header = savedTemplates
+            .where((t) => t['id'] == saved['id'])
+            .firstOrNull;
+        final versions = (header?['versions'] as List? ?? [])
+            .where((v) => v['version'] != saved['version'])
+            .toList();
+        savedTemplates.removeWhere((t) => t['id'] == saved['id']);
+        savedTemplates.add({
+          'id': saved['id'],
+          'name': saved['name'],
+          'version': saved['version'],
+          'versions': [
+            {'version': saved['version'], 'name': saved['name']},
+            ...versions,
+          ],
+        });
+        if (libraryState.acknowledge(saved, selection)) {
+          if (epoch == revision)
+            draft.hydrate(saved['definition']['team_members']);
+          savedChoice = '${saved['id']}@${saved['version']}';
+          invalidate();
+        }
+        libraryNotice =
+            'Saved ${saved['name']} · v${saved['version']}. Existing organizations remain unchanged.';
+      });
+    } catch (e) {
+      if (mounted) setState(() => libraryError = '$e');
+    } finally {
+      if (mounted) setState(() => libraryState.finish(operation));
+    }
+  }
+
+  Widget memberEditor(Map<String, dynamic> member) {
+    final key = '${member['key']}';
+    final role = draft.role('${member['template_role']}');
+    final resolved = (lastPreview?['members'] as List? ?? [])
+        .where((m) => m['template_key'] == key)
+        .firstOrNull;
+    final runtime = '${member['runtime'] ?? resolved?['runtime'] ?? ''}';
+    final entry =
+        (lastPreview?['runtimes'] as Map? ?? {})[runtime] as Map? ?? {};
+    final models = entry['models'] as List? ?? [];
+    final chosen = models
+        .where(
+          (m) =>
+              m['id'] == (member['model'] ?? resolved?['model']) &&
+              m['provider'] == (member['provider'] ?? resolved?['provider']),
+        )
+        .firstOrNull;
+    final reasoning = chosen?['reasoning'] as List? ?? [];
+    void change(String field, dynamic value) => setState(() {
+      member[field] = value;
+      invalidate();
+    });
+    return ExpansionTile(
+      key: ValueKey('member-$key'),
+      title: Text('Configure ${draft.name(member)}'),
+      children: [
+        TextFormField(
+          key: ValueKey('member-name-$key'),
+          initialValue: draft.name(member),
+          decoration: const InputDecoration(labelText: 'Member name'),
+          maxLength: 120,
+          onChanged: (v) => change('name', v),
+        ),
+        TextFormField(
+          key: ValueKey('member-persona-$key'),
+          initialValue:
+              '${member['persona'] ?? role['persona_instruction'] ?? ''}',
+          decoration: const InputDecoration(
+            labelText: 'Persona responsibilities',
+          ),
+          maxLength: 6000,
+          minLines: 3,
+          maxLines: 8,
+          onChanged: (v) => change('persona', v),
+        ),
+        DropdownButtonFormField<String>(
+          key: ValueKey('member-runtime-$key-${member['runtime']}'),
+          initialValue: '${member['runtime'] ?? ''}',
+          decoration: const InputDecoration(labelText: 'Member CLI'),
+          items: [
+            const DropdownMenuItem(value: '', child: Text('Automatic')),
+            for (final entry in Map<String, String>.from(
+              widget.templates?['runtime_names'] ?? {},
+            ).entries)
+              DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+          ],
+          onChanged: (v) => setState(() {
+            if (v == null || v.isEmpty)
+              member.remove('runtime');
+            else
+              member['runtime'] = v;
+            for (final field in [
+              'provider',
+              'model',
+              'reasoning',
+              'permission_mode',
+              'accessible_paths',
+            ])
+              member.remove(field);
+            invalidate();
+          }),
+        ),
+        if (models.isNotEmpty && runtime != 'agy') ...[
+          DropdownButtonFormField<String>(
+            key: ValueKey('member-model-$key-$runtime-${member['model']}'),
+            initialValue: member['model'] == null
+                ? ''
+                : jsonEncode([member['provider'] ?? '', member['model']]),
+            decoration: const InputDecoration(labelText: 'Member model'),
+            items: [
+              const DropdownMenuItem(
+                value: '',
+                child: Text('Automatic for role'),
+              ),
+              for (final model in models)
+                DropdownMenuItem(
+                  value: jsonEncode([model['provider'] ?? '', model['id']]),
+                  child: Text(
+                    '${model['provider'] == '' ? '' : '${model['provider']}/'}${model['name']}',
+                  ),
+                ),
+            ],
+            onChanged: (v) => setState(() {
+              member.remove('reasoning');
+              if (v == null || v.isEmpty) {
+                member.remove('model');
+                member.remove('provider');
+              } else {
+                final pair = jsonDecode(v) as List;
+                member['runtime'] = runtime;
+                member['provider'] = pair[0];
+                member['model'] = pair[1];
+              }
+              invalidate();
+            }),
+          ),
+          if (runtime != 'opencode' || entry['supports_variants'] == true)
+            DropdownButtonFormField<String>(
+              key: ValueKey(
+                'member-effort-$key-$runtime-${member['reasoning']}',
+              ),
+              initialValue: '${member['reasoning'] ?? '__auto__'}',
+              decoration: const InputDecoration(labelText: 'Member reasoning'),
+              items: [
+                const DropdownMenuItem(
+                  value: '__auto__',
+                  child: Text('Automatic for role'),
+                ),
+                const DropdownMenuItem(value: '', child: Text('Model default')),
+                for (final value in reasoning)
+                  DropdownMenuItem(value: '$value', child: Text('$value')),
+              ],
+              onChanged: (v) => setState(() {
+                if (v == '__auto__')
+                  member.remove('reasoning');
+                else
+                  member['reasoning'] = v ?? '';
+                invalidate();
+              }),
+            ),
+        ],
+        DropdownButtonFormField<String>(
+          key: ValueKey(
+            'member-manager-$key-${member['manager_key']}-${draft.members.length}',
+          ),
+          initialValue: '${member['manager_key'] ?? '__auto__'}',
+          decoration: const InputDecoration(labelText: 'Reports to'),
+          items: [
+            const DropdownMenuItem(
+              value: '__auto__',
+              child: Text('Role default'),
+            ),
+            const DropdownMenuItem(
+              value: '',
+              child: Text('Organization owner'),
+            ),
+            for (final manager in draft.members)
+              if (manager['key'] != member['key'])
+                DropdownMenuItem(
+                  value: '${manager['key']}',
+                  child: Text(draft.name(manager)),
+                ),
+          ],
+          onChanged: (v) => setState(() {
+            if (v == '__auto__')
+              member.remove('manager_key');
+            else
+              member['manager_key'] = v ?? '';
+            invalidate();
+          }),
+        ),
+        Wrap(
+          children: [
+            TextButton(
+              onPressed: draft.members.length >= draft.maxMembers
+                  ? null
+                  : () => setState(() {
+                      draft.add('${member['template_role']}', member);
+                      invalidate();
+                    }),
+              child: Text('Add another ${role['name']}'),
+            ),
+            TextButton(
+              onPressed: () => setState(() {
+                draft.remove(key);
+                selectedRoles
+                  ..clear()
+                  ..addAll(draft.selectedRoles);
+                invalidate();
+              }),
+              child: Text('Remove ${draft.name(member)}'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   void dispose() {
     name.dispose();
     purpose.dispose();
     instructions.dispose();
+    project.dispose();
+    templateName.dispose();
+    templateDescription.dispose();
+    for (final controller in resourceControllers.values) controller.dispose();
     super.dispose();
   }
 
@@ -1154,6 +1623,302 @@ class _OrganizationFormState extends State<OrganizationForm> {
                 lines: 8,
                 required: false,
               ),
+              if (widget.organization == null &&
+                  widget.templates?['error'] != null)
+                Text('${widget.templates!['error']}'),
+              if (roles.isNotEmpty) ...[
+                if (widget.library != null)
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(
+                      'saved-template-$savedChoice-${savedTemplates.length}',
+                    ),
+                    initialValue: savedChoice,
+                    decoration: const InputDecoration(
+                      labelText: 'Saved template version',
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Custom draft'),
+                      ),
+                      for (final template in savedTemplates)
+                        for (final version
+                            in template['versions'] as List? ?? [])
+                          DropdownMenuItem(
+                            value: '${template['id']}@${version['version']}',
+                            child: Text(
+                              '${version['name'] ?? template['name']} · v${version['version']}',
+                            ),
+                          ),
+                    ],
+                    onChanged: libraryState.busy
+                        ? null
+                        : (v) => loadSavedTemplate(v ?? ''),
+                  ),
+                if (libraryState.busy)
+                  const Text('Loading or saving template…'),
+                if (libraryError != null) Text(libraryError!),
+                if (libraryNotice != null) Text(libraryNotice!),
+                if ((widget.templates?['bundles'] as List? ?? []).isNotEmpty)
+                  DropdownButtonFormField<String>(
+                    initialValue: teamPreset,
+                    decoration: const InputDecoration(labelText: 'Team preset'),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Custom team'),
+                      ),
+                      for (final bundle in widget.templates!['bundles'] as List)
+                        DropdownMenuItem(
+                          value: '${bundle['id']}',
+                          child: Text('${bundle['name']}'),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() {
+                      teamPreset = v ?? '';
+                      libraryState.source = null;
+                      savedChoice = '';
+                      final bundle =
+                          (widget.templates?['bundles'] as List? ?? [])
+                              .where((b) => b['id'] == teamPreset)
+                              .firstOrNull;
+                      if (bundle != null) {
+                        draft.applyBundle(Map<String, dynamic>.from(bundle));
+                        selectedRoles
+                          ..clear()
+                          ..addAll(draft.selectedRoles);
+                        policy = '${bundle['model_policy']}';
+                        for (final entry in resourceControllers.entries) {
+                          entry.value.text =
+                              '${(bundle['resource_limits'] as Map?)?[entry.key] ?? {'max_active_sessions': 4, 'max_active_meetings': 1, 'daily_session_cap': 20}[entry.key]}';
+                        }
+                      }
+                      invalidate();
+                    }),
+                  ),
+                for (final bundle
+                    in (widget.templates?['bundles'] as List? ?? []).where(
+                      (b) => b['id'] == teamPreset,
+                    ))
+                  Text('${bundle['description']}'),
+                const Text(
+                  'Select roles to create with this organization. Profiles are ready for tasks; sessions start when launched.',
+                ),
+                for (final role in roles)
+                  CheckboxListTile(
+                    title: Text('${role['name']}'),
+                    value: selectedRoles.contains(role['id']),
+                    onChanged: (value) => setState(() {
+                      if (value == true) {
+                        selectedRoles.add('${role['id']}');
+                      } else {
+                        selectedRoles.remove(role['id']);
+                      }
+                      final withinLimit = draft.syncRoles(selectedRoles);
+                      selectedRoles
+                        ..clear()
+                        ..addAll(draft.selectedRoles);
+                      invalidate();
+                      if (!withinLimit)
+                        previewError =
+                            'A team supports up to ${draft.maxMembers} members.';
+                    }),
+                  ),
+                if (selectedRoles.isNotEmpty) ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: project.text.isEmpty ? null : project.text,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Team project directory',
+                    ),
+                    hint: const Text('Select a project folder'),
+                    items: [
+                      for (final entry in widget.projectFolders.entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(
+                            entry.value,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: widget.projectFolders.isEmpty
+                        ? null
+                        : (v) => setState(() {
+                            project.text = v ?? '';
+                            invalidate();
+                          }),
+                    validator: (v) => !widget.projectFolders.containsKey(v)
+                        ? 'Select the team project directory.'
+                        : null,
+                  ),
+                  if (widget.projectFolderError != null)
+                    Text(widget.projectFolderError!)
+                  else if (widget.projectFolders.isEmpty)
+                    const Text(
+                      'No project folders are available. Add or clone a project in the project explorer, then reopen this form.',
+                    ),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('model-policy-$policy'),
+                    initialValue: policy,
+                    decoration: const InputDecoration(
+                      labelText: 'Model policy',
+                    ),
+                    items: [
+                      for (final entry in Map<String, String>.from(
+                        widget.templates?['policies'] ?? {},
+                      ).entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(entry.value),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() {
+                      policy = v ?? 'balanced';
+                      invalidate();
+                    }),
+                  ),
+                  TextButton(
+                    onPressed:
+                        loading ||
+                            libraryState.busy ||
+                            widget.preview == null ||
+                            !widget.projectFolders.containsKey(project.text)
+                        ? null
+                        : previewTeam,
+                    child: Text(
+                      loading ? 'Checking CLI accounts…' : 'Preview team',
+                    ),
+                  ),
+                  const Text(
+                    'Resource limits cover every launched session, including idle sessions and review helpers. Use 0 for unlimited.',
+                  ),
+                  for (final entry in resourceControllers.entries)
+                    TextFormField(
+                      controller: entry.value,
+                      decoration: InputDecoration(
+                        labelText: resourceLabels[entry.key],
+                      ),
+                      keyboardType: TextInputType.number,
+                      maxLength: 3,
+                      onChanged: (_) => setState(invalidate),
+                      validator: (v) {
+                        final value = int.tryParse(v ?? '');
+                        final maximum = {
+                          'max_active_sessions': 50,
+                          'max_active_meetings': 10,
+                          'daily_session_cap': 500,
+                        }[entry.key]!;
+                        return value == null || value < 0 || value > maximum
+                            ? 'Use an integer from 0 to $maximum.'
+                            : null;
+                      },
+                    ),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('preferred-runtime-$preferredRuntime'),
+                    initialValue: preferredRuntime,
+                    decoration: const InputDecoration(
+                      labelText: 'Preferred CLI',
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Automatic'),
+                      ),
+                      for (final entry in Map<String, String>.from(
+                        widget.templates?['runtime_names'] ?? {},
+                      ).entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(entry.value),
+                        ),
+                    ],
+                    onChanged: (v) => setState(() {
+                      preferredRuntime = v ?? '';
+                      loadedPreferences = null;
+                      invalidate();
+                    }),
+                  ),
+                  for (final member in draft.members) memberEditor(member),
+                  if (widget.library != null && widget.canManageTemplates)
+                    ExpansionTile(
+                      title: const Text('Save reusable template'),
+                      children: [
+                        const Text(
+                          'Save the team configuration without its project path or CLI account data. New versions do not update existing organizations.',
+                        ),
+                        TextField(
+                          controller: templateName,
+                          decoration: const InputDecoration(
+                            labelText: 'Template name',
+                          ),
+                        ),
+                        TextField(
+                          controller: templateDescription,
+                          decoration: const InputDecoration(
+                            labelText: 'Template description',
+                          ),
+                          maxLines: 3,
+                        ),
+                        Wrap(
+                          children: [
+                            TextButton(
+                              onPressed: libraryState.busy
+                                  ? null
+                                  : () => saveReusableTemplate(false),
+                              child: const Text('Save as new template'),
+                            ),
+                            if (libraryState.source != null)
+                              TextButton(
+                                onPressed: libraryState.busy
+                                    ? null
+                                    : () => saveReusableTemplate(true),
+                                child: const Text('Save new version'),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  if (previewError != null)
+                    Text(
+                      previewError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  if (lastPreview != null)
+                    ExpansionTile(
+                      title: const Text('CLI account check from last preview'),
+                      children: [
+                        for (final account
+                            in lastPreview?['accounts'] as List? ?? [])
+                          Text(
+                            '${account['name']}: ${account['available'] == true ? 'Available' : 'Excluded'} · ${account['reason']}',
+                          ),
+                      ],
+                    ),
+                  for (final warning in team?['warnings'] as List? ?? [])
+                    Text('$warning'),
+                  for (final member in team?['members'] as List? ?? [])
+                    ExpansionTile(
+                      title: Text(
+                        '${member['name']} · ${member['runtime']} · ${member['model_name']}',
+                      ),
+                      children: [
+                        Text(
+                          'Reports to: ${member['manager_name'] ?? (member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer')} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
+                        ),
+                        Text('${member['selection_note']}'),
+                        Text(
+                          memberExecutionSummary(
+                            Map<String, dynamic>.from(member),
+                          ),
+                        ),
+                        SelectableText('${member['persona']}'),
+                      ],
+                    ),
+                ],
+              ],
             ],
           ),
         ),
@@ -1166,13 +1931,40 @@ class _OrganizationFormState extends State<OrganizationForm> {
       ),
       FilledButton(
         onPressed: () {
-          if (form.currentState!.validate())
+          if (form.currentState!.validate()) {
+            if (libraryState.busy) {
+              setState(
+                () =>
+                    previewError = 'Wait for the template operation to finish.',
+              );
+              return;
+            }
+            if (selectedRoles.isNotEmpty && (team == null || loading)) {
+              setState(
+                () => previewError = 'Preview the selected team before saving.',
+              );
+              return;
+            }
             Navigator.pop(context, {
               'id': widget.organization?['id'] ?? '',
               'name': name.text.trim(),
               'purpose': purpose.text.trim(),
               'instructions': instructions.text.trim(),
+              if (widget.organization == null && selectedRoles.isNotEmpty) ...{
+                ...draft.payload,
+                'project': project.text.trim(),
+                'model_policy': policy,
+                'runtime_preferences': preferredRuntimes,
+                'template_plan': team!['template_plan'],
+                'team_preset': teamPreset,
+                'resource_limits': resources,
+                if (libraryState.source != null) ...{
+                  'template_id': libraryState.source!['id'],
+                  'template_version': libraryState.source!['version'],
+                },
+              },
             });
+          }
         },
         child: const Text('Save organization'),
       ),

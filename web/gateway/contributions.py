@@ -22,6 +22,7 @@ from urllib.parse import quote
 import uuid
 
 from github_api import GitHubError
+from request_identity import TASK_REQUEST as REQUEST
 from project_files import project_directory
 import project_git
 from repository_lock import repository_lock
@@ -34,7 +35,6 @@ MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
 BRANCH = re.compile(r'herdr/task-[a-f0-9]{12}')
-REQUEST = re.compile(r'[A-Za-z0-9_-]{1,64}')
 REPOSITORY = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 
 
@@ -1231,6 +1231,8 @@ class Contributions:
     def policy(self, organization_id):
         """Organization follow-up automation policy with defaults applied."""
         merged = dict(AUTOMATION_DEFAULTS)
+        import template_resources
+        merged.update(template_resources.saved(self.store, organization_id))
         with closing(self.connect()) as db:
             row = db.execute('SELECT data FROM policies WHERE id=?', (organization_id,)).fetchone()
         if row:
@@ -2698,6 +2700,10 @@ class Contributions:
                         profile_id=profile['id'], organization_id=profile['organization_id'], state='draft',
                         created_at=stamp(), checks=[], audit=[],
                         assigned_agent={k: profile.get(k) for k in ('id', 'name', 'role', 'runtime')}, participants=[])
+            import template_workflows
+            review = template_workflows.acceptance(self.store, profile['organization_id'], repository, profile['id'], profiles)
+            if review:
+                task['acceptance'] = dict(review, at=stamp())
             task.update(self.delivery_settings(task, automatic, automatic and bool(delivery.get('auto_publish')),
                                                actor, organization_policy=delivery))
             project_git.configured_base(repository, base)

@@ -26,6 +26,154 @@ Python/SQLite. No plugin source or Node UI has been vendored or installed.
 
 ## Implemented first version
 
+### Team role presets
+
+When creating an organization, select any combination of Lead Developer,
+Frontend Developer, Backend Developer, Full-stack Developer, Reviewer,
+Integration Engineer, QA Engineer and DevOps Engineer. Select an existing
+project folder from the **Team project directory** dropdown and a model policy,
+then use **Preview team** to inspect
+personas, CLI/model/effort choices and reporting relationships before saving.
+The dropdown uses the same root folder listing as the project explorer, excluding
+files, symbolic links and hidden folders. If no folders are available, add or
+clone a project in the explorer and reopen the organization form. Changing the
+selected folder requires a fresh team preview.
+The **Team preset** selector can fill that draft with Solo developer (one member),
+Small product team (three), Frontend/backend team (five), or Full engineering team
+(all eight roles). All presets start with the balanced model policy. Applying a
+preset replaces the draft roster; the resulting members can still be edited,
+duplicated or removed before preview and creation. API clients may supply just
+`team_preset` instead of an explicit roster, or override its recommended members.
+Organization creation saves all selected profiles in the same SQLite transaction;
+a failed save creates no partial team, and retrying the same request cannot
+duplicate hires. Existing organizations and manually hired profiles retain their
+normal editing workflow. Preset profiles can be renamed and customized afterward.
+
+Before creation, expand **Configure member** to edit the name, persona
+responsibilities, CLI, model, reasoning and reporting relationship. Use **Add
+another role** to create multiple specialists of the same type (up to 20 members).
+Automatic model choices remain automatic when the global policy changes; explicit
+overrides remain attached to that member. Any edit requires another preview.
+Manager cycles, missing managers and unsupported model/effort overrides are
+rejected before any records are saved. The resolved persona includes the reporting
+instruction and shared team boundaries. The API accepts a `team_members` draft
+roster with distinct `key` values and `manager_key` references.
+
+The lead reports to the organization owner. Developers, integration and DevOps
+report to the selected lead, or to the owner if no lead was selected. Reviewer
+and QA report directly to the owner for independent assessment. Every role has
+distinct responsibilities, evidence/reporting expectations and publication
+boundaries. Profiles use separate Git worktrees and CLI default permissions.
+They are immediately available for task assignment; their sessions start through
+the existing task/Launch workflow. Creating an organization sends no billable
+agent prompt and creates no idle sessions.
+
+For a Git repository root, the Integration Engineer is also saved as the default
+repository coordinator; an existing manual coordinator setting takes precedence.
+These defaults recover after restart or configuration import. Newly created tasks
+automatically use the independent Reviewer for acceptance, with QA as the fallback
+when the reviewer is the assignee or ineligible at task creation. That reviewer
+selection is retained for the task; a busy or subsequently removed reviewer is
+not silently replaced. Launch the reviewer before acceptance dispatch, or change
+the per-task review settings explicitly. Template creation does not enable publishing, automatic builds or SDK
+installation. Non-Git or nested directories show a workflow setup note in preview.
+
+Model selection uses installed CLIs with current Herdr integrations. Codex and
+Claude require a signed-in account and use the maintained model catalog;
+individual subscription entitlements cannot be enumerated, so these are
+recommendations that can be changed in the member editor. OpenCode uses its
+project/account catalog, including providers configured through the environment,
+and preserves reported costs and reasoning variants. Models explicitly lacking
+tool calling are excluded. The CLI's
+[model enumeration](https://opencode.ai/docs/cli/#models) reports available models
+from configured providers and supports verbose cost metadata.
+
+- **Balanced:** choose models meeting each role's capability floor. Coding,
+  coordination, review and integration require the general/coding tier; bounded
+  QA permits lighter models. Suitable free OpenCode models are preferred within
+  the target tier.
+- **Lowest cost:** prefer eligible models reported free by cost metadata or a
+  free model ID, then preferred CLIs and known costs. Explicit positive pricing
+  overrides a free ID. Cheap models below the role minimum are excluded.
+- **Higher capability:** prefer the stronger tier for lead/review/integration,
+  with a general-tier fallback when necessary.
+
+**Preferred CLI** breaks ties between equally suitable model choices, allowing
+an included-usage account to be preferred without guessing its subscription.
+The preview explains capability floors and reported context capacity. Models
+with explicitly insufficient context or no tool calling are excluded; unfamiliar
+models need positive tool/context metadata to establish compatibility. Capability
+tiers are maintained policy heuristics, not measured model benchmarks.
+
+Creation also exposes maximum concurrent sessions (0–50), concurrent meetings
+(0–10), and session starts per rolling 24 hours (0–500). Zero means unlimited.
+Custom teams default to 4 sessions, 1 meeting and 20 starts; team presets supply
+size-appropriate recommendations. These initial limits are saved atomically with
+the roster and are enforced by the existing shared session budget, including
+idle sessions and review helpers. Later administrator changes to automation
+policy take precedence. Changing limits requires another preview.
+
+The preview's CLI account check lists available and excluded CLIs, with reasons
+such as missing installation, missing integration, unknown sign-in or failed
+model discovery. It never copies credentials into a team or template. Reported
+sign-in and catalog availability do not claim that subscription quotas or every
+model entitlement have been verified.
+
+### Saved template library
+
+Administrators can expand **Save reusable template** in the creation form,
+provide a name/description, and save the current draft as a new template.
+**Saved template version** loads an exact saved version into the editable draft;
+**Save new version** appends edits to that template. Old versions remain readable.
+A stale editor cannot overwrite newer changes: load the latest version first,
+or save the draft under a new template name. Lost-response retries use the same
+request ID and do not create duplicate versions. Loading replaces the draft;
+saving preserves edits made while a save was in flight.
+
+Versions freeze member names, persona responsibilities and reporting references,
+plus model policy, explicit CLI/model/effort overrides, fallback CLI preferences,
+resource limits and preset provenance when supplied. They exclude project paths,
+account data, organization branding and live sessions. Automatic model choices are evaluated against the
+new project's CLI catalog whenever a saved template is used. Each created
+organization records the source template ID/version/digest; its member profiles
+and initial limits remain independent of later template updates.
+
+The library supports 50 templates and 25 immutable versions per template, stored
+alongside the organization database. Configuration exports include its complete
+history; imports validate definitions, version continuity and content digests,
+and reject conflicting records. The same 2 MB limit applies to export and import.
+Oversized exports fail explicitly without omitting records or historical versions;
+back up the organization SQLite database directly for libraries beyond that limit.
+The authenticated team save, preview and library endpoints separately allow up to
+4,395,136 request bytes (about 4.4 MB) to accommodate the maximum roster, paths and
+escaped Unicode text. This deliberately exceeds the 2 MB configuration transfer
+limit; other endpoints retain their existing caps, normally 64 KiB.
+Shared-library writes and imports require an administrator; authenticated
+operators can load templates and create organizations using them.
+
+`GET /api/organizations/templates` includes saved-template/version metadata.
+`POST /api/organizations/templates/library` supports `action=read` with
+`template_id`/`version`, and `action=save` with `name`, `description`, `definition`
+and `request_id`. Appending also requires `template_id` and `expected_version`.
+Preview and organization creation accept `template_id` and `template_version`,
+with optional member overrides. Omitting the version selects the current latest
+version, while supplying it pins the exact version.
+
+These policies are deterministic recommendations, not billing guarantees or
+benchmarks. They compare reported input/output costs when available; account
+subscriptions, quotas and unknown prices cannot be compared reliably. Free
+models and limits can change. Antigravity falls back to CLI-managed model and
+reasoning settings and shows an account-verification reminder. Unsupported
+reasoning variants fall back to the model default. Account/model changes after
+preview require another preview before the organization can be created.
+
+Authenticated `GET /api/organizations/templates` returns the role/policy catalog.
+`POST` to the same endpoint previews `template_roles`, `project` and
+`model_policy` without creating records. `POST /api/organizations/save` accepts
+those fields on new organizations and the preview's `template_plan` digest.
+Model discovery runs outside the database write transaction; saved request
+replays do not need the CLI accounts to remain available.
+
 Open **Organization** in the connected dashboard (`/organization` in ZenRouter).
 The page supports multiple organizations, purpose/shared instructions, hiring
 and editing durable agent profiles, a manager hierarchy, a project directory,
@@ -86,6 +234,8 @@ records in `~/.config/herdr-web/organizations.sqlite3`. SQLite is built into
 Python; no database service or extra Python package is required. Include this
 file in container backups. Manager cycles and cross-organization references are
 rejected. Assigned directories must already exist beneath `~/projects`.
+Launch searches for repository roots only within that managed projects directory;
+a `.git` above it (such as a home-directory repository) cannot own a launch.
 
 Launch and delegation return immediately with a durable job ID and run in a
 single background worker. The UI disables concurrent form actions and retains

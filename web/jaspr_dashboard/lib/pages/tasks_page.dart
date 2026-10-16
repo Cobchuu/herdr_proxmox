@@ -12,6 +12,8 @@ export 'task_state.dart';
 import '../ui.dart' as ui;
 import '../overview.dart' show activityFor;
 
+// Keep the legacy verdict for older gateways and persisted configurations during
+// upgrades. Current gateways emit supported or not_exercised instead.
 bool needsPrAuthentication(Map github, String? repository) =>
     (github['publication']
         as Map?)?[repository]?['verification']?['upstream_pr_creation'] ==
@@ -27,7 +29,7 @@ String publicationSummary(String repository, Map entry) {
       ? 'Different GitHub authentication is required to create a PR in $repository. Configure a credential authorized for the upstream repository.'
       : verification['upstream_pr_creation'] == 'supported'
       ? 'PR authentication is compatible; creation has not been tested.'
-      : 'Upstream PR authentication has not been verified.';
+      : 'Upstream PR write permission has not been verified. A branch push may succeed before PR creation is rejected; confirm the credential can write pull requests in $repository.';
   return '$repository → ${entry['publishing_repository']}\n$account. '
       'Token write access has not been tested. $pr';
 }

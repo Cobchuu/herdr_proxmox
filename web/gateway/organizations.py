@@ -16,6 +16,7 @@ from project_files import project_directory
 from permissions import accessible_paths, permission_mode, prepare_permissions
 from session_ownership import active, reserves
 from herdr_ids import is_pane_id, is_workspace_id
+from request_identity import ORGANIZATION_REQUEST
 # Refusals that mean "this participant is not free right now" rather than a
 # fault. A meeting that hits one waits and is retried, so answering a permission
 # prompt or finishing a task resumes it without an operator retrying by hand.
@@ -101,17 +102,19 @@ def policy_guidance(frozen):
 
 class OrganizationStore:
     supports_discussion_preparation = True
-    def __init__(self, path, projects, command, runtime_status=None, model_validator=None, runtime_ready=None):
+    def __init__(self, path, projects, command, runtime_status=None, model_validator=None, runtime_ready=None, template_catalog=None):
         self.path = Path(path)
         self.projects = Path(projects).resolve()
         self.command = command
         self.runtime_status = runtime_status
         self.runtime_ready = runtime_ready
         self.model_validator = model_validator
+        self.template_catalog = template_catalog
         self.lock = threading.RLock()
         # One-way notification only: never call the watcher while holding a
         # store/profile lock or SQLite transaction.
         self.jobs_changed = threading.Event()
+        self.workflow_revision = 0
         from notifications import Notifications
         self.events = Notifications()
         self.worker = ThreadPoolExecutor(max_workers=4, thread_name_prefix='organization')
@@ -138,6 +141,8 @@ class OrganizationStore:
             ''')
             from notifications import schema
             schema(db)
+            import team_template_library
+            team_template_library.schema(db)
             # A crash may have occurred after terminal input. Never replay automatically.
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
@@ -202,6 +207,8 @@ class OrganizationStore:
                 raise ValueError('Organization daily session budget is reached; wait for the next window.')
         if not previous or meaningful(json.loads(previous[0])) != meaningful(item):
             record(db, 'job' if table == 'jobs' else 'policy', item['id'], item.get('organization_id', item['id']))
+        if table in ('organizations', 'profiles') and (not previous or json.loads(previous[0]) != item):
+            self.workflow_revision += 1
         if table == 'organizations':
             db.execute('INSERT INTO organizations VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data', (item['id'], json.dumps(item)))
         else:
@@ -325,6 +332,51 @@ class OrganizationStore:
         """Narrow durable profile read with no runtime queries or integration callbacks."""
         with self.lock, closing(self.connect()) as db:
             return [json.loads(row['data']) for row in db.execute('SELECT data FROM profiles ORDER BY rowid')]
+
+    def organization_records(self):
+        """Saved organization defaults, without runtime queries."""
+        with self.lock, closing(self.connect()) as db:
+            return [json.loads(row['data']) for row in db.execute('SELECT data FROM organizations ORDER BY rowid')]
+
+    def saved_templates(self):
+        import team_template_library
+        with self.lock, closing(self.connect()) as db:
+            return team_template_library.catalog(db)
+
+    def template_library(self, body, actor):
+        import team_template_library
+        if not isinstance(body, dict):
+            raise ValueError('Expected a JSON object.')
+        with self.lock, closing(self.connect()) as db, db:
+            if body.get('action') == 'read':
+                return team_template_library.read(db, body.get('template_id'), body.get('version'))
+            if body.get('action') != 'save':
+                raise ValueError('Choose a supported template library action.')
+            key = text(body, 'request_id', 80)
+            if not ORGANIZATION_REQUEST.fullmatch(key):
+                raise ValueError('Invalid request ID.')
+            fingerprint = hashlib.sha256(json.dumps(['template_library', body], sort_keys=True).encode()).hexdigest()
+            previous = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
+            if previous:
+                if previous['fingerprint'] != fingerprint:
+                    raise ValueError('Request ID already used for different content.')
+                return json.loads(previous['response'])
+            result = team_template_library.save(db, body, actor)
+            db.execute('INSERT INTO requests VALUES (?,?,?)', (key, fingerprint, json.dumps(result)))
+            return result
+
+    def resolve_team_body(self, body):
+        import team_templates
+        if not body.get('template_id'):
+            if 'template_id' in body and body['template_id'] != '':
+                raise ValueError('Select a valid saved team template.')
+            return team_templates.expand(body), None
+        saved = self.template_library(dict(action='read', template_id=body['template_id'], version=body.get('template_version')), '')
+        resolved = {**saved['definition'], **body, 'template_version': saved['version']}
+        if 'template_roles' in body and 'team_members' not in body:
+            resolved.pop('team_members', None)
+        reference = {k: saved[k] for k in ('id', 'version', 'name', 'digest')}
+        return team_templates.expand(resolved), reference
 
     def frozen_policy(self, job, profile):
         """The approved toolchain policy as it stood when this session started.
@@ -565,11 +617,40 @@ class OrganizationStore:
         with guard:
             return self._action(action, body)
 
+    def team_plan(self, body):
+        return self._team_plan(*self.resolve_team_body(body))
+
+    def _team_plan(self, body, source):
+        import team_templates
+        roles, policy = team_templates.validate(body)
+        if not roles:
+            return dict(members=[], warnings=[], model_policy=policy)
+        project = self.project(text(body, 'project', 2000))
+        if self.template_catalog is None:
+            raise ValueError('Team presets require CLI account discovery on this gateway.')
+        available = self.template_catalog(project)
+        try:
+            result = team_templates.plan(dict(body, project=project), available)
+        except ValueError as error:
+            details = '; '.join(a['name'] + ': ' + a.get('reason', '')[:65] for a in available.get('accounts', []) if not a.get('available'))
+            raise ValueError(str(error) + (' CLI accounts: ' + details if details else '')) from error
+        for member in result['members']:
+            model_settings(member, member['runtime'])
+            if self.model_validator is not None:
+                self.model_validator(member)
+        import template_workflows
+        result['workflow_plan'], notes = template_workflows.preview(project, self.projects, result['members'])
+        result['warnings'] = [*result['warnings'], *notes]
+        result['source_template'] = source
+        result['template_plan'] = hashlib.sha256(json.dumps(
+            [policy, result['members'], result['workflow_plan'], result['resource_limits'], source], sort_keys=True).encode()).hexdigest()
+        return result
+
     def _action(self, action, body):
         if not isinstance(body, dict):
             raise ValueError('Expected a JSON object.')
         key = text(body, 'request_id', 80)
-        if not re.fullmatch(r'[A-Za-z0-9_-]{8,80}', key):
+        if not ORGANIZATION_REQUEST.fullmatch(key):
             raise ValueError('Invalid request ID.')
         if action == 'inspect' and not body.get('job_id'):
             from collaboration import inspect_profile
@@ -585,6 +666,25 @@ class OrganizationStore:
                 from collaboration import action as collaboration_action
                 return collaboration_action(self, snapshot, action, body, org)
         fingerprint = hashlib.sha256(json.dumps([action, body], sort_keys=True).encode()).hexdigest()
+        planned = None
+        if action == 'save' and any(k in body for k in ('template_roles', 'team_members', 'team_preset', 'template_id')):
+            import team_templates
+            plan_body, source = self.resolve_team_body(body)
+            roles, _ = team_templates.validate(plan_body)
+            if roles:
+                if body.get('id'):
+                    raise ValueError('Team presets can only be applied when creating an organization.')
+                # Read-only CLI probes must run outside the write transaction.
+                # Replays need no probes: the original team is already persisted.
+                with self.lock, closing(self.connect()) as db:
+                    existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
+                    if existing:
+                        if existing['fingerprint'] != fingerprint:
+                            raise ValueError('Request ID already used for different content.')
+                        return json.loads(existing['response'])
+                planned = self._team_plan(plan_body, source)
+                if body.get('template_plan') and body['template_plan'] != planned['template_plan']:
+                    raise ValueError('Team settings or CLI accounts/models changed since the team preview. Preview the team again before creating the organization.')
         submitted = None
         with self.lock, closing(self.connect()) as db, db:
             existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
@@ -594,10 +694,30 @@ class OrganizationStore:
                 return json.loads(existing['response'])
             if action == 'save':
                 item_id = text(body, 'id', 40, optional=True) or uuid.uuid4().hex
+                previous_org = None
                 if body.get('id'):
-                    self.get(db, 'organizations', item_id)
+                    previous_org = self.get(db, 'organizations', item_id)
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
+                if previous_org:
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset', 'resource_limits', 'source_template') if k in previous_org})
+                if planned:
+                    item.update(template_roles=list(dict.fromkeys(m['template_role'] for m in planned['members'])), model_policy=planned['model_policy'],
+                                runtime_preferences=planned['runtime_preferences'], team_preset=planned.get('team_preset', ''))
+                    item['resource_limits'] = planned['resource_limits']
+                    if planned.get('source_template'):
+                        item['source_template'] = planned['source_template']
+                if planned:
+                    ids = {m['template_key']: uuid.uuid4().hex for m in planned['members']}
+                    for member in planned['members']:
+                        profile = {k: v for k, v in member.items() if k not in ('manager_role', 'manager_key', 'manager_name', 'model_name', 'persona_instruction')}
+                        profile.update(id=ids[member['template_key']], organization_id=item_id,
+                                       manager_id=ids.get(member['manager_key'], ''), version=1)
+                        self.put(db, 'profiles', profile)
+                    workflow = planned['workflow_plan']
+                    item['team_workflows'] = dict(repository=workflow['repository'],
+                                                 coordinator_id=ids.get(workflow['coordinator_key'], ''),
+                                                 reviewer_ids=[ids[r] for r in workflow['reviewer_keys']])
                 self.put(db, 'organizations', item)
             else:
                 org_id = text(body, 'organization_id', 40)
@@ -1400,7 +1520,11 @@ class OrganizationStore:
                 job = self.update_job(job_id, launch_stage='workspace_preparing')
                 project = self.project(profile['project'])
                 source = Path(project)
-                repository = any((parent / '.git').exists() for parent in (source, *source.parents))
+                # Only a repository inside managed projects may own this launch.
+                # A home-directory repository must not turn an unrelated project
+                # into a worktree of that repository (or fail on its permissions).
+                repository = any((parent / '.git').exists() for parent in (source, *source.parents)
+                                 if parent.is_relative_to(self.projects))
                 if job.get('reuse_checkout'):
                     checkout = Path(job.get('worktree_path') or job.get('source_project', project)).resolve()
                     if not checkout.is_relative_to(self.projects) or not checkout.is_dir():

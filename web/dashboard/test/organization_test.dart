@@ -114,11 +114,28 @@ void main() {
       final organizations = <Map<String, dynamic>>[];
       final profiles = <Map<String, dynamic>>[];
       final mutations = <String>[];
+      final projectLookups = <Map<String, dynamic>>[];
       final connection = DashboardBloc(
         client: MockClient((request) async {
           if (request.url.path == '/api/session' ||
               request.url.path == '/api/session/logout')
             return http.Response('{"authenticated":true}', 200);
+          if (request.url.path == '/api/projects/browse') {
+            expect(request.method, 'POST');
+            projectLookups.add(
+              jsonDecode(request.body) as Map<String, dynamic>,
+            );
+            return http.Response(
+              jsonEncode({
+                'root': '/projects',
+                'kind': 'folder',
+                'entries': [
+                  {'name': 'app', 'path': 'app', 'kind': 'folder'},
+                ],
+              }),
+              200,
+            );
+          }
           if (request.method == 'POST' &&
               !request.url.path.endsWith('/activity')) {
             mutations.add(request.url.path);
@@ -168,6 +185,15 @@ void main() {
       expect(find.byType(OrganizationPage), findsOneWidget);
       await tester.tap(find.text('Create organization'));
       await tester.pumpAndSettle();
+      expect(projectLookups, [
+        {'path': ''},
+      ]);
+      expect(
+        tester
+            .widget<OrganizationForm>(find.byType(OrganizationForm))
+            .projectFolders,
+        {'/projects/app': '/projects/app'},
+      );
       // Empty required fields cannot submit.
       await tester.tap(find.text('Save organization'));
       await tester.pumpAndSettle();
@@ -210,8 +236,13 @@ void main() {
         find.widgetWithText(TextFormField, 'Persona instructions'),
         'Plan carefully and report evidence.',
       );
-      await tester.ensureVisible(find.text('Choose a runtime'));
-      await tester.tap(find.text('Choose a runtime'));
+      final runtimeSelector = find.widgetWithText(
+        DropdownButtonFormField<String>,
+        'Agent runtime',
+      );
+      await tester.ensureVisible(runtimeSelector);
+      await tester.pumpAndSettle();
+      await tester.tap(runtimeSelector);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Codex').last);
       await tester.pumpAndSettle();

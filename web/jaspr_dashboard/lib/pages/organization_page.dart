@@ -1,6 +1,7 @@
 import 'org_form_values.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:herdr_dashboard_state/project_directory_choices.dart';
 import 'package:web/web.dart' as web;
 import '../services.dart';
 import '../ui.dart';
@@ -120,7 +121,53 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Future<void> editOrganization([Json? org]) async {
     final epoch = connection.generation;
-    final values = await organizationForm(org);
+    Json? templates;
+    var projectFolders = <String, String>{};
+    String? projectFolderError;
+    if (org == null) {
+      try {
+        templates = Json.from(
+          await connection.request('organizations/templates'),
+        );
+      } catch (e) {
+        templates = {'error': 'Role presets could not load: $e'};
+      }
+      try {
+        projectFolders = projectDirectoryChoices(
+          Json.from(await connection.request('projects/browse', {'path': ''})),
+        );
+      } catch (e) {
+        projectFolderError = 'Project folders could not load: $e';
+      }
+    }
+    if (!mounted || epoch != connection.generation) return;
+    final values = await organizationForm(
+      org,
+      templates,
+      (body) async {
+        if (epoch != connection.generation || !connection.state.connected)
+          throw StateError('Connection changed. Reopen the organization form.');
+        final result = Json.from(
+          await connection.request('organizations/templates', body),
+        );
+        if (epoch != connection.generation)
+          throw StateError('Connection changed. Reopen the organization form.');
+        return result;
+      },
+      (body) async {
+        if (epoch != connection.generation || !connection.state.connected)
+          throw StateError('Connection changed. Reopen the organization form.');
+        final result = Json.from(
+          await connection.request('organizations/templates/library', body),
+        );
+        if (epoch != connection.generation)
+          throw StateError('Connection changed. Reopen the organization form.');
+        return result;
+      },
+      connection.operator.value['role'] == 'admin',
+      projectFolders,
+      projectFolderError,
+    );
     if (values == null || !mounted || epoch != connection.generation) return;
     final previous = bloc.state.organizations.map((o) => o['id']).toSet();
     await submit('save', values);
@@ -600,11 +647,12 @@ class _OrganizationPageState extends State<OrganizationPage> {
         ))
           return;
         if (!mounted || epoch != connection.generation) return;
-        await connection.request('organizations/import', data);
+        final imported = await connection.request('organizations/import', data);
+        final counts = imported['imported'] as Map? ?? {};
         if (!mounted || epoch != connection.generation) return;
         await bloc.send(OrganizationCommand('refresh'));
         toast(
-          'Configuration imported. Review paths and connect CLI accounts before launching.',
+          'Configuration imported: ${counts['team_templates'] ?? 0} saved templates and ${counts['team_template_versions'] ?? 0} template versions. Review paths and connect CLI accounts before launching.',
         );
       }
     } catch (e) {

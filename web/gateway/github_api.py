@@ -129,7 +129,8 @@ class GitHub:
             config = self.configuration()
             # Keep creation, lookup, reviews and lost-response recovery on the
             # same credential. Explicit tokens still override this selection.
-            if config.get('pr_token') and re.match(r'^/repos/[^/]+/[^/]+/pulls(?:[/?]|$)', path):
+            match = re.match(r'^/repos/([^/]+/[^/]+)/pulls(?:[/?]|$)', path)
+            if config.get('pr_token') and match and match[1] in config.get('repositories', []):
                 token = config['pr_token']
                 supplied_token = True  # Do not mix identities in the GET cache.
             else:
@@ -237,7 +238,8 @@ class GitHub:
             self.credential_login(config['pr_token'], config['pr_login'])
         return dict(login=login, repository=publishing, upstream=upstream,
                     mode='direct' if upstream == publishing else 'fork',
-                    account_write='verified', token_write='not_exercised')
+                    account_write='verified', token_write='not_exercised',
+                    upstream_pr_creation=self.pr_capability(config.get('pr_token') or token))
 
     def credential_login(self, token, expected=None):
         user = self.request('/user', token=token)
@@ -271,17 +273,19 @@ class GitHub:
             raise ValueError('Enter the pull request account name.')
         if clear_pr and (pr_token or pr_login):
             raise ValueError('Remove or replace the pull request credential, not both.')
-        if pr_token:
-            if not re.fullmatch(r'[A-Za-z0-9_]{20,255}', pr_token):
-                raise ValueError('Enter a valid pull request personal access token.')
-        elif not clear_pr:
-            previous = self.configuration()
+        if pr_token and not re.fullmatch(r'[A-Za-z0-9_]{20,255}', pr_token):
+            raise ValueError('Enter a valid pull request personal access token.')
+        previous = self.configuration()
+        if not pr_token and not clear_pr:
             pr_token = previous.get('pr_token')
             pr_login = pr_login or previous.get('pr_login')
             if pr_login and not pr_token:
                 raise ValueError('Provide a pull request token to verify its account.')
         if pr_token:
-            pr_login = self.credential_login(pr_token, pr_login)
+            if pr_token == previous.get('pr_token') and (not pr_login or pr_login.lower() == str(previous.get('pr_login') or '').lower()):
+                pr_login = previous['pr_login']
+            else:
+                pr_login = self.credential_login(pr_token, pr_login)
         requested = body.get('publication') or {}
         if not isinstance(requested, dict):
             raise ValueError('Invalid publication settings.')
@@ -327,7 +331,7 @@ class GitHub:
                 entry['verification'] = dict(
                     fork_access='not_applicable', account_write_to_publishing='verified',
                     token_write_capability='not_exercised',
-                    upstream_pr_creation=self.pr_capability(pr_token) if pr_token else 'supported')
+                    upstream_pr_creation=self.pr_capability(pr_token or token))
                 continue
             publishing = entry['publishing_repository']
             if not self.same_fork_network(resolved[upstream], resolved[publishing]):

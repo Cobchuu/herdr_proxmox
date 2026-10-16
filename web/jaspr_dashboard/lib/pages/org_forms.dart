@@ -1,4 +1,8 @@
 import 'org_form_values.dart';
+import 'dart:convert';
+import '../services.dart' show requestId;
+import 'package:herdr_dashboard_state/team_template_draft.dart';
+import 'package:herdr_dashboard_state/template_library_state.dart';
 import 'package:web/web.dart' as web;
 import '../ui.dart';
 import 'model_catalog.dart';
@@ -34,6 +38,7 @@ Future<Json?> editRecord(
   Set<String> flags = const {},
   void Function(String key, dynamic value, Json values)? changed,
   bool Function(String key, Json values)? visible,
+  bool Function(String key, Json values)? enabled,
   Set<String> wide = const {},
 }) {
   final values = Json.from(initial);
@@ -95,6 +100,7 @@ Future<Json?> editRecord(
                     'change': (e) {
                       values[entry.key] =
                           (e.target as web.HTMLInputElement).checked;
+                      changed?.call(entry.key, values[entry.key], values);
                       refreshDialogs();
                     },
                   },
@@ -115,6 +121,7 @@ Future<Json?> editRecord(
                   changed?.call(entry.key, v, values);
                   refreshDialogs();
                 },
+                disabled: enabled != null && !enabled(entry.key, values),
               ),
             )
           else if (long.contains(entry.key))
@@ -181,29 +188,568 @@ Future<Json?> editRecord(
   });
 }
 
-Future<Json?> organizationForm([Json? org]) =>
-    editRecord(
-      org == null ? 'Create organization' : 'Edit organization',
-      {'id': org?['id'] ?? '', ...?org},
-      {
-        'name': 'Organization name',
-        'purpose': 'Purpose',
-        'instructions': 'Shared instructions',
+Future<Json?> organizationForm([
+  Json? org,
+  Json? templates,
+  Future<Json> Function(Json)? preview,
+  Future<Json> Function(Json)? library,
+  bool canManageTemplates = true,
+  Map<String, String> projectFolders = const {},
+  String? projectFolderError,
+]) async {
+  final roles = org == null ? records(templates?['roles']) : <Json>[];
+  final draft = TeamTemplateDraft(
+    roles,
+    maxMembers: templates?['max_members'] as int? ?? 20,
+  );
+  final bundles = records(templates?['bundles']);
+  final savedTemplates = records(templates?['saved_templates']);
+  final savedChoices = <String, String>{'': 'Custom draft'};
+  void updateSavedChoices() {
+    savedChoices
+      ..clear()
+      ..[''] = 'Custom draft';
+    for (final entry in savedTemplates) {
+      for (final version in records(entry['versions'])) {
+        savedChoices['${entry['id']}@${version['version']}'] =
+            '${version['name'] ?? entry['name']} · v${version['version']}';
+      }
+    }
+  }
+
+  updateSavedChoices();
+  final libraryState = TemplateLibraryState();
+  List<dynamic>? loadedPreferences;
+  List<dynamic> preferredValues(Json v) =>
+      loadedPreferences ??
+      [if (v['preferred_runtime'] != '') v['preferred_runtime']];
+  String? libraryError, libraryNotice;
+  final resourceDefaults = Json.from(
+    templates?['resource_defaults'] ??
+        {
+          'max_active_sessions': 4,
+          'max_active_meetings': 1,
+          'daily_session_cap': 20,
+        },
+  );
+  const resourceLabels = {
+    'max_active_sessions': 'Maximum concurrent sessions',
+    'max_active_meetings': 'Maximum concurrent meetings',
+    'daily_session_cap': 'Sessions per 24 hours',
+  };
+  Json resources(Json values) => {
+    for (final key in resourceLabels.keys)
+      key: int.tryParse('${values[key]}') ?? -1,
+  };
+  Json? team;
+  Json? lastPreview;
+  String? previewError;
+  var revision = 0;
+  var loading = false;
+  void invalidate() {
+    revision++;
+    team = null;
+    previewError = null;
+    loading = false;
+    refreshDialogs();
+  }
+
+  List<String> selected(Json v) => [
+    for (final role in roles)
+      if (v['preset_${role['id']}'] == true) '${role['id']}',
+  ];
+  final result = await editRecord(
+    org == null ? 'Create organization' : 'Edit organization',
+    {
+      'id': org?['id'] ?? '',
+      ...?org,
+      'model_policy': 'balanced',
+      'preferred_runtime': '',
+      'team_preset': '',
+      'saved_template': '',
+      'template_name': '',
+      'template_description': '',
+      ...resourceDefaults,
+      'project': '',
+    },
+    {
+      'name': 'Organization name',
+      'purpose': 'Purpose',
+      'instructions': 'Shared instructions',
+      if (roles.isNotEmpty) ...{
+        if (library != null) 'saved_template': 'Saved template version',
+        if (bundles.isNotEmpty) 'team_preset': 'Team preset',
+        for (final role in roles) 'preset_${role['id']}': '${role['name']}',
+        'project': 'Team project directory',
+        'model_policy': 'Model policy',
+        'preferred_runtime': 'Preferred CLI',
+        ...resourceLabels,
       },
-      required: {'name', 'purpose'},
-      long: {'purpose', 'instructions'},
-      limits: {'name': 120, 'purpose': 2000, 'instructions': 8000},
-      wide: {'name'},
-    ).then(
-      (v) => v == null
-          ? null
-          : {
-              'id': v['id'],
-              'name': v['name'],
-              'purpose': v['purpose'],
-              'instructions': v['instructions'],
-            },
-    );
+    },
+    required: {'name', 'purpose'},
+    long: {'purpose', 'instructions'},
+    limits: {
+      'name': 120,
+      'purpose': 2000,
+      'instructions': 8000,
+      'project': 2000,
+    },
+    wide: {'name', 'project'},
+    flags: {for (final role in roles) 'preset_${role['id']}'},
+    choices: {
+      'project': {'': 'Select a project folder', ...projectFolders},
+      'saved_template': savedChoices,
+      'model_policy': Map<String, String>.from(templates?['policies'] ?? {}),
+      'preferred_runtime': {
+        '': 'Automatic',
+        ...Map<String, String>.from(templates?['runtime_names'] ?? {}),
+      },
+      'team_preset': {
+        '': 'Custom team',
+        for (final bundle in bundles) '${bundle['id']}': '${bundle['name']}',
+      },
+    },
+    enabled: (key, v) =>
+        !libraryState.busy || !{'saved_template', 'team_preset'}.contains(key),
+    visible: (key, v) =>
+        !{
+          'project',
+          'model_policy',
+          'preferred_runtime',
+          ...resourceLabels.keys,
+        }.contains(key) ||
+        selected(v).isNotEmpty,
+    changed: (key, value, v) {
+      if (key == 'saved_template') {
+        libraryState.source = null;
+        invalidate();
+        if ('$value'.isNotEmpty && library != null) {
+          final epoch = revision;
+          final operation = libraryState.begin();
+          libraryError = null;
+          refreshDialogs();
+          final parts = '$value'.split('@');
+          () async {
+            try {
+              final record = await library({
+                'action': 'read',
+                'template_id': parts[0],
+                'version': int.parse(parts[1]),
+              });
+              if (epoch != revision || !libraryState.current(operation)) return;
+              libraryState.source = record;
+              final definition = Json.from(record['definition']);
+              draft.hydrate(definition['team_members'], replace: true);
+              for (final role in roles)
+                v['preset_${role['id']}'] = draft.selectedRoles.contains(
+                  role['id'],
+                );
+              v['model_policy'] = definition['model_policy'];
+              loadedPreferences = List.from(
+                definition['runtime_preferences'] as List? ?? [],
+              );
+              v['preferred_runtime'] =
+                  (definition['runtime_preferences'] as List? ?? [])
+                      .firstOrNull ??
+                  '';
+              v['team_preset'] = definition['team_preset'] ?? '';
+              v['template_name'] = record['name'];
+              v['template_description'] = record['description'];
+              for (final key in resourceLabels.keys)
+                v[key] = definition['resource_limits'][key];
+              lastPreview = null;
+              invalidate();
+              libraryNotice =
+                  'Loaded ${record['name']} · v${record['version']}. Re-preview for this project and its CLI accounts.';
+            } catch (e) {
+              if (libraryState.current(operation)) libraryError = '$e';
+            } finally {
+              libraryState.finish(operation);
+              refreshDialogs();
+            }
+          }();
+        }
+      }
+      if (key == 'team_preset') {
+        libraryState.source = null;
+        v['saved_template'] = '';
+        final bundle = bundles.where((b) => b['id'] == value).firstOrNull;
+        if (bundle != null) {
+          draft.applyBundle(bundle);
+          for (final role in roles)
+            v['preset_${role['id']}'] = draft.selectedRoles.contains(
+              role['id'],
+            );
+          v['model_policy'] = bundle['model_policy'];
+          for (final key in resourceLabels.keys)
+            v[key] =
+                (bundle['resource_limits'] as Map?)?[key] ??
+                resourceDefaults[key];
+        }
+        invalidate();
+      }
+      if (key.startsWith('preset_') ||
+          key == 'project' ||
+          key == 'model_policy' ||
+          key == 'preferred_runtime' ||
+          resourceLabels.containsKey(key)) {
+        if (key == 'preferred_runtime') loadedPreferences = null;
+        final withinLimit =
+            !key.startsWith('preset_') || draft.syncRoles(selected(v));
+        invalidate();
+        if (!withinLimit) {
+          for (final role in roles)
+            v['preset_${role['id']}'] = draft.selectedRoles.contains(
+              role['id'],
+            );
+          previewError = 'A team supports up to ${draft.maxMembers} members.';
+        }
+      }
+    },
+    validate: (v) {
+      if (libraryState.busy)
+        return 'Wait for the template operation to finish.';
+      if (selected(v).isEmpty) return null;
+      if (!projectFolders.containsKey(v['project']))
+        return 'Select the team project directory.';
+      if (team == null || loading)
+        return 'Preview the selected team before saving.';
+      return null;
+    },
+    extra: (v) => [
+      if (libraryState.busy) prose('Loading or saving template…'),
+      if (libraryError != null) errorLine(libraryError),
+      if (libraryNotice != null) prose(libraryNotice),
+      if (org == null && templates?['error'] != null)
+        errorLine('${templates!['error']}'),
+      if (roles.isNotEmpty)
+        prose(
+          'Select roles to create with this organization. Profiles are ready for tasks; sessions start when launched.',
+        ),
+      for (final bundle in bundles.where((b) => b['id'] == v['team_preset']))
+        prose(bundle['description']),
+      if (selected(v).isNotEmpty) ...[
+        if (projectFolderError != null)
+          errorLine(projectFolderError)
+        else if (projectFolders.isEmpty)
+          prose(
+            'No project folders are available. Add or clone a project in the project explorer, then reopen this form.',
+          ),
+        prose(
+          'Resource limits cover every launched session, including idle sessions and review helpers. Use 0 for unlimited.',
+        ),
+        button(
+          loading ? 'Checking CLI accounts…' : 'Preview team',
+          () async {
+            final epoch = ++revision;
+            loading = true;
+            team = null;
+            previewError = null;
+            refreshDialogs();
+            try {
+              final result = await preview!({
+                ...draft.payload,
+                'project': '${v['project'] ?? ''}'.trim(),
+                'model_policy': v['model_policy'],
+                'runtime_preferences': preferredValues(v),
+                'team_preset': v['team_preset'],
+                'resource_limits': resources(v),
+                if (libraryState.source != null) ...{
+                  'template_id': libraryState.source!['id'],
+                  'template_version': libraryState.source!['version'],
+                },
+              });
+              if (epoch == revision) {
+                team = result;
+                lastPreview = result;
+                draft.hydrate(result['member_specs']);
+              }
+            } catch (e) {
+              if (epoch == revision) previewError = '$e';
+            } finally {
+              if (epoch == revision) loading = false;
+              refreshDialogs();
+            }
+          },
+          disabled:
+              loading ||
+              libraryState.busy ||
+              preview == null ||
+              !projectFolders.containsKey(v['project']),
+        ),
+        for (final member in draft.members) ...[
+          details('Configure ${draft.name(member)}', [
+            field('Member name', draft.name(member), (value) {
+              member['name'] = value;
+              invalidate();
+            }),
+            textarea(
+              'Persona responsibilities',
+              '${member['persona'] ?? draft.role('${member['template_role']}')['persona_instruction'] ?? ''}',
+              (value) {
+                member['persona'] = value;
+                invalidate();
+              },
+            ),
+            select(
+              'Member CLI',
+              '${member['runtime'] ?? ''}',
+              {
+                '': 'Automatic',
+                ...Map<String, String>.from(templates?['runtime_names'] ?? {}),
+              },
+              (value) {
+                if (value.isEmpty)
+                  member.remove('runtime');
+                else
+                  member['runtime'] = value;
+                for (final key in [
+                  'provider',
+                  'model',
+                  'reasoning',
+                  'permission_mode',
+                  'accessible_paths',
+                ])
+                  member.remove(key);
+                invalidate();
+              },
+            ),
+            ...memberModelFields(member, lastPreview, invalidate),
+            select(
+              'Reports to',
+              '${member['manager_key'] ?? '__auto__'}',
+              {
+                '__auto__': 'Role default',
+                '': 'Organization owner',
+                for (final manager in draft.members)
+                  if (manager['key'] != member['key'])
+                    '${manager['key']}': draft.name(manager),
+              },
+              (value) {
+                if (value == '__auto__')
+                  member.remove('manager_key');
+                else
+                  member['manager_key'] = value;
+                invalidate();
+              },
+            ),
+            row([
+              button(
+                'Add another ${draft.role('${member['template_role']}')['name']}',
+                () {
+                  draft.add('${member['template_role']}', member);
+                  invalidate();
+                },
+                disabled: draft.members.length >= draft.maxMembers,
+              ),
+              button('Remove ${draft.name(member)}', () {
+                final roleId = member['template_role'];
+                draft.remove('${member['key']}');
+                v['preset_$roleId'] = draft.selectedRoles.contains(roleId);
+                invalidate();
+              }),
+            ]),
+          ]),
+        ],
+        if (previewError != null) errorLine(previewError),
+        if (lastPreview != null)
+          details('CLI account check from last preview', [
+            for (final account in records(lastPreview?['accounts']))
+              prose(
+                '${account['name']}: ${account['available'] == true ? 'Available' : 'Excluded'} · ${account['reason']}',
+              ),
+          ]),
+        if (library != null && canManageTemplates)
+          details('Save reusable template', [
+            prose(
+              'Save this team configuration without its project path or CLI account data. New versions do not update existing organizations.',
+            ),
+            field('Template name', '${v['template_name']}', (value) {
+              v['template_name'] = value;
+            }),
+            textarea('Template description', '${v['template_description']}', (
+              value,
+            ) {
+              v['template_description'] = value;
+            }),
+            row([
+              for (final update in [
+                false,
+                if (libraryState.source != null) true,
+              ])
+                button(
+                  update ? 'Save new version' : 'Save as new template',
+                  () async {
+                    if (libraryState.busy) return;
+                    final operation = libraryState.begin();
+                    final selection = libraryState.selection;
+                    libraryError = null;
+                    libraryNotice = null;
+                    final intent = {
+                      'action': 'save',
+                      'name': '${v['template_name']}'.trim(),
+                      'description': '${v['template_description']}'.trim(),
+                      'definition': {
+                        ...draft.payload,
+                        'model_policy': v['model_policy'],
+                        'runtime_preferences': preferredValues(v),
+                        'resource_limits': resources(v),
+                        'team_preset': v['team_preset'],
+                      },
+                      if (update) ...{
+                        'template_id': libraryState.source!['id'],
+                        'expected_version': libraryState.source!['version'],
+                      },
+                    };
+                    final request = libraryState.request(intent, requestId);
+                    refreshDialogs();
+                    final saveEpoch = revision;
+                    try {
+                      final saved = await library(request);
+                      final header = savedTemplates
+                          .where((t) => t['id'] == saved['id'])
+                          .firstOrNull;
+                      final versions = records(
+                        header?['versions'],
+                      ).where((t) => t['version'] != saved['version']).toList();
+                      final metadata = {
+                        'id': saved['id'],
+                        'name': saved['name'],
+                        'description': saved['description'],
+                        'version': saved['version'],
+                        'versions': [
+                          {'version': saved['version'], 'name': saved['name']},
+                          ...versions,
+                        ],
+                      };
+                      savedTemplates.removeWhere((t) => t['id'] == saved['id']);
+                      savedTemplates.add(metadata);
+                      updateSavedChoices();
+                      if (libraryState.acknowledge(saved, selection)) {
+                        if (saveEpoch == revision)
+                          draft.hydrate(saved['definition']['team_members']);
+                        v['saved_template'] =
+                            '${saved['id']}@${saved['version']}';
+                        invalidate();
+                      }
+                      libraryNotice =
+                          'Saved ${saved['name']} · v${saved['version']}. Re-preview before creating the organization.';
+                    } catch (e) {
+                      if (libraryState.current(operation)) libraryError = '$e';
+                    } finally {
+                      libraryState.finish(operation);
+                      refreshDialogs();
+                    }
+                  },
+                  disabled: libraryState.busy,
+                ),
+            ]),
+          ]),
+        for (final warning in team?['warnings'] as List? ?? []) prose(warning),
+        for (final member in records(team?['members']))
+          details(
+            '${member['name']} · ${member['runtime']} · ${member['model_name']}',
+            [
+              prose(
+                'Reports to: ${member['manager_name'] ?? (member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer')} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
+              ),
+              prose(member['selection_note']),
+              prose(memberExecutionSummary(member)),
+              pre(member['persona']),
+            ],
+          ),
+      ],
+    ],
+  );
+  if (result == null) return null;
+  return {
+    for (final key in ['id', 'name', 'purpose', 'instructions'])
+      key: result[key],
+    if (org == null && selected(result).isNotEmpty) ...{
+      ...draft.payload,
+      'project': result['project'],
+      'model_policy': result['model_policy'],
+      'runtime_preferences': preferredValues(result),
+      'template_plan': team!['template_plan'],
+      'team_preset': result['team_preset'],
+      'resource_limits': resources(result),
+      if (libraryState.source != null) ...{
+        'template_id': libraryState.source!['id'],
+        'template_version': libraryState.source!['version'],
+      },
+    },
+  };
+}
+
+List<Component> memberModelFields(
+  Json member,
+  Json? preview,
+  void Function() changed,
+) {
+  final resolved = records(
+    preview?['members'],
+  ).where((m) => m['template_key'] == member['key']).firstOrNull;
+  final runtime = '${member['runtime'] ?? resolved?['runtime'] ?? ''}';
+  final runtimes = preview?['runtimes'] as Map? ?? {};
+  final entry = runtimes[runtime] as Map? ?? {};
+  final models = records(entry['models']);
+  if (runtime.isEmpty || runtime == 'agy' || models.isEmpty) return [];
+  final model = models
+      .where(
+        (m) =>
+            m['id'] == (member['model'] ?? resolved?['model']) &&
+            m['provider'] == (member['provider'] ?? resolved?['provider']),
+      )
+      .firstOrNull;
+  final reasoning = (model?['reasoning'] as List? ?? [])
+      .map((v) => '$v')
+      .toList();
+  return [
+    select(
+      'Member model',
+      member['model'] == null
+          ? ''
+          : jsonEncode([member['provider'] ?? '', member['model']]),
+      {
+        '': 'Automatic for role',
+        for (final model in models)
+          jsonEncode(
+            [model['provider'] ?? '', model['id']],
+          ): '${model['provider'] == '' ? '' : '${model['provider']}/'}${model['name']}',
+      },
+      (value) {
+        member.remove('reasoning');
+        if (value.isEmpty) {
+          member.remove('provider');
+          member.remove('model');
+        } else {
+          final pair = jsonDecode(value) as List;
+          member['runtime'] = runtime;
+          member['provider'] = pair[0];
+          member['model'] = pair[1];
+        }
+        changed();
+      },
+    ),
+    if (runtime != 'opencode' || entry['supports_variants'] == true)
+      select(
+        'Member reasoning',
+        '${member['reasoning'] ?? '__auto__'}',
+        {
+          '__auto__': 'Automatic for role',
+          '': 'Model default',
+          for (final value in reasoning) value: value,
+        },
+        (value) {
+          if (value == '__auto__')
+            member.remove('reasoning');
+          else
+            member['reasoning'] = value;
+          changed();
+        },
+      ),
+  ];
+}
 
 Future<Json?> hireForm(
   Json org,

@@ -358,8 +358,16 @@ Component select(
   String label,
   String value,
   Map<String, String> options,
-  void Function(String) onChange,
-) => _Control(label, value, onChange, kind: 'select', options: options);
+  void Function(String) onChange, {
+  bool disabled = false,
+}) => _Control(
+  label,
+  value,
+  onChange,
+  kind: 'select',
+  options: options,
+  disabled: disabled,
+);
 
 class _Control extends StatefulComponent {
   const _Control(
@@ -370,13 +378,14 @@ class _Control extends StatefulComponent {
     this.placeholder,
     this.password = false,
     this.isRequired = false,
+    this.disabled = false,
     this.kind = 'input',
     this.rows = 5,
     this.options = const {},
   });
   final String label, value, kind;
   final String? id, placeholder;
-  final bool password, isRequired;
+  final bool password, isRequired, disabled;
   final int rows;
   final Map<String, String> options;
   final void Function(String) change;
@@ -449,7 +458,7 @@ class _ControlState extends State<_Control> {
               },
             ),
         ],
-        attributes: {'id': id},
+        attributes: {'id': id, if (component.disabled) 'disabled': ''},
         events: {
           'change': (event) =>
               component.change((event.target as web.HTMLSelectElement).value),
