@@ -162,6 +162,8 @@ void main() {
     List<Map<String, dynamic>> jobs = const [],
     String? failAction,
     bool Function(http.Request)? failWhen,
+    String? startedTaskId,
+    String role = 'admin',
     Map<String, dynamic> Function(http.Request)? response,
     Map<String, dynamic>? projectListing,
   }) async {
@@ -199,8 +201,28 @@ void main() {
                         ],
                       }
                 : response?.call(request)) ??
-            (path.endsWith('/organizations/state') ||
-                    path.endsWith('/organizations/activity')
+            (path.endsWith('/cli-setup')
+                ? {
+                    // The hire form offers only the runtimes the gateway reports
+                    // as ready, so the fixture must report them.
+                    'clis': [
+                      for (final entry in {
+                        'codex': 'Codex',
+                        'claude': 'Claude',
+                        'opencode': 'OpenCode',
+                        'agy': 'Antigravity',
+                      }.entries)
+                        {
+                          'id': entry.key,
+                          'name': entry.value,
+                          'installed': true,
+                          'status': 'not_configured',
+                          'ready': null,
+                        },
+                    ],
+                  }
+                : path.endsWith('/organizations/state') ||
+                      path.endsWith('/organizations/activity')
                 ? snapshot(jobs: jobs)
                 : path.endsWith('/organizations/history')
                 ? {
@@ -217,6 +239,8 @@ void main() {
                       : {
                           'runtimes': {'opencode': modelCatalog()},
                         })
+                : path.endsWith('/tasks/start_proposal')
+                ? {'id': startedTaskId}
                 : path.endsWith('/organizations/session')
                 ? {'results': []}
                 : path.endsWith('/session')
@@ -228,13 +252,100 @@ void main() {
     BlocScope.register<DashboardBloc>(() => connection!);
     connection!.connect('test');
     await settle();
-    connection!.operator.value = {'role': 'admin'};
+    connection!.operator.value = {'role': role};
     binding.attachRootComponent(_Host(child), attachTo: '#org-dom-test');
     await settle();
   }
 
   List<Map<String, dynamic>> actions(String action) =>
       posts.where((p) => p['path'] == '/api/organizations/$action').toList();
+
+  Map<String, dynamic> proposalJob() => {
+    'id': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'kind': 'discussion',
+    'state': 'artifact_ready',
+    'organization_id': 'org',
+    'group_id': 'group',
+    'proposal_details': [
+      {
+        'key': 'proposal-1',
+        'title': 'Follow up',
+        'description': 'Acceptance criteria and checks',
+        'profile_id': 'alice',
+        'status': 'skipped',
+        'reason': 'Discussion created before automatic follow-up was enabled.',
+      },
+    ],
+  };
+
+  test(
+    'manual proposal retry preserves request identity and opens the task',
+    () async {
+      final oldHash = web.window.location.hash;
+      addTearDown(
+        () => web.window.history.replaceState(
+          null,
+          '',
+          oldHash.isEmpty ? '#' : oldHash,
+        ),
+      );
+      await mount(
+        const GroupPage(id: 'group'),
+        jobs: [proposalJob()],
+        failAction: 'start_proposal',
+        startedTaskId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      );
+      await click('Proposals');
+      await click('Start as task');
+      expect(
+        posts.where((p) => p['path'] == '/api/tasks/start_proposal'),
+        isEmpty,
+      );
+      await click('Confirm');
+      await click('Start as task');
+      await click('Confirm');
+      final starts = posts
+          .where((p) => p['path'] == '/api/tasks/start_proposal')
+          .toList();
+      expect(starts.length, 2);
+      expect(starts[0]['request_id'], starts[1]['request_id']);
+      expect(starts[0]['job_id'], proposalJob()['id']);
+      expect(starts[0]['proposal_key'], 'proposal-1');
+      expect(
+        web.window.location.hash,
+        '#/tasks/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      );
+    },
+  );
+
+  test('manual proposal control is hidden from non-administrators', () async {
+    await mount(
+      const GroupPage(id: 'group'),
+      jobs: [proposalJob()],
+      role: 'operator',
+    );
+    await click('Proposals');
+    expect(
+      nodes('button').where((n) => n.textContent == 'Start as task'),
+      isEmpty,
+    );
+  });
+
+  test(
+    'manual proposal confirmation cannot cross an account generation',
+    () async {
+      await mount(const GroupPage(id: 'group'), jobs: [proposalJob()]);
+      await click('Proposals');
+      await click('Start as task');
+      await connection!.disconnect();
+      await settle();
+      await click('Confirm');
+      expect(
+        posts.where((p) => p['path'] == '/api/tasks/start_proposal'),
+        isEmpty,
+      );
+    },
+  );
 
   test(
     'empty project explorer blocks team preview but permits a bare organization',

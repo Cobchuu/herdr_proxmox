@@ -19,6 +19,10 @@ and live session. The verifier requires all of the following:
   checked-out HEAD and recorded candidate (a `completed` task may rely on its exact recorded completion instead);
 - the live session is idle and still the recorded identity.
 
+When task validation or publication automation is enabled, handoff also waits
+for durable build evidence and the task agent's delivery inspection. This applies
+equally to inherited organization defaults and explicit per-task settings.
+
 Only then does the gateway archive the previous session, close its pane and mark the
 execution `finished`, and start the new task. Failures before closure leave the previous
 session intact. If closure succeeded but the next launch failed, the previous archive

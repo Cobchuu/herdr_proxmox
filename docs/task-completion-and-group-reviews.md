@@ -18,4 +18,23 @@ Discussion artifacts and their status appear in Activity & agents, with links to
 
 A finalized discussion materializes its proposals as draft tasks automatically, bounded by the follow-up limits; no proposal executes work by itself. Automatic queueing is the opt-in: with the organization's follow-up automation or the group's task creation enabled, qualifying proposals are created and queued through the ordinary assignment scheduler. Otherwise, and for any `needs_review=true` proposal, the task stays a draft that an operator starts. Each proposal produces one deterministic task identity, so repeated evaluation or acceptance cannot duplicate it. An unfinished or malformed meeting creates nothing.
 
-This closes the task-to-discussion-to-draft loop. It does not enable publication, GitHub merge, base updates or deployment; those remain separate operator actions. GitHub publishing configuration is not required for local discussions or local drafts.
+This closes the task-to-discussion-to-draft loop. New proposal tasks inherit the
+organization's explicitly enabled delivery defaults; otherwise capture and
+publication remain manual. GitHub merge, base updates and deployment remain
+separate operator actions. GitHub publishing configuration is not required for
+local discussions or manual local drafts.
+
+## Discussion transcript budgets
+
+The gateway accepts at most **750,000 raw UTF-8 bytes** for `discussion.json`,
+including JSON formatting and optional knowledge. Individual contributions have
+a 40,000-byte recovery ceiling, but that ceiling is not a safe target for every
+entry. Discussion prompts allocate at most 8,000 bytes per contribution, reduced
+for larger groups to reserve space for all 20 rounds (at most 120 entries) plus
+50,000 bytes for JSON and knowledge. Facilitators must summarize long replies,
+use compact JSON when necessary, and check the entire file's byte count.
+
+Compaction must finish before the receipt hashes the exact final document.
+Validation never rewrites the original file or hashes a normalized/truncated
+copy. An oversized raw file is still rejected before parsing; the resource bound
+is unchanged. Stored/exported contributions may be bounded independently.

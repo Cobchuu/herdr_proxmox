@@ -8,6 +8,7 @@ const _groupOrder = [
   'Review ready',
   'Pull request open',
   'Published',
+  'Need candidate',
   'Implementing',
   'Queued',
   'Draft',

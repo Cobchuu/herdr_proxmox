@@ -6,6 +6,7 @@ administrator operation; a separate identity/broker is needed for OS isolation.
 """
 import json
 import os
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re
@@ -19,6 +20,12 @@ MODES = ('direct', 'fork')
 # Fine-grained tokens are limited to their resource owner's repositories, so
 # they generally cannot open a pull request on another account's repository.
 FINE_GRAINED = 'github_pat_'
+
+
+@dataclass(frozen=True)
+class GitHubCredential:
+    token: str | None = field(repr=False)
+    login: str | None
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -59,11 +66,30 @@ class GitHub:
         if (not isinstance(data.get('token'), str)
                 or not re.fullmatch(r'[A-Za-z0-9_]{20,255}', data['token'])):
             raise ValueError('Invalid GitHub credential file.')
+        # Optional credential for upstream PR operations. Splitting credentials
+        # narrows GitHub permissions, but does not isolate their local storage.
+        if 'pr_token' in data or 'pr_login' in data:
+            if (not isinstance(data.get('pr_token'), str)
+                    or not re.fullmatch(r'[A-Za-z0-9_]{20,255}', data['pr_token'])
+                    or not isinstance(data.get('pr_login'), str)
+                    or not re.fullmatch(r'[A-Za-z0-9-]{1,39}', data['pr_login'])):
+                raise ValueError('Invalid GitHub pull request credential file.')
         return data
+
+    def pr_credential(self):
+        """The credential used for upstream pull request operations.
+
+        Falls back to the push credential, so a configuration without the split
+        behaves exactly as it did before one existed.
+        """
+        data = self.configuration()
+        return GitHubCredential(data.get('pr_token') or data.get('token'),
+                                data.get('pr_login') or data.get('login'))
 
     def snapshot(self):
         data = self.configuration()
         return dict(configured=bool(data.get('token')), login=data.get('login'),
+                    pr_configured=bool(data.get('pr_token')), pr_login=data.get('pr_login'),
                     repositories=data.get('repositories', []),
                     publication=data.get('publication', {}),
                     credential_isolation='shared_unix_user')
@@ -99,7 +125,15 @@ class GitHub:
         if not path.startswith('/') or '\\' in path or '..' in path:
             raise ValueError('Invalid GitHub API path.')
         supplied_token = token is not None
-        token = token or self.configuration().get('token')
+        if token is None:
+            config = self.configuration()
+            # Keep creation, lookup, reviews and lost-response recovery on the
+            # same credential. Explicit tokens still override this selection.
+            if config.get('pr_token') and re.match(r'^/repos/[^/]+/[^/]+/pulls(?:[/?]|$)', path):
+                token = config['pr_token']
+                supplied_token = True  # Do not mix identities in the GET cache.
+            else:
+                token = config.get('token')
         if not token:
             raise ValueError('Configure GitHub publishing credentials first.')
         headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
@@ -156,12 +190,13 @@ class GitHub:
         return isinstance(name, str) and source['full_name'].lower() == name.lower()
 
     @staticmethod
-    def pr_capability(token, login, upstream):
-        """Whether this credential can plausibly open a pull request upstream."""
-        if upstream.split('/')[0].lower() == str(login).lower():
-            return 'supported'
-        return ('needs_different_authentication' if token.startswith(FINE_GRAINED)
-                else 'supported')
+    def pr_capability(token):
+        """Report compatibility without inferring token permissions from account access.
+
+        Repository push access does not prove a fine-grained token has the
+        separate Pull requests write permission. Only publication tests that.
+        """
+        return 'not_exercised' if token.startswith(FINE_GRAINED) else 'supported'
 
     def repository_info(self, repository, token):
         info = self.request('/repos/' + repository, token=token)
@@ -198,11 +233,20 @@ class GitHub:
         if upstream != publishing:
             if not self.same_fork_network(target, destination):
                 raise ValueError(publishing + ' is no longer a fork of ' + upstream + '.')
-            if self.pr_capability(token, login, upstream) != 'supported':
-                raise ValueError('This fine-grained credential cannot create the upstream fork PR. Configure authentication authorized for ' + upstream + '.')
+        if config.get('pr_token'):
+            self.credential_login(config['pr_token'], config['pr_login'])
         return dict(login=login, repository=publishing, upstream=upstream,
                     mode='direct' if upstream == publishing else 'fork',
                     account_write='verified', token_write='not_exercised')
+
+    def credential_login(self, token, expected=None):
+        user = self.request('/user', token=token)
+        login = user.get('login') if isinstance(user, dict) else None
+        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,39}', login):
+            raise ValueError('GitHub returned an invalid account identity.')
+        if expected and login.lower() != expected.lower():
+            raise ValueError('GitHub pull request account changed; configure credentials again.')
+        return login
 
     def configure(self, body):
         if not isinstance(body, dict):
@@ -214,6 +258,30 @@ class GitHub:
                 or any(not isinstance(r, str) or not REPOSITORY.fullmatch(r)
                        or any(p in ('.', '..') for p in r.split('/')) for r in repositories)):
             raise ValueError('Allowlist 1–20 repositories as owner/repository.')
+        clear_pr = body.get('clear_pr_credential', False)
+        if type(clear_pr) is not bool:
+            raise ValueError('Choose whether to remove the pull request credential.')
+        pr_token, pr_login = body.get('pr_token'), body.get('pr_login')
+        if pr_token is not None and not isinstance(pr_token, str):
+            raise ValueError('Enter a valid pull request personal access token.')
+        if pr_login is not None and not isinstance(pr_login, str):
+            raise ValueError('Enter the pull request account name.')
+        pr_token, pr_login = (pr_token or '').strip() or None, (pr_login or '').strip() or None
+        if pr_login and not re.fullmatch(r'[A-Za-z0-9-]{1,39}', pr_login):
+            raise ValueError('Enter the pull request account name.')
+        if clear_pr and (pr_token or pr_login):
+            raise ValueError('Remove or replace the pull request credential, not both.')
+        if pr_token:
+            if not re.fullmatch(r'[A-Za-z0-9_]{20,255}', pr_token):
+                raise ValueError('Enter a valid pull request personal access token.')
+        elif not clear_pr:
+            previous = self.configuration()
+            pr_token = previous.get('pr_token')
+            pr_login = pr_login or previous.get('pr_login')
+            if pr_login and not pr_token:
+                raise ValueError('Provide a pull request token to verify its account.')
+        if pr_token:
+            pr_login = self.credential_login(pr_token, pr_login)
         requested = body.get('publication') or {}
         if not isinstance(requested, dict):
             raise ValueError('Invalid publication settings.')
@@ -258,7 +326,8 @@ class GitHub:
             if entry['mode'] == 'direct':
                 entry['verification'] = dict(
                     fork_access='not_applicable', account_write_to_publishing='verified',
-                    token_write_capability='not_exercised', upstream_pr_creation='supported')
+                    token_write_capability='not_exercised',
+                    upstream_pr_creation=self.pr_capability(pr_token) if pr_token else 'supported')
                 continue
             publishing = entry['publishing_repository']
             if not self.same_fork_network(resolved[upstream], resolved[publishing]):
@@ -267,7 +336,7 @@ class GitHub:
             entry['verification'] = dict(
                 fork_access='verified', account_write_to_publishing='verified',
                 token_write_capability='not_exercised',
-                upstream_pr_creation=self.pr_capability(token, login, upstream))
+                upstream_pr_creation=self.pr_capability(pr_token or token))
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = self.path.with_suffix('.tmp')
@@ -276,8 +345,13 @@ class GitHub:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
                 with os.fdopen(descriptor, 'w') as output:
-                    json.dump(dict(token=token, repositories=repositories, login=login,
-                                   publication=publication), output)
+                    record = dict(token=token, repositories=repositories, login=login,
+                                  publication=publication)
+                    # Omitted rather than written as null: the presence of the key
+                    # is what marks the split as configured.
+                    if pr_token is not None:
+                        record.update(pr_token=pr_token, pr_login=pr_login)
+                    json.dump(record, output)
                 temporary.replace(self.path)
             finally:
                 temporary.unlink(missing_ok=True)

@@ -16,6 +16,10 @@ from project_files import project_directory
 from permissions import accessible_paths, permission_mode, prepare_permissions
 from session_ownership import active, reserves
 from herdr_ids import is_pane_id, is_workspace_id
+# Refusals that mean "this participant is not free right now" rather than a
+# fault. A meeting that hits one waits and is retried, so answering a permission
+# prompt or finishing a task resumes it without an operator retrying by hand.
+TRANSIENT_AGENT_CODES = ('agent_blocked', 'agent_working', 'agent_not_ready')
 import toolchain_policy
 from herdr_errors import HerdrError, delivery_for, parse_completion, parse_resume, preview as preview_text
 
@@ -501,14 +505,15 @@ class OrganizationStore:
             details = []
             for proposal in Contributions.discussion_proposals(job):
                 key = proposal['key']
-                state = ('queued' if key in (outcome.get('queued') or []) else
+                manual_task = (job.get('manual_proposal_starts') or {}).get(key)
+                state = ('queued' if manual_task or key in (outcome.get('queued') or []) else
                          'draft' if key in (outcome.get('drafts') or []) else
                          'skipped' if key in (outcome.get('skipped') or {}) or outcome.get('unavailable') else 'proposed')
                 details.append(dict(proposal, status=state,
-                                    task_id=(outcome.get('created') or {}).get(key) or
+                                    task_id=manual_task or (outcome.get('created') or {}).get(key) or
                                     (task.get('follow_up_tasks') or {}).get(key),
-                                    reason=(outcome.get('skipped') or {}).get(key) or
-                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', '')))
+                                    reason='' if manual_task else ((outcome.get('skipped') or {}).get(key) or
+                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', ''))))
             job['proposal_details'] = details
         return data
 
@@ -1456,9 +1461,20 @@ class OrganizationStore:
                     lock.acquire()
                 acquired.append(lock)
             if job['kind'] == 'discussion':
-                from discussion_scheduler import prepare
+                from discussion_scheduler import mark_waiting, prepare
                 try:
                     prepared = prepare(self, job_id)
+                except HerdrError as error:
+                    # A participant that is busy, waiting on a decision, or not
+                    # yet interactive is not a preparation fault. Waiting keeps
+                    # the meeting queued, so the poll loop retries it and it
+                    # resumes by itself once the member is free — including after
+                    # an operator answers a permission prompt. Parking it here
+                    # instead stranded the meeting until someone retried by hand.
+                    if error.code not in TRANSIENT_AGENT_CODES:
+                        raise
+                    mark_waiting(self, job_id, str(error))
+                    return
                 except Exception as error:  # A preparation fault must stay visible, never silently queued.
                     self.update_job(job_id, state='needs_attention',
                                     error=(str(error) or error.__class__.__name__)[:500],

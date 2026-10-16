@@ -758,6 +758,7 @@ Future<Json?> hireForm(
   List<Json> profiles,
   ModelCatalog catalog, [
   Json? profile,
+  List<Json> runtimes = const [],
 ]) async {
   final result = await editRecord(
     profile == null ? 'Hire an agent' : 'Edit persona',
@@ -791,13 +792,7 @@ Future<Json?> hireForm(
     limits: {'name': 120, 'role': 120, 'project': 2000, 'persona': 8000},
     wide: {'project'},
     choices: {
-      'runtime': {
-        '': 'Choose runtime',
-        'codex': 'Codex',
-        'claude': 'Claude',
-        'opencode': 'OpenCode',
-        'agy': 'Antigravity',
-      },
+      'runtime': runtimeChoices(runtimes, profile),
       'manager_id': {
         '': 'Organization owner',
         for (final p in profiles.where((p) => p['id'] != profile?['id']))

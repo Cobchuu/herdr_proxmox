@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 import uuid
 import threading
 
-from organizations import now
+from organizations import now, TRANSIENT_AGENT_CODES
+from herdr_errors import HerdrError
 from session_ownership import ACTIVE_JOB_STATES, active as session_active
 
 
@@ -115,7 +116,13 @@ def prepare_locked(store, job_id):
                 if not controller:
                     raise ValueError('Task completion verification is unavailable; inspect the member task')
                 task = controller.get(run['task_id'])
-                if task['state'] not in ('review_ready', 'publishing', 'published', 'pull_open', 'merged', 'completed', 'closed'):
+                # The states a finished implementation reaches. This listed
+                # 'pull_open', which is never written — the real state is
+                # 'pr_open' — so a member whose pull request was open looked
+                # unfinished and the meeting waited out its full 24 hours.
+                # 'publishing' was here too; that is a delivery-flow state, not a
+                # task state, so it never matched either.
+                if task['state'] not in ('review_ready', 'published', 'pr_open', 'merged', 'completed', 'closed'):
                     raise Waiting(profile['name'] + ': waiting for implementation to finish')
                 verified, reason = controller.execution_finished(task, run)
                 if not verified:
@@ -123,7 +130,7 @@ def prepare_locked(store, job_id):
             live = store.identity(run, ready=False)
             status = live.get('agent_status', live.get('state'))
             if status not in ('idle', 'done'):
-                if status in ('working', 'running', 'busy', 'thinking'):
+                if status in ('working', 'running', 'busy', 'thinking', 'blocked', 'attention'):
                     raise Waiting(profile['name'] + ': waiting for current execution')
                 raise ValueError(profile['name'] + ': session requires inspection (' + str(status) + ')')
             store.identity(run)  # Validate interactive readiness too.
@@ -202,7 +209,10 @@ def prepare_locked(store, job_id):
         mark_waiting(store, job_id, str(error))
         return False
     except (ValueError, OSError) as error:
-        store.update_job(job_id, state='needs_attention', error=str(error)[:500], progress='Preparation stopped before discussion submission')
+        if isinstance(error, HerdrError) and error.code in TRANSIENT_AGENT_CODES:
+            mark_waiting(store, job_id, str(error))
+        else:
+            store.update_job(job_id, state='needs_attention', error=str(error)[:500], progress='Preparation stopped before discussion submission')
         return False
 
 

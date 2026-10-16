@@ -30,6 +30,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
       ? 'collaborate'
       : component.initialView;
   String? error;
+  String? readinessError;
   bool cleaningSessions = false, transferring = false;
   final sessionRequests = <String, String>{};
   ModelCatalog catalog = const ModelCatalog({});
@@ -56,6 +57,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
           bind();
           sessionRequests.clear();
           error = null;
+          readinessError = null;
           catalog = const ModelCatalog({});
         }
         setState(() {});
@@ -175,6 +177,30 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Future<void> hire(Json org, [Json? profile]) async {
     final epoch = connection.generation;
+    // A failed lookup is a request error, not evidence of missing CLI accounts.
+    var runtimes = const <Json>[];
+    try {
+      final status = await connection.request('cli-setup');
+      runtimes = [
+        for (final cli in (status['clis'] as List? ?? []))
+          if (cli is Json) cli,
+      ];
+    } catch (failure) {
+      if (mounted &&
+          epoch == connection.generation &&
+          connection.state.connected) {
+        setState(
+          () => readinessError =
+              'Could not load runtime readiness: $failure. Try hiring or editing again to retry.',
+        );
+      }
+      return;
+    }
+    if (!mounted ||
+        epoch != connection.generation ||
+        !connection.state.connected)
+      return;
+    setState(() => readinessError = null);
     final values = await hireForm(
       org,
       bloc.state.profiles
@@ -184,6 +210,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
           .toList(),
       catalog,
       profile,
+      runtimes,
     );
     if (values != null && mounted && epoch == connection.generation) {
       await submit('hire', values);
@@ -1079,6 +1106,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
       ),
       if (state.error != null) notice(state.error, error: true),
       if (error != null) notice(error, error: true),
+      if (readinessError != null) notice(readinessError, error: true),
       if (bloc.pending != null)
         el('div', [
           icon('history', classes: 'icon--sm'),

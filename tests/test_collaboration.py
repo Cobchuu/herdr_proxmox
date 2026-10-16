@@ -127,6 +127,24 @@ class CollaborationTests(unittest.TestCase):
         detail = next(j for j in history['jobs'] if j['id'] == job['id'])['proposal_details'][0]
         self.assertEqual((detail['status'], detail['task_id']), ('draft', 'child'))
 
+    def test_history_shows_manual_start_without_rewriting_automatic_verdict(self):
+        from contributions import Contributions
+        group_id = self.group()
+        job = dict(id=uuid.uuid4().hex, kind='discussion', state='artifact_ready',
+                   organization_id=self.org, group_id=group_id,
+                   result='```json\n' + json.dumps(dict(task_proposals=[dict(
+                       title='Manual follow-up', description='Acceptance checks', profile_id=self.max)])) + '\n```')
+        key = Contributions.discussion_proposals(job)[0]['key']
+        verdict = dict(unavailable='Before automatic follow-up was enabled.',
+                       skipped={key: 'Policy declined'}, deferred={key: 'Daily limit'})
+        job.update(proposals=verdict, manual_proposal_starts={key: 'manual-task'})
+        with closing(self.store.connect()) as db, db:
+            self.store.put(db, 'jobs', job)
+        history = self.store.history(dict(group_id=group_id))
+        detail = next(j for j in history['jobs'] if j['id'] == job['id'])['proposal_details'][0]
+        self.assertEqual((detail['status'], detail['task_id'], detail['reason']), ('queued', 'manual-task', ''))
+        self.assertEqual(self.job(job['id'])['proposals'], verdict)
+
     def test_mixed_runtime_group_checks_every_members_permission_policy(self):
         with closing(self.store.connect()) as db, db:
             member = self.store.get(db, 'profiles', self.max)
@@ -281,10 +299,67 @@ class CollaborationTests(unittest.TestCase):
         prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
         self.assertEqual(len(prompts), 1)
 
-    def test_preparation_failure_requires_inspection_and_submitted_meetings_never_retry(self):
+    def test_transient_readiness_errors_wait_then_submit_only_once(self):
+        from herdr_errors import HerdrError
+        group = self.group()
+        original = self.store.identity
+        for code in ('agent_blocked', 'agent_working', 'agent_not_ready'):
+            with self.subTest(code=code):
+                with patch.object(self.store, 'execute'):
+                    meeting = self.action('discuss', organization_id=self.org, group_id=group)
+                    self.drain()
+                def temporarily_unready(run, ready=True, **kwargs):
+                    if ready:
+                        raise HerdrError('Try again later', code=code, delivery='none')
+                    return original(run, ready=ready, **kwargs)
+                with patch.object(self.store, 'identity', side_effect=temporarily_unready):
+                    self.store.execute(meeting)
+                self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+                self.assertFalse(self.job(meeting).get('discussion_submitted_at'))
+                self.store.advance_discussions()
+                self.drain()
+                self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+                self.store.advance_discussions()
+                self.drain()
+        prompts = [a for a, _ in self.calls if a[:2] == ('agent', 'prompt') and 'Discussion directory:' in a[3]]
+        self.assertEqual(len(prompts), 3)
+
+    def test_blocked_member_waits_then_resumes_without_manual_retry(self):
         group = self.group()
         run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
         self.agents[run['alias']]['agent_status'] = 'blocked'
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+        self.agents[run['alias']]['agent_status'] = 'idle'
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+
+    def test_pr_open_member_task_is_admitted_but_an_unfinished_task_waits(self):
+        group = self.group()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        self.store.update_job(run['id'], task_id='member-task')
+        controller = Mock()
+        controller.session_owner.return_value = None
+        controller.session_budget.return_value = dict(active=3, started=3, policy={})
+        controller.execution_finished.return_value = (True, '')
+        controller.get.return_value = dict(state='implementing')
+        self.store.contributions = controller
+        meeting = self.action('discuss', organization_id=self.org, group_id=group)
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'waiting_for_members')
+        controller.execution_finished.assert_not_called()
+        controller.get.return_value = dict(state='pr_open')
+        self.store.advance_discussions()
+        self.drain()
+        self.assertEqual(self.job(meeting)['state'], 'artifact_ready')
+        controller.execution_finished.assert_called_once()
+
+    def test_preparation_failure_requires_inspection_and_submitted_meetings_never_retry(self):
+        group = self.group()
+        run = next(j for j in self.store.job_records() if j.get('profile_id') == self.max and j['kind'] == 'launch')
+        self.agents[run['alias']]['agent_status'] = 'unknown_fault'
         meeting = self.action('discuss', organization_id=self.org, group_id=group)
         self.drain()
         self.assertEqual(self.job(meeting)['state'], 'needs_attention')
@@ -1819,3 +1894,79 @@ class CollaborationTests(unittest.TestCase):
         finally:
             release.set()
             self.drain()
+
+
+class ContributionValidationTests(unittest.TestCase):
+    """A long contribution must not make a finished discussion unfinalizable."""
+
+    def setUp(self):
+        from collaboration import validate_contributions
+        self.validate = validate_contributions
+        self.runs = [{'profile_id': 'p1', 'profile': {'name': 'Ada'}}]
+
+    def test_aggregate_budget_fits_all_members_and_rounds_without_rewriting_raw_bytes(self):
+        import tempfile
+        from collaboration import (MAX_ROUNDS, TRANSCRIPT_LIMIT, read_document,
+                                   parse_discussion_transcript, transcript_contribution_budget)
+        runs = [dict(profile_id=f'p{i}', profile=dict(name=f'Member {i}')) for i in range(6)]
+        budget = transcript_contribution_budget(len(runs))
+        parts = [dict(profile_id=run['profile_id'], name=run['profile']['name'], round=round_,
+                      content='x' * budget) for round_ in range(1, MAX_ROUNDS + 1) for run in runs]
+        raw = json.dumps(dict(contributions=parts), separators=(',', ':')).encode('utf-8')
+        self.assertLess(len(raw), TRANSCRIPT_LIMIT)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'discussion.json'
+            path.write_bytes(raw)
+            data, text = read_document(path, TRANSCRIPT_LIMIT, 'discussion transcript')
+            self.assertEqual(len(parse_discussion_transcript(text, dict(runs=runs))['contributions']), 120)
+            self.assertEqual(data, raw)
+            self.assertEqual(path.read_bytes(), raw)
+            path.write_bytes(b'x' * (TRANSCRIPT_LIMIT + 1))
+            with self.assertRaisesRegex(ValueError, 'exceeds maximum'):
+                read_document(path, TRANSCRIPT_LIMIT, 'discussion transcript')
+
+    def test_an_oversized_contribution_is_bounded_not_rejected(self):
+        # Rejecting it left the whole transcript invalid, so a discussion whose
+        # members wrote at length could never be finalized: automatic recovery
+        # and the operator's button both failed on the same file, every pass.
+        from collaboration import CONTRIBUTION_LIMIT
+        parts = self.validate(
+            [dict(profile_id='p1', round=1, content='x' * (CONTRIBUTION_LIMIT * 3))],
+            self.runs)
+        self.assertTrue(parts[0]['truncated'])
+        self.assertLessEqual(len(parts[0]['content'].encode('utf-8')), CONTRIBUTION_LIMIT)
+        self.assertIn('truncated at the gateway limit', parts[0]['content'])
+
+    def test_truncation_never_splits_a_character(self):
+        from collaboration import CONTRIBUTION_LIMIT
+        parts = self.validate(
+            [dict(profile_id='p1', round=1, content='\u00e9' * (CONTRIBUTION_LIMIT * 2))],
+            self.runs)
+        # Encoding back must succeed: a split multi-byte character would raise.
+        parts[0]['content'].encode('utf-8')
+
+    def test_a_contribution_within_the_limit_is_untouched(self):
+        parts = self.validate([dict(profile_id='p1', round=1, content=' short ')], self.runs)
+        self.assertEqual(parts[0]['content'], 'short')
+        self.assertNotIn('truncated', parts[0])
+        self.assertEqual(parts[0]['name'], 'Ada')
+
+    def test_a_long_but_reasonable_contribution_is_not_truncated(self):
+        # The ceiling is a safety net, not the target. 20 KB is well past the
+        # prompt's 8 KB guidance and must still pass through intact: this is the
+        # case that used to invalidate the whole transcript.
+        from collaboration import CONTRIBUTION_LIMIT
+        body = ('- finding with `file.py:12` evidence and affected callers.\n' * 350)
+        self.assertGreater(len(body.encode('utf-8')), 20000)
+        self.assertLess(len(body.encode('utf-8')), CONTRIBUTION_LIMIT)
+        parts = self.validate([dict(profile_id='p1', round=1, content=body)], self.runs)
+        self.assertEqual(parts[0]['content'], body.strip())
+        self.assertNotIn('truncated', parts[0])
+
+    def test_a_genuinely_invalid_contribution_is_still_refused(self):
+        for bad in (dict(profile_id='other', round=1, content='x'),
+                    dict(profile_id='p1', round=0, content='x'),
+                    dict(profile_id='p1', round=1, content='   '),
+                    dict(profile_id='p1', round='1', content='x')):
+            with self.assertRaisesRegex(ValueError, 'Invalid member contribution'):
+                self.validate([bad], self.runs)

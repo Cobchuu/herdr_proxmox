@@ -308,7 +308,10 @@ class _DashboardAppState extends State<DashboardApp> {
       '/' || '' => OverviewPage(key: key),
       '/agents' => OverviewPage(agentsOnly: true, key: key),
       '/organization' => OrganizationPage(
-        initialView: route.queryParameters['view'] ?? 'chart',
+        initialView:
+            route.queryParameters['view'] ??
+            route.queryParameters['section'] ??
+            'chart',
         key: key,
       ),
       '/tasks' => TasksPage(

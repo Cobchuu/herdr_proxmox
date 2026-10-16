@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'dart:math';
-
 import '../services.dart';
 
 import '../ui.dart';
@@ -9,9 +7,6 @@ import '../ui.dart';
 import 'org_forms.dart';
 
 import 'org_ui.dart';
-
-String newRequestId() =>
-    '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(0x7fffffff)}';
 
 class OrganizationAutomation extends StatefulComponent {
   const OrganizationAutomation({super.key, required this.organizationId});
@@ -118,7 +113,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
 
       ...chosen,
 
-      'request_id': newRequestId(),
+      'request_id': requestId(),
     };
 
     await save();
@@ -179,7 +174,11 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
     final admin =
         connection.state.connected &&
         connection.operator.value['role'] == 'admin';
-    final entries = policy?.entries.toList() ?? const [];
+    final entries =
+        policy?.entries
+            .where((e) => automationLabels.containsKey(e.key))
+            .toList() ??
+        const [];
     final switches = entries.where((e) => e.value is bool).toList();
     final limits = entries.where((e) => e.value is! bool).toList();
 
@@ -196,10 +195,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
                 el('h3', [text('Automation')], classes: 'overline'),
                 factList([
                   for (final entry in switches)
-                    (
-                      automationLabels[entry.key] ?? humanize(entry.key),
-                      value(entry.value),
-                    ),
+                    (automationLabels[entry.key]!, value(entry.value)),
                 ], classes: 'org-policy__list'),
               ], classes: 'org-policy__group'),
             if (limits.isNotEmpty)
@@ -207,10 +203,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
                 el('h3', [text('Limits')], classes: 'overline'),
                 factList([
                   for (final entry in limits)
-                    (
-                      automationLabels[entry.key] ?? humanize(entry.key),
-                      value(entry.value),
-                    ),
+                    (automationLabels[entry.key]!, value(entry.value)),
                 ], classes: 'org-policy__list'),
               ], classes: 'org-policy__group'),
           ], classes: 'org-policy'),
@@ -254,6 +247,8 @@ const automationLabels = <String, String>{
   'reap_finished_sessions':
       'Archive and close finished idle sessions automatically',
   'reap_orphaned_panes': 'Reclaim proven empty orphaned panes',
+  'auto_validate': 'Capture and validate new tasks automatically',
+  'auto_publish': 'Publish validated tasks automatically',
   'max_per_meeting': 'Max automatic tasks per meeting',
   'max_open_per_agent': 'Max open tasks per agent',
   'max_follow_up_depth': 'Max follow-up depth',
@@ -267,6 +262,8 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
   final defaults = <String, dynamic>{
     'auto_queue_proposals': false,
     'paused': false,
+    'auto_validate': false,
+    'auto_publish': false,
     'reap_finished_sessions': false,
     'reap_orphaned_panes': false,
     'max_per_meeting': 1,
@@ -300,10 +297,12 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
       'paused',
       'reap_finished_sessions',
       'reap_orphaned_panes',
+      'auto_validate',
+      'auto_publish',
     },
     extra: (v) => [
       note(
-        'Valid proposals remain drafts when queueing is disabled or limits are reached. Publishing, merging and deployment remain manual. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes.',
+        'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Automatic capture and validation needs the durable build service, and publication needs it enabled first.',
       ),
     ],
     validate: (v) {
