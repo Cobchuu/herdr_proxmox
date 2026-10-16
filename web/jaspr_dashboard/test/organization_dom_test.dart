@@ -14,6 +14,7 @@ import 'package:web/web.dart' as web;
 import 'package:herdr_jaspr_dashboard/services.dart';
 import 'package:herdr_jaspr_dashboard/ui.dart' as ui;
 import 'package:herdr_jaspr_dashboard/pages/organization_page.dart';
+import 'package:herdr_jaspr_dashboard/pages/organization_automation.dart';
 import 'package:herdr_jaspr_dashboard/pages/group_page.dart';
 import 'package:herdr_jaspr_dashboard/pages/collaboration_panel.dart';
 import 'package:herdr_jaspr_dashboard/pages/org_chart.dart';
@@ -165,7 +166,7 @@ void main() {
     bool Function(http.Request)? failWhen,
     String? startedTaskId,
     String role = 'admin',
-    Map<String, dynamic> Function(http.Request)? response,
+    dynamic Function(http.Request)? response,
     Map<String, dynamic>? projectListing,
   }) async {
     var lost = false;
@@ -247,7 +248,9 @@ void main() {
                 : path.endsWith('/session')
                 ? {'authenticated': true}
                 : {'workspaces': [], 'agents': []});
-        return http.Response(jsonEncode(data), 200);
+        final result = await data;
+        if (result is http.Response) return result;
+        return http.Response(jsonEncode(result), 200);
       }),
     );
     BlocScope.register<DashboardBloc>(() => connection!);
@@ -278,6 +281,207 @@ void main() {
       },
     ],
   };
+
+  web.HTMLInputElement policyInput(String key) =>
+      nodes('.dialog-layer [data-field="$key"] input').single
+          as web.HTMLInputElement;
+
+  test(
+    'policy rejection stays in the modal, highlights its rule and preserves edits',
+    () async {
+      var policy = <String, dynamic>{
+        'auto_capture': false,
+        'auto_validate': false,
+        'auto_publish': false,
+        'daily_cap': 5,
+      };
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/automation'))
+            return {'policy': policy};
+          if (request.url.path.endsWith('/tasks/automation')) {
+            final body = Map<String, dynamic>.from(jsonDecode(request.body));
+            if (body['auto_validate'] == true)
+              return http.Response(
+                jsonEncode({
+                  'error':
+                      'Automatic validation needs the durable build service.',
+                  'field_errors': {
+                    'auto_validate':
+                        'Install the durable build service under Builds & deployments.',
+                  },
+                }),
+                400,
+              );
+            policy = body;
+            return {'policy': policy};
+          }
+          return null;
+        },
+      );
+      await click('Edit policy');
+      policyInput('auto_capture').click();
+      policyInput('auto_validate').click();
+      await input('Daily task limit', '7');
+      await click('Save');
+      expect(nodes('[role="dialog"]'), hasLength(1));
+      final summary = nodes('.org-form__summary').single;
+      expect(
+        summary.textContent,
+        contains('Automatic validation needs the durable build service.'),
+      );
+      expect(
+        summary.textContent,
+        contains('Validate captured candidates automatically'),
+      );
+      expect(summary.parentElement!.firstElementChild, summary);
+      expect(web.document.activeElement, summary);
+      expect(policyInput('auto_validate').getAttribute('aria-invalid'), 'true');
+      final errorId = policyInput(
+        'auto_validate',
+      ).getAttribute('aria-describedby')!;
+      expect(
+        web.document.getElementById(errorId)!.textContent,
+        contains('Builds & deployments'),
+      );
+      expect(
+        nodes('.org-form__item--invalid').single.getAttribute('data-field'),
+        'auto_validate',
+      );
+      expect(policyInput('auto_validate').checked, isTrue);
+      expect(policyInput('auto_capture').checked, isTrue);
+      expect(policyInput('daily_cap').value, '7');
+      expect(policy['auto_validate'], isFalse);
+      policyInput('auto_validate').click();
+      await settle();
+      await click('Save');
+      expect(nodes('[role="dialog"]'), isEmpty);
+      expect(policy['auto_validate'], isFalse);
+      expect(policy['auto_capture'], isTrue);
+      expect(policy['daily_cap'], 7);
+      expect(posts, hasLength(2));
+    },
+  );
+
+  for (final editBeforeRetry in [false, true]) {
+    test(
+      'policy modal retains retry identity unless the draft changes: $editBeforeRetry',
+      () async {
+        var policy = <String, dynamic>{
+          'auto_capture': false,
+          'auto_validate': false,
+          'auto_publish': false,
+        };
+        await mount(
+          const OrganizationAutomation(organizationId: 'org'),
+          failAction: 'automation',
+          response: (request) {
+            if (request.url.path.endsWith('/tasks/automation'))
+              policy = Map<String, dynamic>.from(jsonDecode(request.body));
+            if (request.url.path.endsWith('/organizations/automation') ||
+                request.url.path.endsWith('/tasks/automation'))
+              return {'policy': policy};
+            return null;
+          },
+        );
+        await click('Edit policy');
+        await click('Save');
+        expect(nodes('[role="dialog"]'), hasLength(1));
+        expect(
+          nodes('.org-form__summary').single.textContent,
+          contains('response lost'),
+        );
+        if (editBeforeRetry) {
+          policyInput('auto_capture').click();
+          await settle();
+        }
+        await click('Save');
+        expect(nodes('[role="dialog"]'), isEmpty);
+        expect(posts, hasLength(2));
+        expect(
+          posts.last['request_id'],
+          editBeforeRetry
+              ? isNot(posts.first['request_id'])
+              : posts.first['request_id'],
+        );
+      },
+    );
+  }
+
+  test(
+    'pending policy submission disables duplicate saves and modal dismissal',
+    () async {
+      final reply = Completer<http.Response>();
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/automation'))
+            return {
+              'policy': {'auto_capture': false},
+            };
+          if (request.url.path.endsWith('/tasks/automation'))
+            return reply.future;
+          return null;
+        },
+      );
+      try {
+        await click('Edit policy');
+        await click('Save');
+        expect(btn('Saving…').disabled, isTrue);
+        expect(btn('Cancel').disabled, isTrue);
+        expect(btn('Close').disabled, isTrue);
+        expect(policyInput('auto_capture').matches(':disabled'), isTrue);
+        nodes('[role="dialog"]').single.dispatchEvent(
+          web.KeyboardEvent(
+            'keydown',
+            web.KeyboardEventInit(key: 'Escape', bubbles: true),
+          ),
+        );
+        btn('Saving…').click();
+        await settle();
+        expect(nodes('[role="dialog"]'), hasLength(1));
+        expect(posts, hasLength(1));
+        reply.complete(http.Response('{"error":"Please retry"}', 503));
+        await settle();
+        expect(btn('Save').disabled, isFalse);
+        expect(btn('Close').disabled, isFalse);
+        expect(nodes('[role="dialog"]'), hasLength(1));
+      } finally {
+        if (!reply.isCompleted)
+          reply.complete(http.Response('{"error":"Please retry"}', 503));
+        await settle();
+      }
+    },
+  );
+
+  test(
+    'invalid policy limits highlight the field before any request',
+    () async {
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) =>
+            request.url.path.endsWith('/organizations/automation')
+            ? {
+                'policy': {'daily_cap': 5},
+              }
+            : null,
+      );
+      await click('Edit policy');
+      await input('Daily task limit', '-1');
+      await click('Save');
+      expect(nodes('[role="dialog"]'), hasLength(1));
+      expect(
+        nodes('.org-form__item--invalid').single.getAttribute('data-field'),
+        'daily_cap',
+      );
+      expect(
+        nodes('.org-form__summary').single.textContent,
+        contains('Daily task limit'),
+      );
+      expect(posts, isEmpty);
+    },
+  );
 
   test(
     'manual proposal retry preserves request identity and opens the task',

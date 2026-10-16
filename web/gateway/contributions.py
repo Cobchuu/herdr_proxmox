@@ -23,6 +23,7 @@ import uuid
 
 from github_api import GitHubError
 from request_identity import TASK_REQUEST as REQUEST
+from request_validation import FieldValidationError
 from project_files import project_directory
 import project_git
 from repository_lock import repository_lock
@@ -79,7 +80,7 @@ AUTOMATION_DEFAULTS = dict(auto_queue_proposals=False, max_per_meeting=1, max_op
                            # including every proposal-created one — started
                            # manual, so capture, validation and publication were
                            # clicked through one task at a time.
-                           auto_validate=False, auto_publish=False)
+                           auto_capture=False, auto_validate=False, auto_publish=False)
 AUTOMATION_LIMITS = (('max_per_meeting', 0, 10), ('max_open_per_agent', 0, 50),
                      ('max_follow_up_depth', 0, 10), ('daily_cap', 0, 100),
                      ('max_active_sessions', 0, 50), ('max_active_meetings', 0, 10),
@@ -90,6 +91,21 @@ SCOPED_TASK_LIMIT = 256
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
+
+
+def resolved_automation_policy(saved):
+    """Defaults with one stored policy applied, upgrading pre-split records.
+
+    Capture and validation are separate switches now, but a record written
+    before that split carries only `auto_validate`, where it opted into both.
+    Every reader goes through here so an upgrade cannot silently drop an
+    organization's automatic capture.
+    """
+    saved = saved or {}
+    policy = dict(AUTOMATION_DEFAULTS, **saved)
+    if 'auto_capture' not in saved:
+        policy['auto_capture'] = policy['auto_validate']
+    return policy
 
 
 def remote_info(repository):
@@ -481,7 +497,7 @@ class Contributions:
             return [row[0] for row in rows]
 
     def automatic_tasks(self, task_ids=None):
-        ids = self.select_task_ids("json_extract(data, '$.auto_validate')=1", task_ids)
+        ids = self.select_task_ids("(json_extract(data, '$.auto_capture')=1 OR json_extract(data, '$.auto_validate')=1)", task_ids)
         with closing(self.connect()) as db:
             return [dict(id=identifier, state=json.loads(db.execute('SELECT data FROM tasks WHERE id=?', (identifier,)).fetchone()[0])['state']) for identifier in ids]
 
@@ -490,13 +506,14 @@ class Contributions:
                  and not pr_repairs.active(t)]
         if not tasks:
             return
-        if not self.validation or self.validation.snapshot().get('executor') != 'service':
-            return
         runs = self.store.snapshot(live_status=False)['jobs']
         for listed in tasks:
             try:
                 with self.operation('task:' + listed['id'], timeout=0):
                     task = self.get(listed['id'])
+                    capture = task.get('auto_capture', task.get('auto_validate', False)) is True
+                    if not capture and task['state'] == 'implementing':
+                        continue  # Validation can wait for an explicitly captured candidate.
                     if (task_delivery.enabled(task) and (task.get('delivery_workflow') or {}).get('state')
                             in ('notifying_agent', 'waiting_agent', 'accepting_repair', 'attention')):
                         continue  # Delivery owns any repair commit until the verified chat reply arrives.
@@ -515,6 +532,8 @@ class Contributions:
                         if project_git.git(path, 'symbolic-ref', '--short', 'HEAD').strip() != task['branch']:
                             raise ValueError('Task branch changed; inspect before continuing.')
                         head = project_git.git(path, 'rev-parse', 'HEAD').strip()
+                        if not capture and head != task.get('head_sha'):
+                            raise ValueError('Capture the new candidate before automatic validation.')
                         no_changes = False
                         receipt = None
                         if run['state'] == 'finished' and (task['state'] == 'implementing' or head != task.get('head_sha')
@@ -525,7 +544,7 @@ class Contributions:
                             if receipt['outcome'] == 'no_changes':
                                 if project_git.merge_state(path) or project_git.git(path, 'status', '--porcelain=v1', '--untracked-files=all').strip():
                                     raise ValueError('A no-changes receipt requires a clean checkout without unfinished Git operations.')
-                                task.update(state='completed', auto_validate=False, auto_review=False, completion=dict(
+                                task.update(state='completed', auto_capture=False, auto_validate=False, auto_review=False, completion=dict(
                                     outcome='no_changes', candidate=head, upstream=head, validation='not_applicable',
                                     reason=str(receipt.get('reason') or 'The assigned agent verified that no code changes are required.')[:2000],
                                     actor='automatic_task_policy', at=stamp()),
@@ -555,7 +574,10 @@ class Contributions:
                     if receipt is not None:
                         self.materialize_follow_up(task, receipt, 'automatic_task_policy')
                     # Do not automatically retry failures. One durable identity per task+SHA.
-                    if head not in task.get('builds', {}):
+                    if task.get('auto_validate'):
+                        if not self.validation or self.validation.snapshot().get('executor') != 'service':
+                            raise ValueError('Automatic validation needs the durable build service. Candidate capture remains available.')
+                    if task.get('auto_validate') and head not in task.get('builds', {}):
                         self.perform('build', {'target': head}, task['id'], 'automatic_task_policy')
                     task = self.get(task['id'])
                     if task.pop('automation_error', None) is not None:
@@ -607,7 +629,7 @@ class Contributions:
                         upstream = project_git.git(repository, 'rev-parse', '--verify', task['base_ref'] + '^{commit}').strip()
                         if project_git.git(repository, 'rev-parse', head + '^{tree}').strip() != project_git.git(repository, 'rev-parse', upstream + '^{tree}').strip():
                             continue
-                    task.update(state='completed', auto_validate=False, completion=dict(
+                    task.update(state='completed', auto_capture=False, auto_validate=False, completion=dict(
                         outcome='incorporated_upstream', candidate=head, upstream=upstream, validation='verified',
                         reason='Exact candidate file tree matches the fetched configured base and required checks passed.',
                         actor='task_reconciler', at=stamp()))
@@ -1230,14 +1252,11 @@ class Contributions:
 
     def policy(self, organization_id):
         """Organization follow-up automation policy with defaults applied."""
-        merged = dict(AUTOMATION_DEFAULTS)
         import template_resources
-        merged.update(template_resources.saved(self.store, organization_id))
+        limits = template_resources.saved(self.store, organization_id)
         with closing(self.connect()) as db:
             row = db.execute('SELECT data FROM policies WHERE id=?', (organization_id,)).fetchone()
-        if row:
-            merged.update(json.loads(row[0]))
-        return merged
+        return resolved_automation_policy(dict(limits, **(json.loads(row[0]) if row else {})))
 
     def set_automation_policy(self, body, actor):
         organization_id = body.get('organization_id')
@@ -1250,27 +1269,30 @@ class Contributions:
             was_enabled = policy['auto_queue_proposals']
             previous = dict(policy)
             for key in ('auto_queue_proposals', 'paused', 'reap_finished_sessions', 'reap_orphaned_panes',
-                        'auto_validate', 'auto_publish'):
+                        'auto_capture', 'auto_validate', 'auto_publish'):
                 if key in body:
                     if not isinstance(body[key], bool):
-                        raise ValueError('Invalid automation policy value.')
+                        raise FieldValidationError('Invalid automation policy value.', [key])
                     policy[key] = body[key]
+            if 'auto_validate' in body and 'auto_capture' not in body:
+                policy['auto_capture'] = body['auto_validate']  # Legacy combined control.
             # Enabling delivery needs its dependencies. Pausing, disabling and
             # changing unrelated limits must remain possible during an outage.
             enabling_delivery = any(policy[key] and not previous[key]
                                     for key in ('auto_validate', 'auto_publish'))
             if enabling_delivery and (self.validation is None
                                       or self.validation.snapshot().get('executor') != 'service'):
-                raise ValueError('Automatic capture and validation needs the durable build service; '
-                                 'install it under Builds & deployments first.')
+                raise FieldValidationError('Automatic validation needs the durable build service; '
+                                           'install it under Builds & deployments first.',
+                                           [key for key in ('auto_validate', 'auto_publish') if policy[key] and not previous[key]])
             if policy['auto_publish'] and not policy['auto_validate']:
-                raise ValueError('Automatic publication requires automatic capture and validation.')
+                raise FieldValidationError('Automatic publication requires automatic validation.', ['auto_publish'])
             if policy['auto_publish'] and not previous['auto_publish'] and not self.github.snapshot().get('configured'):
-                raise ValueError('Configure GitHub publishing before enabling automatic publication.')
+                raise FieldValidationError('Configure GitHub publishing before enabling automatic publication.', ['auto_publish'])
             for key, low, high in AUTOMATION_LIMITS:
                 if key in body:
                     if type(body[key]) is not int or not low <= body[key] <= high:
-                        raise ValueError('Invalid automation limit.')
+                        raise FieldValidationError('Invalid automation limit.', [key])
                     policy[key] = body[key]
             if policy['auto_queue_proposals'] and not was_enabled:
                 # Enabling starts a fresh window: discussions created earlier are
@@ -1784,7 +1806,7 @@ class Contributions:
             organizations = {row[0] for row in db.execute(
                 "SELECT DISTINCT json_extract(data, '$.organization_id') FROM tasks "
                 "WHERE json_extract(data, '$.organization_id') IS NOT NULL")}
-        automation = {organization: dict(AUTOMATION_DEFAULTS, **saved.get(organization, {}))
+        automation = {organization: resolved_automation_policy(saved.get(organization))
                       for organization in organizations}
         if role != 'admin':
             automation = {organization: {k: v for k, v in policy.items() if k in AUTOMATION_DEFAULTS}
@@ -2628,15 +2650,18 @@ class Contributions:
             self.store.update_job(job_id, manual_proposal_starts=starts)
             return made
 
-    def delivery_settings(self, task, automatic, publish, actor, organization_policy=None):
+    def delivery_settings(self, task, automatic, publish, actor, organization_policy=None, capture=None, require_service=True):
         """Prepare the same delivery contract for inherited and explicit policy."""
         if not isinstance(automatic, bool) or not isinstance(publish, bool):
             raise ValueError('Choose whether automatic validation and publication are enabled.')
-        if automatic and (self.validation is None or self.validation.snapshot().get('executor') != 'service'):
-            raise ValueError('Install the durable build service before enabling automatic task validation.')
+        capture = automatic if capture is None else capture
+        if not isinstance(capture, bool):
+            raise ValueError('Choose whether automatic candidate capture is enabled.')
+        if automatic and require_service and (self.validation is None or self.validation.snapshot().get('executor') != 'service'):
+            raise ValueError('Install the durable build service before enabling automatic validation or publication.')
         if publish and not automatic:
-            raise ValueError('Automatic publication requires automatic capture and validation.')
-        settings = dict(auto_validate=automatic, auto_publish=publish, await_verification=automatic)
+            raise ValueError('Automatic publication requires automatic validation.')
+        settings = dict(auto_capture=capture, auto_validate=automatic, auto_publish=publish, await_verification=automatic)
         if publish:
             if not self.github.snapshot().get('configured'):
                 raise ValueError('Configure GitHub publishing before enabling automatic publication.')
@@ -2686,10 +2711,8 @@ class Contributions:
             if profile.get('group_id'):
                 raise ValueError('Assign an individual worker, not a discussion group.')
             # Delivery automation comes from the organisation policy, so a task
-            # created from a discussion is not silently manual. Seeded only when
-            # the durable build service can honour it: a task claiming automatic
-            # validation that cannot run would be a lie the operator only
-            # discovers by watching nothing happen.
+            # created from a discussion is not silently manual. Capture needs no
+            # build worker; only seed validation when its service can run it.
             delivery = self.policy(profile['organization_id'])
             automatic = (bool(delivery.get('auto_validate')) and self.validation is not None
                          and self.validation.snapshot().get('executor') == 'service')
@@ -2705,7 +2728,7 @@ class Contributions:
             if review:
                 task['acceptance'] = dict(review, at=stamp())
             task.update(self.delivery_settings(task, automatic, automatic and bool(delivery.get('auto_publish')),
-                                               actor, organization_policy=delivery))
+                                               actor, organization_policy=delivery, capture=bool(delivery.get('auto_capture'))))
             project_git.configured_base(repository, base)
             return self.save(task, 'create', actor)
         task = self.get(task_id)
@@ -2749,7 +2772,7 @@ class Contributions:
                 if body.get('upstream_sha') != upstream:
                     raise ValueError('Fetched base changed; refresh before confirming completion.')
             evidence = task.get('builds', {}).get(head, {})
-            task.update(state='completed', auto_validate=False, auto_review=False, completion=dict(
+            task.update(state='completed', auto_capture=False, auto_validate=False, auto_review=False, completion=dict(
                 outcome=outcome, candidate=head, upstream=upstream,
                 validation='verified' if evidence.get('state') == 'complete' and evidence.get('target') == head and evidence.get('required_checks_verified') is True else 'not_verified',
                 reason=reason.strip(), actor=actor, at=stamp()))
@@ -2932,19 +2955,28 @@ class Contributions:
         elif action == 'policy':
             if task['state'] in ('merged', 'closed', 'completed') and not stopping_delivery:
                 raise ValueError('A terminal task can stop delivery automation, but cannot enable it.')
-            if body.get('auto_validate') is True and task.get('run_id'):
+            capture = body.get('auto_capture', body.get('auto_validate', task.get('auto_capture', task.get('auto_validate', False))))
+            enabling_capture = capture is True and not task.get('auto_capture', task.get('auto_validate', False))
+            enabling_validation = body.get('auto_validate') is True and not task.get('auto_validate')
+            enabling_publication = body.get('auto_publish') is True and not task.get('auto_publish')
+            if (enabling_capture or enabling_validation or enabling_publication or body.get('retry_delivery') is True) and task.get('run_id'):
                 run = next((job for job in self.store.snapshot(live_status=False).get('jobs', [])
                             if job.get('id') == task['run_id']), None)
                 if not run or run.get('state') not in ('persona_sent', 'queued', 'running'):
                     raise ValueError('Restore the original task session before enabling verification and inspection.')
-            if not isinstance(body.get('auto_validate'), bool):
-                raise ValueError('Choose whether automatic capture and validation is enabled.')
+            automatic_validation = body.get('auto_validate', task.get('auto_validate', False))
+            if not isinstance(automatic_validation, bool):
+                raise ValueError('Choose whether automatic validation is enabled.')
             automatic_publication = body.get('auto_publish', task.get('auto_publish', False))
             if not isinstance(automatic_publication, bool):
                 raise ValueError('Choose whether automatic draft PR publication is enabled.')
-            settings = self.delivery_settings(task, body['auto_validate'], automatic_publication, actor)
+            settings = self.delivery_settings(task, automatic_validation, automatic_publication, actor, capture=capture,
+                                              # Capture needs no build worker; only newly turning on
+                                              # validation or publication, or retrying delivery, does.
+                                              require_service=enabling_validation or enabling_publication
+                                              or body.get('retry_delivery') is True)
             if body.get('retry_delivery') is True:
-                if not body['auto_validate']:
+                if not automatic_validation:
                     raise ValueError('Enable verification before retrying delivery.')
                 old = task.get('delivery_workflow') or {}
                 if old.get('state') != 'attention':
@@ -2953,7 +2985,7 @@ class Contributions:
                 task['delivery_workflow'] = dict(sha=task.get('head_sha'), state='waiting_verification',
                     attempt=old.get('attempt', 0) + 1, previous_error=old.get('error', ''), started_at=stamp())
             old = task.get('delivery_workflow') or {}
-            if (body['auto_validate'] and old and body.get('retry_delivery') is not True
+            if (automatic_validation and old and body.get('retry_delivery') is not True
                     and (not task.get('await_verification') or automatic_publication != task.get('auto_publish', False)
                          or old.get('state') == 'cancelled')):
                 task['delivery_workflow'] = dict(sha=task.get('head_sha'), state='waiting_verification',

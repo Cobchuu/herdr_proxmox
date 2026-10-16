@@ -58,6 +58,8 @@ class ValidationRuns:
         self.root = Path(root) if root else self.projects.parent / 'herdr-validation'
         self.timeout = timeout
         self.lock = threading.Lock()
+        self.install_lock = threading.RLock()
+        self.install_guard = None
         # run.json is replaced atomically, but on Windows os.replace fails while
         # a concurrent reader holds the target open. Serialize our own readers and
         # writers, and retry briefly for readers outside this process.
@@ -186,6 +188,14 @@ class ValidationRuns:
         return archive, manifest
 
     def submit(self, body, actor='dashboard_operator'):
+        # Installation restarts the gateway. Serialize its queueing with build
+        # submission so neither can start while the other owns the executor.
+        with self.install_lock:
+            if self.install_guard:
+                self.install_guard()
+            return self._submit(body, actor)
+
+    def _submit(self, body, actor):
         if not isinstance(body, dict) or not EVENT_ID.fullmatch(str(body.get('id', ''))):
             raise ValueError('Select an integration event to validate.')
         event = self.lookup(body['id'])

@@ -526,12 +526,20 @@ class DialogLabel {
 }
 
 class _Dialog {
-  _Dialog(this.title, this.content, this.close, this.dismissible, this.label);
+  _Dialog(
+    this.title,
+    this.content,
+    this.close,
+    this.dismissible,
+    this.label,
+    this.canDismiss,
+  );
   final String title;
   final Component Function() content;
   final void Function() close;
   final bool dismissible;
   final DialogLabel? label;
+  final bool Function()? canDismiss;
 }
 
 Future<T?> showDialog<T>(
@@ -539,6 +547,7 @@ Future<T?> showDialog<T>(
   Component Function(void Function(T?) close) content, {
   bool dismissible = true,
   DialogLabel? label,
+  bool Function()? canDismiss,
 }) {
   final result = Completer<T?>();
   final previouslyFocused = web.document.activeElement;
@@ -548,6 +557,7 @@ Future<T?> showDialog<T>(
   late _Dialog dialog;
   void close(T? value) {
     if (result.isCompleted) return;
+    if (value == null && canDismiss?.call() == false) return;
     _dialogs.remove(dialog);
     label?.headings.removeListener(headingChanged);
     result.complete(value);
@@ -564,6 +574,7 @@ Future<T?> showDialog<T>(
     () => close(null),
     dismissible,
     label,
+    canDismiss,
   );
   _dialogs.add(dialog);
   refreshDialogs();
@@ -612,7 +623,12 @@ Component buildDialogs() => el('div', [
                   classes: 'visually-hidden',
                   attributes: {'id': label.fallbackId},
                 ),
-              if (dialog.dismissible) button('Close', dialog.close),
+              if (dialog.dismissible)
+                button(
+                  'Close',
+                  dialog.close,
+                  disabled: dialog.canDismiss?.call() == false,
+                ),
             ], classes: 'dialog__header'),
             dialog.content(),
           ],
@@ -641,9 +657,15 @@ Component buildDialogs() => el('div', [
           }
           if (key.key == 'Tab') {
             final elements = web.document.querySelectorAll(
-              '.dialog-layer:last-child button:not([disabled]), .dialog-layer:last-child input, .dialog-layer:last-child select, .dialog-layer:last-child textarea, .dialog-layer:last-child a[href]',
+              '.dialog-layer:last-child :is(button,input,select,textarea):not(:disabled), .dialog-layer:last-child a[href]',
             );
-            if (elements.length == 0) return;
+            if (elements.length == 0) {
+              key.preventDefault();
+              (web.document.querySelector('.dialog-layer:last-child .dialog')
+                      as web.HTMLElement?)
+                  ?.focus();
+              return;
+            }
             final first = elements.item(0) as web.HTMLElement;
             final last = elements.item(elements.length - 1) as web.HTMLElement;
             final panel = web.document.querySelector(

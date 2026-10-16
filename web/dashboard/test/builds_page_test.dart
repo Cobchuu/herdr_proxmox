@@ -7,6 +7,58 @@ import 'package:herdr_dashboard/dashboard_bloc.dart';
 import 'package:herdr_dashboard/builds_page.dart';
 
 void main() {
+  testWidgets(
+    'administrator can queue the build service without installer options',
+    (tester) async {
+      var state = 'idle';
+      final submitted = <String>[];
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/build-service/install')) {
+            submitted.add(request.body);
+            state = 'queued';
+            return http.Response(jsonEncode({'state': state}), 200);
+          }
+          if (request.url.path.endsWith('/build-service'))
+            return http.Response(
+              jsonEncode({'state': state, 'supported': true}),
+              200,
+            );
+          if (request.url.path.endsWith('/validation'))
+            return http.Response('{"runs":[],"executor":"gateway"}', 200);
+          return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }),
+      );
+      BlocScope.register<DashboardBloc>(() => connection);
+      connection.connect('token');
+      await connection.stream.firstWhere(
+        (_) => connection.state.refreshed != null,
+      );
+      connection.operator.value = {'role': 'admin'};
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: BuildsPage())),
+      );
+      await tester.pumpAndSettle();
+      final install = find.text('Install build service');
+      await tester.ensureVisible(install);
+      await tester.tap(install);
+      await tester.pumpAndSettle();
+      expect(submitted, ['{}']);
+      expect(
+        find.text('Build-service installation: Waiting to start'),
+        findsOneWidget,
+      );
+      expect(find.text('Installing build service…'), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Installing build service…'),
+      );
+      expect(button.onPressed, isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await connection.disconnect();
+      await BlocScope.reset();
+    },
+  );
+
   for (final brightness in [Brightness.light, Brightness.dark]) {
     testWidgets('phone build history and retention error in $brightness', (
       tester,
@@ -52,6 +104,11 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Builds & deployments'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.textContaining('Retention limit'),
+        150,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.textContaining('Retention limit'), findsOneWidget);
       expect(find.text('Download log'), findsOneWidget);
       expect(find.text('Download static artifact'), findsNothing);
@@ -142,6 +199,11 @@ void main() {
         MaterialApp(home: const Scaffold(body: BuildsPage())),
       );
       await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.textContaining('Deployment: idle'),
+        150,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.textContaining('Deployment: idle'), findsOneWidget);
       await tester.ensureVisible(find.text('Deploy this build'));
       await tester.pumpAndSettle();

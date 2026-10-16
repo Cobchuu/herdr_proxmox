@@ -465,12 +465,44 @@ state inspected areas and omissions before concluding that no refactor is needed
 
 ## Automatic verification and draft PR delivery
 
-In a task's **Automation settings**, administrators can enable **Automatically
-capture and validate**. This now retains the task session until durable checks
-for the receipt's exact commit settle and the worker reviews the results in a
-separate, verified reply. Existing saved policies retain their legacy behavior
-until updated. The worker waits idle for dashboard feedback rather than polling
-or occupying a long-running gateway worker thread.
+In a task's **Automation settings**, administrators can independently enable
+**Automatically capture completed candidates** and **Automatically validate
+captured candidates**. Capture checks the completion receipt, task session,
+branch and clean committed candidate; it needs no build service and does not
+claim that validation passed. Validation needs the durable build service and
+retains the task session until exact-commit checks settle and the worker reviews
+the results in a separate, verified reply. With capture off, automatic validation
+waits for an operator to capture the candidate. Existing combined policies keep
+both behaviors until edited. Organization defaults apply to new tasks. The worker
+waits idle for dashboard feedback rather than polling or occupying a long-running
+gateway worker thread.
+
+When an organization policy save is rejected, its editor remains open with the
+draft intact. The issue appears at the top, and affected rules or limits are
+highlighted with an inline explanation. Correct the draft and save again, or
+cancel to leave the saved policy unchanged. A retry after an uncertain response
+reuses its request identity until the draft changes.
+
+Under **Builds & deployments**, administrators can use **Install build service**
+to queue the release's fixed installer, inspect status/output, and retry a failed
+installation. Requests that do not start within 11 minutes expire with an error;
+inspect `herdr-build-install.path` before retrying. The root worker rejects expired
+requests if the watcher resumes later, and preserves any newer retry during cleanup.
+The root request worker is provisioned by `install/web-install.sh`
+on new installations. Existing containers need a one-time root bootstrap:
+
+```sh
+bash /opt/herdr-web/install/build-service-setup.sh
+```
+
+This bootstrap enables dashboard installation; it does not install or enable
+delivery automation itself. Installation requires CPU/memory cgroup controllers,
+starts `herdr-build.service`, and restarts the gateway. It waits until current
+builds finish before accepting an installation request and refuses new build
+submissions while installation is queued/running. The dashboard reconnects and
+reports the service executor afterward. Automatic validation and publication
+remain explicit policy choices. The direct root command
+`bash /opt/herdr-web/install/build-install.sh` remains available.
 
 **Automatically publish a validated draft PR** additionally authorizes pushing
 the task branch to its recorded upstream/fork destination and publishing generated

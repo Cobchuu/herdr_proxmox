@@ -34,6 +34,8 @@ from resource_usage import resources
 from organization_transfer import export_configuration, import_configuration
 from operators import Operators
 from sdk_install import SdkInstall
+from build_service_install import BuildServiceInstall
+from request_validation import FieldValidationError
 from updates import Updates
 from validation import ValidationRuns
 from github_api import GitHub, GitHubError
@@ -369,7 +371,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/organizations/templates':
                 self.reply(200, dict(team_templates.snapshot(), saved_templates=self.server.organizations.saved_templates()))
                 return
-            if self.path not in ('/api/snapshot', '/api/organizations', '/api/organizations/directory', '/api/organizations/state', '/api/projects/jobs', '/api/cli-setup', '/api/logs', '/api/ssh-access', '/api/dashboard-access', '/api/herdr-server', '/api/updates', '/api/models', '/api/integration', '/api/sdk', '/api/validation', '/api/tasks', '/api/github', '/api/discovery'):
+            if self.path not in ('/api/snapshot', '/api/organizations', '/api/organizations/directory', '/api/organizations/state', '/api/projects/jobs', '/api/cli-setup', '/api/logs', '/api/ssh-access', '/api/dashboard-access', '/api/herdr-server', '/api/updates', '/api/models', '/api/integration', '/api/sdk', '/api/build-service', '/api/validation', '/api/tasks', '/api/github', '/api/discovery'):
                 self.reply(404, {'error': 'Unknown endpoint.'})
                 return
             try:
@@ -401,6 +403,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if self.path == '/api/validation':
                     self.reply(200, self.server.validation.snapshot())
+                    return
+                if self.path == '/api/build-service':
+                    self.reply(200, self.server.build_service_install.snapshot())
                     return
                 if self.path == '/api/integration':
                     # Served from memory; the watcher owns the Git work.
@@ -532,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
         organization_actions = {f'/api/organizations/{name}': name for name in ('save', 'hire', 'launch', 'delegate', 'release', 'report', 'resolve_delegation', 'group', 'discuss', 'chat', 'inspect', 'input', 'recover', 'transcript', 'retry_discussion', 'cancel_discussion', 'remove_agent', 'remove_group', 'session', 'realign_discussion_session')}
         setup_actions = {f'/api/cli-setup/{name}': name for name in ('start', 'poll', 'input', 'resize', 'close', 'verify', 'install_integration')}
         log_actions = {f'/api/logs/{name}': name for name in ('save', 'preview', 'ticket', 'delete')}
-        if self.path not in actions and self.path not in organization_actions and self.path not in setup_actions and self.path not in log_actions and self.path not in ('/api/organizations/import', '/api/ssh-access/add', '/api/dashboard-access', '/api/herdr-server/start', '/api/knowledge', '/api/updates/install', '/api/updates/check', '/api/updates/alphas', '/api/updates/promote', '/api/updates/rollback', '/api/updates/provenance', '/api/models', '/api/sdk/install', '/api/validation/run', '/api/projects/clone', '/api/projects/browse', '/api/projects/git', '/api/integration/configure', '/api/integration/retry', '/api/integration/blockers', '/api/integration/repair', '/api/integration/guidance', '/api/integration/recover', '/api/organizations/history', '/api/organizations/activity', '/api/github/configure', '/api/tasks/create', '/api/tasks/start_proposal', '/api/tasks/launch', '/api/tasks/candidate', '/api/tasks/publish', '/api/tasks/publication', '/api/tasks/repair', '/api/tasks/pull', '/api/tasks/refresh', '/api/tasks/build', '/api/tasks/policy', '/api/tasks/complete', '/api/tasks/discuss', '/api/tasks/review_policy', '/api/tasks/proposal', '/api/tasks/assignment', '/api/tasks/automation', '/api/tasks/discovery', '/api/tasks/handover', '/api/tasks/consult', '/api/tasks/acceptance'):
+        if self.path not in actions and self.path not in organization_actions and self.path not in setup_actions and self.path not in log_actions and self.path not in ('/api/organizations/import', '/api/ssh-access/add', '/api/dashboard-access', '/api/herdr-server/start', '/api/knowledge', '/api/updates/install', '/api/updates/check', '/api/updates/alphas', '/api/updates/promote', '/api/updates/rollback', '/api/updates/provenance', '/api/models', '/api/sdk/install', '/api/build-service/install', '/api/validation/run', '/api/projects/clone', '/api/projects/browse', '/api/projects/git', '/api/integration/configure', '/api/integration/retry', '/api/integration/blockers', '/api/integration/repair', '/api/integration/guidance', '/api/integration/recover', '/api/organizations/history', '/api/organizations/activity', '/api/github/configure', '/api/tasks/create', '/api/tasks/start_proposal', '/api/tasks/launch', '/api/tasks/candidate', '/api/tasks/publish', '/api/tasks/publication', '/api/tasks/repair', '/api/tasks/pull', '/api/tasks/refresh', '/api/tasks/build', '/api/tasks/policy', '/api/tasks/complete', '/api/tasks/discuss', '/api/tasks/review_policy', '/api/tasks/proposal', '/api/tasks/assignment', '/api/tasks/automation', '/api/tasks/discovery', '/api/tasks/handover', '/api/tasks/consult', '/api/tasks/acceptance'):
             self.reply(404, {'error': 'Unknown endpoint.'})
             return
         try:
@@ -580,6 +585,10 @@ class Handler(BaseHTTPRequestHandler):
                 if role != 'admin':
                     raise ValueError('Only an administrator can install a development toolchain.')
                 self.reply(200, self.server.sdk_install.install(body))
+            elif self.path == '/api/build-service/install':
+                if role != 'admin':
+                    raise ValueError('Only an administrator can install the durable build service.')
+                self.reply(200, self.server.build_service_install.install(body, self.server.validation))
             elif self.path == '/api/validation/run':
                 self.reply(200, self.server.validation.submit(body, actor=actor))
             elif self.path == '/api/integration/configure':
@@ -688,6 +697,8 @@ class Handler(BaseHTTPRequestHandler):
             # HTTP 401 is reserved for dashboard authentication. An upstream
             # 401 must not revoke a valid browser session or erase task state.
             self.reply(502, {'error': str(exc)[:500], 'source': 'github', 'github_status': exc.status})
+        except FieldValidationError as exc:
+            self.reply(400, {'error': str(exc)[:500], 'field_errors': exc.field_errors})
         except (ValueError, UnicodeError) as exc:
             self.reply(400, {'error': str(exc)[:500]})
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -735,6 +746,7 @@ def main():
     policy = TOKEN_FILE.parent / 'dashboard-access.json'
     operators = Operators(Path('/etc/herdr/operators.json'))
     sdk_install = SdkInstall()
+    build_service_install = BuildServiceInstall()
     cli_setup = CliSetup()
     organizations = OrganizationStore(DATABASE, PROJECTS, command, runtime_status=cli_setup.status, runtime_ready=cli_setup.ready,
                                       model_validator=lambda profile: model_catalog.validate_selection(cli_setup, PROJECTS, profile),
@@ -765,6 +777,8 @@ def main():
             coordinator.record_validation_run(event_id, summary)
 
     validation = ValidationRuns(PROJECTS, build_event, record=record_build, queue=build_queue, minimum_free_bytes=minimum_build_space)
+    validation.install_lock = build_service_install.lock
+    validation.install_guard = build_service_install.require_idle
     contributions.validation = validation
     integration = IntegrationWatcher(PROJECTS, organizations.active_checkouts, coordinator=coordinator,
                                      wake_event=organizations.events.subscribe(('task', 'job', 'policy', 'runtime')))
@@ -779,7 +793,7 @@ def main():
     RUNTIME_EVENTS.start()
     contributions.start()
     try:
-        serve_gateway(bind, 8787, policy, token, {'github': github, 'contributions': contributions, 'projects': projects, 'organizations': organizations, 'cli_setup': cli_setup, 'run_logs': run_logs, 'ssh_access': ssh_access, 'herdr_server': HerdrServer(command), 'integration': integration, 'coordinator': coordinator, 'operators': operators, 'sdk_install': sdk_install, 'validation': validation}, cookie_secure=secure_setting == '1')
+        serve_gateway(bind, 8787, policy, token, {'github': github, 'contributions': contributions, 'projects': projects, 'organizations': organizations, 'cli_setup': cli_setup, 'run_logs': run_logs, 'ssh_access': ssh_access, 'herdr_server': HerdrServer(command), 'integration': integration, 'coordinator': coordinator, 'operators': operators, 'sdk_install': sdk_install, 'build_service_install': build_service_install, 'validation': validation}, cookie_secure=secure_setting == '1')
     finally:
         RUNTIME_EVENTS.close()
         outbox.close()

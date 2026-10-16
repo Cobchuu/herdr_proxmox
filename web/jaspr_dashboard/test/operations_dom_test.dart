@@ -201,6 +201,73 @@ void main() {
   }
 
   test(
+    'build service install queues once, shows failures and supports retry',
+    () async {
+      var state = 'idle';
+      dynamic response(http.Request r) {
+        if (r.url.path == '/api/build-service/install') {
+          expect(r.body, '{}');
+          state = 'queued';
+          return {'state': state};
+        }
+        if (r.url.path == '/api/build-service') {
+          return {
+            'state': state,
+            'supported': true,
+            if (state == 'failed')
+              'error': 'CPU/memory cgroup controllers are unavailable.',
+          };
+        }
+        if (r.url.path == '/api/validation')
+          return {'runs': [], 'executor': 'gateway'};
+        return buildResponse(r);
+      }
+
+      await mount(const BuildsPage(), response);
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Build-service installation: Not requested'),
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Automatic capture works without this service'),
+      );
+      await click('Install build service');
+      expect(posts('build-service/install'), hasLength(1));
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Build-service installation: Waiting to start'),
+      );
+      expect(button('Installing build service…').disabled, isTrue);
+      state = 'failed';
+      await click('Refresh builds');
+      await until(
+        () => web.document
+            .getElementById('operations-test')!
+            .textContent!
+            .contains('CPU/memory cgroup controllers are unavailable.'),
+      );
+      await click('Install build service');
+      expect(posts('build-service/install'), hasLength(2));
+    },
+  );
+
+  test('build service install is hidden from non-administrators', () async {
+    await mount(const BuildsPage(), (r) {
+      if (r.url.path == '/api/build-service')
+        return {'state': 'idle', 'supported': true};
+      if (r.url.path == '/api/validation')
+        return {'runs': [], 'executor': 'gateway'};
+      return buildResponse(r);
+    }, role: 'operator');
+    expect(
+      elements('button').any((e) => e.textContent == 'Install build service'),
+      isFalse,
+    );
+    expect(posts('build-service/install'), isEmpty);
+  });
+
+  test(
     'deployment approval shows immutable evidence and cancellation sends nothing',
     () async {
       await mount(const BuildsPage(), buildResponse);

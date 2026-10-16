@@ -48,6 +48,12 @@ bool taskHasPrConflicts(Map task) =>
     task['pull']['mergeable'] == false &&
     !['merged', 'closed', 'completed'].contains(task['state']);
 
+/// The one actionable step for this task, shown in every task view.
+///
+/// [executor] is accepted so existing call sites keep their signature, but it
+/// no longer varies the answer: capture runs in the gateway and validation is
+/// reported separately, so the next step depends only on the task's own
+/// recorded flags.
 String taskNextStep(Map task, {String executor = 'service'}) {
   final repair = task['pr_repair'] as Map?;
   if (!['merged', 'closed', 'completed'].contains(task['state'])) {
@@ -113,7 +119,7 @@ String taskNextStep(Map task, {String executor = 'service'}) {
     return 'Ready to launch the assigned agent.';
   }
   if (candidateWaiting(task)) {
-    return task['auto_validate'] == true && executor == 'service'
+    return taskAutoCapture(task)
         ? 'Candidate committed; automatic capture is pending.'
         : 'Candidate committed; capture it from Changes to continue.';
   }
@@ -121,16 +127,10 @@ String taskNextStep(Map task, {String executor = 'service'}) {
     // "Awaiting a committed candidate" describes an agent that is still
     // working. When capture is switched off the agent may be long finished, so
     // say which of the two it is and how to unblock it.
-    if (task['auto_validate'] != true) {
-      if (executor != 'service')
-        return 'Not capturing commits: the durable build service is not installed. '
-            'Install it under Builds & deployments, or capture the candidate from Changes.';
+    if (!taskAutoCapture(task)) {
       return 'Automatic capture is off for this task. Enable it in Automation settings, '
           'or capture the candidate from Changes.';
     }
-    if (executor != 'service')
-      return 'Automatic capture is waiting for the durable build service; '
-          'capture the candidate from Changes meanwhile.';
     return 'Implementation in progress; awaiting a committed candidate.';
   }
   if (task['state'] == 'merged')
