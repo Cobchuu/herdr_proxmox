@@ -1,6 +1,7 @@
 from contextlib import closing
 from pathlib import Path
 import copy
+import json
 import sys
 import tempfile
 import unittest
@@ -83,16 +84,15 @@ class TransferTests(unittest.TestCase):
         import_configuration(self.source, good)
         self.assertEqual(export_configuration(self.source)['profiles'][2]['persona'], 'x' * 8400)
 
-    def test_large_export_is_complete_but_flagged_not_importable(self):
+    def test_large_export_is_rejected_without_truncation(self):
         item = copy.deepcopy(self.bundle['organizations'][0])
         item['future_backup_data'] = 'x' * 2_000_001
         with closing(self.source.connect()) as db, db:
             self.source.put(db, 'organizations', item)
-        exported = export_configuration(self.source)
-        self.assertFalse(exported['import_size_supported'])
-        self.assertEqual(exported['organizations'][0], item)
-        with self.assertRaisesRegex(ValueError, '2 MB'):
-            import_configuration(self.target, exported)
+        with self.assertRaisesRegex(ValueError, '2 MB.*No records were omitted'):
+            export_configuration(self.source)
+        with closing(self.source.connect()) as db:
+            self.assertEqual(json.loads(db.execute('SELECT data FROM organizations').fetchone()[0]), item)
 
     def test_import_rejects_unlaunchable_model_settings(self):
         for changes in ({'provider': '', 'model': 'big-pickle'},

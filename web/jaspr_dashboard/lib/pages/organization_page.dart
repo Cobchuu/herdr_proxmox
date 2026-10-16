@@ -145,6 +145,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
       org,
       templates,
       (body) async {
+        if (epoch != connection.generation || !connection.state.connected)
+          throw StateError('Connection changed. Reopen the organization form.');
         final result = Json.from(
           await connection.request('organizations/templates', body),
         );
@@ -153,6 +155,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
         return result;
       },
       (body) async {
+        if (epoch != connection.generation || !connection.state.connected)
+          throw StateError('Connection changed. Reopen the organization form.');
         final result = Json.from(
           await connection.request('organizations/templates/library', body),
         );
@@ -643,11 +647,12 @@ class _OrganizationPageState extends State<OrganizationPage> {
         ))
           return;
         if (!mounted || epoch != connection.generation) return;
-        await connection.request('organizations/import', data);
+        final imported = await connection.request('organizations/import', data);
+        final counts = imported['imported'] as Map? ?? {};
         if (!mounted || epoch != connection.generation) return;
         await bloc.send(OrganizationCommand('refresh'));
         toast(
-          'Configuration imported. Review paths and connect CLI accounts before launching.',
+          'Configuration imported: ${counts['team_templates'] ?? 0} saved templates and ${counts['team_template_versions'] ?? 0} template versions. Review paths and connect CLI accounts before launching.',
         );
       }
     } catch (e) {

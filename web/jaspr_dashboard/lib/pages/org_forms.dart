@@ -1,7 +1,8 @@
 import 'org_form_values.dart';
 import 'dart:convert';
-import 'dart:math';
+import '../services.dart' show requestId;
 import 'package:herdr_dashboard_state/team_template_draft.dart';
+import 'package:herdr_dashboard_state/template_library_state.dart';
 import 'package:web/web.dart' as web;
 import '../ui.dart';
 import 'model_catalog.dart';
@@ -37,6 +38,7 @@ Future<Json?> editRecord(
   Set<String> flags = const {},
   void Function(String key, dynamic value, Json values)? changed,
   bool Function(String key, Json values)? visible,
+  bool Function(String key, Json values)? enabled,
   Set<String> wide = const {},
 }) {
   final values = Json.from(initial);
@@ -119,6 +121,7 @@ Future<Json?> editRecord(
                   changed?.call(entry.key, v, values);
                   refreshDialogs();
                 },
+                disabled: enabled != null && !enabled(entry.key, values),
               ),
             )
           else if (long.contains(entry.key))
@@ -215,12 +218,11 @@ Future<Json?> organizationForm([
   }
 
   updateSavedChoices();
-  Json? sourceTemplate, libraryPending;
+  final libraryState = TemplateLibraryState();
   List<dynamic>? loadedPreferences;
   List<dynamic> preferredValues(Json v) =>
       loadedPreferences ??
       [if (v['preferred_runtime'] != '') v['preferred_runtime']];
-  bool libraryBusy = false;
   String? libraryError, libraryNotice;
   final resourceDefaults = Json.from(
     templates?['resource_defaults'] ??
@@ -249,7 +251,6 @@ Future<Json?> organizationForm([
     team = null;
     previewError = null;
     loading = false;
-    libraryPending = null;
     refreshDialogs();
   }
 
@@ -308,6 +309,8 @@ Future<Json?> organizationForm([
         for (final bundle in bundles) '${bundle['id']}': '${bundle['name']}',
       },
     },
+    enabled: (key, v) =>
+        !libraryState.busy || !{'saved_template', 'team_preset'}.contains(key),
     visible: (key, v) =>
         !{
           'project',
@@ -318,11 +321,11 @@ Future<Json?> organizationForm([
         selected(v).isNotEmpty,
     changed: (key, value, v) {
       if (key == 'saved_template') {
-        sourceTemplate = null;
+        libraryState.source = null;
         invalidate();
         if ('$value'.isNotEmpty && library != null) {
           final epoch = revision;
-          libraryBusy = true;
+          final operation = libraryState.begin();
           libraryError = null;
           refreshDialogs();
           final parts = '$value'.split('@');
@@ -333,10 +336,10 @@ Future<Json?> organizationForm([
                 'template_id': parts[0],
                 'version': int.parse(parts[1]),
               });
-              if (epoch != revision) return;
-              sourceTemplate = record;
+              if (epoch != revision || !libraryState.current(operation)) return;
+              libraryState.source = record;
               final definition = Json.from(record['definition']);
-              draft.hydrate(definition['team_members']);
+              draft.hydrate(definition['team_members'], replace: true);
               for (final role in roles)
                 v['preset_${role['id']}'] = draft.selectedRoles.contains(
                   role['id'],
@@ -349,7 +352,7 @@ Future<Json?> organizationForm([
                   (definition['runtime_preferences'] as List? ?? [])
                       .firstOrNull ??
                   '';
-              v['team_preset'] = '';
+              v['team_preset'] = definition['team_preset'] ?? '';
               v['template_name'] = record['name'];
               v['template_description'] = record['description'];
               for (final key in resourceLabels.keys)
@@ -359,16 +362,16 @@ Future<Json?> organizationForm([
               libraryNotice =
                   'Loaded ${record['name']} · v${record['version']}. Re-preview for this project and its CLI accounts.';
             } catch (e) {
-              libraryError = '$e';
+              if (libraryState.current(operation)) libraryError = '$e';
             } finally {
-              libraryBusy = false;
+              libraryState.finish(operation);
               refreshDialogs();
             }
           }();
         }
       }
       if (key == 'team_preset') {
-        sourceTemplate = null;
+        libraryState.source = null;
         v['saved_template'] = '';
         final bundle = bundles.where((b) => b['id'] == value).firstOrNull;
         if (bundle != null) {
@@ -404,7 +407,8 @@ Future<Json?> organizationForm([
       }
     },
     validate: (v) {
-      if (libraryBusy) return 'Wait for the template operation to finish.';
+      if (libraryState.busy)
+        return 'Wait for the template operation to finish.';
       if (selected(v).isEmpty) return null;
       if (!projectFolders.containsKey(v['project']))
         return 'Select the team project directory.';
@@ -413,7 +417,7 @@ Future<Json?> organizationForm([
       return null;
     },
     extra: (v) => [
-      if (libraryBusy) prose('Loading or saving template…'),
+      if (libraryState.busy) prose('Loading or saving template…'),
       if (libraryError != null) errorLine(libraryError),
       if (libraryNotice != null) prose(libraryNotice),
       if (org == null && templates?['error'] != null)
@@ -450,9 +454,9 @@ Future<Json?> organizationForm([
                 'runtime_preferences': preferredValues(v),
                 'team_preset': v['team_preset'],
                 'resource_limits': resources(v),
-                if (sourceTemplate != null) ...{
-                  'template_id': sourceTemplate!['id'],
-                  'template_version': sourceTemplate!['version'],
+                if (libraryState.source != null) ...{
+                  'template_id': libraryState.source!['id'],
+                  'template_version': libraryState.source!['version'],
                 },
               });
               if (epoch == revision) {
@@ -469,7 +473,7 @@ Future<Json?> organizationForm([
           },
           disabled:
               loading ||
-              libraryBusy ||
+              libraryState.busy ||
               preview == null ||
               !projectFolders.containsKey(v['project']),
         ),
@@ -562,21 +566,23 @@ Future<Json?> organizationForm([
             ),
             field('Template name', '${v['template_name']}', (value) {
               v['template_name'] = value;
-              libraryPending = null;
             }),
             textarea('Template description', '${v['template_description']}', (
               value,
             ) {
               v['template_description'] = value;
-              libraryPending = null;
             }),
             row([
-              for (final update in [false, if (sourceTemplate != null) true])
+              for (final update in [
+                false,
+                if (libraryState.source != null) true,
+              ])
                 button(
                   update ? 'Save new version' : 'Save as new template',
                   () async {
-                    if (libraryBusy) return;
-                    libraryBusy = true;
+                    if (libraryState.busy) return;
+                    final operation = libraryState.begin();
+                    final selection = libraryState.selection;
                     libraryError = null;
                     libraryNotice = null;
                     final intent = {
@@ -588,26 +594,18 @@ Future<Json?> organizationForm([
                         'model_policy': v['model_policy'],
                         'runtime_preferences': preferredValues(v),
                         'resource_limits': resources(v),
+                        'team_preset': v['team_preset'],
                       },
                       if (update) ...{
-                        'template_id': sourceTemplate!['id'],
-                        'expected_version': sourceTemplate!['version'],
+                        'template_id': libraryState.source!['id'],
+                        'expected_version': libraryState.source!['version'],
                       },
                     };
-                    final previous = libraryPending == null
-                        ? null
-                        : (Json.from(libraryPending!)..remove('request_id'));
-                    if (jsonEncode(previous) != jsonEncode(intent)) {
-                      libraryPending = {
-                        ...intent,
-                        'request_id':
-                            '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(0x7fffffff)}',
-                      };
-                    }
+                    final request = libraryState.request(intent, requestId);
                     refreshDialogs();
                     final saveEpoch = revision;
                     try {
-                      final saved = await library(libraryPending!);
+                      final saved = await library(request);
                       final header = savedTemplates
                           .where((t) => t['id'] == saved['id'])
                           .firstOrNull;
@@ -627,9 +625,9 @@ Future<Json?> organizationForm([
                       savedTemplates.removeWhere((t) => t['id'] == saved['id']);
                       savedTemplates.add(metadata);
                       updateSavedChoices();
-                      if (saveEpoch == revision) {
-                        sourceTemplate = saved;
-                        draft.hydrate(saved['definition']['team_members']);
+                      if (libraryState.acknowledge(saved, selection)) {
+                        if (saveEpoch == revision)
+                          draft.hydrate(saved['definition']['team_members']);
                         v['saved_template'] =
                             '${saved['id']}@${saved['version']}';
                         invalidate();
@@ -637,13 +635,13 @@ Future<Json?> organizationForm([
                       libraryNotice =
                           'Saved ${saved['name']} · v${saved['version']}. Re-preview before creating the organization.';
                     } catch (e) {
-                      libraryError = '$e';
+                      if (libraryState.current(operation)) libraryError = '$e';
                     } finally {
-                      libraryBusy = false;
+                      libraryState.finish(operation);
                       refreshDialogs();
                     }
                   },
-                  disabled: libraryBusy,
+                  disabled: libraryState.busy,
                 ),
             ]),
           ]),
@@ -656,7 +654,7 @@ Future<Json?> organizationForm([
                 'Reports to: ${member['manager_name'] ?? (member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer')} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
               ),
               prose(member['selection_note']),
-              prose('Separate worktree · CLI default permissions'),
+              prose(memberExecutionSummary(member)),
               pre(member['persona']),
             ],
           ),
@@ -675,9 +673,9 @@ Future<Json?> organizationForm([
       'template_plan': team!['template_plan'],
       'team_preset': result['team_preset'],
       'resource_limits': resources(result),
-      if (sourceTemplate != null) ...{
-        'template_id': sourceTemplate!['id'],
-        'template_version': sourceTemplate!['version'],
+      if (libraryState.source != null) ...{
+        'template_id': libraryState.source!['id'],
+        'template_version': libraryState.source!['version'],
       },
     },
   };

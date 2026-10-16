@@ -22,6 +22,7 @@ from urllib.parse import quote
 import uuid
 
 from github_api import GitHubError
+from request_identity import TASK_REQUEST as REQUEST
 from project_files import project_directory
 import project_git
 from repository_lock import repository_lock
@@ -34,7 +35,6 @@ MAX_INSTANCES_PER_TEMPLATE = 2
 
 SHA = re.compile(r'[a-f0-9]{40}|[a-f0-9]{64}')
 BRANCH = re.compile(r'herdr/task-[a-f0-9]{12}')
-REQUEST = re.compile(r'[A-Za-z0-9_-]{1,64}')
 REPOSITORY = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 
 

@@ -72,6 +72,10 @@ RUNTIME_NAMES = {'codex': 'Codex', 'claude': 'Claude Code', 'opencode': 'OpenCod
 # coordination and independent review should not silently use a light model.
 ROLE_MINIMUMS = {r['id']: (1 if r['id'] == 'qa_engineer' else 2) for r in ROLES}
 MAX_MEMBERS = 20
+# Include escaped non-BMP characters, which can occupy a JSON surrogate pair.
+# This larger budget is limited to authenticated team save/preview/library
+# requests. Other requests retain their caps, including the 2 MB transfer limit.
+MAX_REQUEST_BYTES = 12 * (MAX_MEMBERS * (6000 + 120 + 128 + 3 * 160 + 20 * 500 + 512) + 16000) + 65536
 MEMBER_FIELDS = {'key', 'template_role', 'name', 'persona', 'runtime', 'provider', 'model', 'reasoning',
                  'manager_key', 'permission_mode', 'accessible_paths', 'use_worktree'}
 BUNDLES = [
@@ -242,23 +246,14 @@ def catalog(cli, projects, project):
     return dict(runtimes=runtimes, warnings=warnings, accounts=accounts)
 
 
-def family(model):
-    tokens = re.split(r'[-_.:/\s]+', model['id'].lower())
-    if any(s in tokens for s in ('opus', 'astra', 'fable', 'max', 'pro')):
-        return 'strong'
-    if any(s in tokens for s in ('luna', 'haiku', 'mini', 'nano', 'flash', 'lite')):
-        return 'economy'
-    return 'standard'
-
-
 def capability(model):
     tokens = re.split(r'[-_.:/\s]+', model['id'].lower())
+    if any(t in tokens for t in ('luna', 'haiku', 'mini', 'nano', 'flash', 'lite')):
+        return 1
     if any(t in tokens for t in ('opus', 'astra', 'fable', 'pro', 'max')):
         return 3
     if any(t in tokens for t in ('sonnet', 'sol', 'codex', 'coder', 'code', 'deepseek', 'qwen', 'glm', 'minimax', 'kimi')):
         return 2
-    if any(t in tokens for t in ('luna', 'haiku', 'mini', 'nano', 'flash', 'lite')):
-        return 1
     context = model.get('context')
     if model.get('tool_call') is True and type(context) is int:
         return 2 if context >= 64000 else 1 if context >= 16000 else 0
@@ -377,6 +372,7 @@ def plan(body, available):
     digest = hashlib.sha256(json.dumps([policy, members], sort_keys=True).encode()).hexdigest()
     return dict(members=members, warnings=available.get('warnings', []), model_policy=policy,
                 runtime_preferences=preferences(body), resource_limits=template_resources.validate(body.get('resource_limits')),
+                team_preset=body.get('team_preset', ''),
                 accounts=available.get('accounts', []), template_plan=digest, member_specs=specs, runtimes=available['runtimes'])
 
 

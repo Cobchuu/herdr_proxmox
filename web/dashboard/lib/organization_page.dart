@@ -1,5 +1,6 @@
 import 'organization_automation.dart';
 import 'package:herdr_dashboard_state/team_template_draft.dart';
+import 'package:herdr_dashboard_state/template_library_state.dart';
 import 'package:herdr_dashboard_state/project_directory_choices.dart';
 import 'dart:convert';
 import 'artifact_download.dart';
@@ -125,6 +126,10 @@ class _OrganizationPageState extends State<OrganizationPage> {
           return result;
         },
         library: (body) async {
+          if (epoch != connection.generation || !connection.state.connected)
+            throw StateError(
+              'Connection changed. Reopen the organization form.',
+            );
           final result = Map<String, dynamic>.from(
             await connection.request('organizations/templates/library', body),
           );
@@ -1203,8 +1208,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
   ];
   final templateName = TextEditingController(),
       templateDescription = TextEditingController();
-  Map<String, dynamic>? sourceTemplate, libraryPending;
-  bool libraryBusy = false;
+  final libraryState = TemplateLibraryState();
   String? libraryError, libraryNotice;
   static const resourceLabels = {
     'max_active_sessions': 'Maximum concurrent sessions',
@@ -1246,7 +1250,6 @@ class _OrganizationFormState extends State<OrganizationForm> {
     team = null;
     previewError = null;
     loading = false;
-    libraryPending = null;
   }
 
   Future<void> previewTeam() async {
@@ -1264,9 +1267,9 @@ class _OrganizationFormState extends State<OrganizationForm> {
         'runtime_preferences': preferredRuntimes,
         'team_preset': teamPreset,
         'resource_limits': resources,
-        if (sourceTemplate != null) ...{
-          'template_id': sourceTemplate!['id'],
-          'template_version': sourceTemplate!['version'],
+        if (libraryState.source != null) ...{
+          'template_id': libraryState.source!['id'],
+          'template_version': libraryState.source!['version'],
         },
       });
       if (mounted && epoch == revision)
@@ -1285,13 +1288,13 @@ class _OrganizationFormState extends State<OrganizationForm> {
   Future<void> loadSavedTemplate(String choice) async {
     setState(() {
       savedChoice = choice;
-      sourceTemplate = null;
+      libraryState.source = null;
       invalidate();
     });
     if (choice.isEmpty || widget.library == null) return;
     final epoch = revision;
+    final operation = libraryState.begin();
     setState(() {
-      libraryBusy = true;
       libraryError = null;
     });
     final parts = choice.split('@');
@@ -1301,11 +1304,12 @@ class _OrganizationFormState extends State<OrganizationForm> {
         'template_id': parts[0],
         'version': int.parse(parts[1]),
       });
-      if (!mounted || epoch != revision) return;
+      if (!mounted || epoch != revision || !libraryState.current(operation))
+        return;
       setState(() {
-        sourceTemplate = record;
+        libraryState.source = record;
         final definition = Map<String, dynamic>.from(record['definition']);
-        draft.hydrate(definition['team_members']);
+        draft.hydrate(definition['team_members'], replace: true);
         selectedRoles
           ..clear()
           ..addAll(draft.selectedRoles);
@@ -1315,7 +1319,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
         );
         preferredRuntime =
             '${(definition['runtime_preferences'] as List? ?? []).firstOrNull ?? ''}';
-        teamPreset = '';
+        teamPreset = '${definition['team_preset'] ?? ''}';
         templateName.text = '${record['name']}';
         templateDescription.text = '${record['description']}';
         for (final entry in resourceControllers.entries)
@@ -1326,14 +1330,15 @@ class _OrganizationFormState extends State<OrganizationForm> {
             'Loaded ${record['name']} · v${record['version']}. Re-preview for this project and its CLI accounts.';
       });
     } catch (e) {
-      if (mounted) setState(() => libraryError = '$e');
+      if (mounted && libraryState.current(operation))
+        setState(() => libraryError = '$e');
     } finally {
-      if (mounted) setState(() => libraryBusy = false);
+      if (mounted) setState(() => libraryState.finish(operation));
     }
   }
 
   Future<void> saveReusableTemplate(bool update) async {
-    if (libraryBusy || widget.library == null) return;
+    if (libraryState.busy || widget.library == null) return;
     final intent = <String, dynamic>{
       'action': 'save',
       'name': templateName.text.trim(),
@@ -1343,25 +1348,23 @@ class _OrganizationFormState extends State<OrganizationForm> {
         'model_policy': policy,
         'runtime_preferences': preferredRuntimes,
         'resource_limits': resources,
+        'team_preset': teamPreset,
       },
       if (update) ...{
-        'template_id': sourceTemplate!['id'],
-        'expected_version': sourceTemplate!['version'],
+        'template_id': libraryState.source!['id'],
+        'expected_version': libraryState.source!['version'],
       },
     };
-    final previous = libraryPending == null
-        ? null
-        : (Map<String, dynamic>.from(libraryPending!)..remove('request_id'));
-    if (jsonEncode(previous) != jsonEncode(intent))
-      libraryPending = {...intent, 'request_id': newRequestId()};
+    final request = libraryState.request(intent, newRequestId);
+    final selection = libraryState.selection;
+    final operation = libraryState.begin();
     final epoch = revision;
     setState(() {
-      libraryBusy = true;
       libraryError = null;
       libraryNotice = null;
     });
     try {
-      final saved = await widget.library!(libraryPending!);
+      final saved = await widget.library!(request);
       if (!mounted) return;
       setState(() {
         final header = savedTemplates
@@ -1380,9 +1383,9 @@ class _OrganizationFormState extends State<OrganizationForm> {
             ...versions,
           ],
         });
-        if (epoch == revision) {
-          sourceTemplate = saved;
-          draft.hydrate(saved['definition']['team_members']);
+        if (libraryState.acknowledge(saved, selection)) {
+          if (epoch == revision)
+            draft.hydrate(saved['definition']['team_members']);
           savedChoice = '${saved['id']}@${saved['version']}';
           invalidate();
         }
@@ -1392,7 +1395,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
     } catch (e) {
       if (mounted) setState(() => libraryError = '$e');
     } finally {
-      if (mounted) setState(() => libraryBusy = false);
+      if (mounted) setState(() => libraryState.finish(operation));
     }
   }
 
@@ -1648,11 +1651,12 @@ class _OrganizationFormState extends State<OrganizationForm> {
                             ),
                           ),
                     ],
-                    onChanged: libraryBusy
+                    onChanged: libraryState.busy
                         ? null
                         : (v) => loadSavedTemplate(v ?? ''),
                   ),
-                if (libraryBusy) const Text('Loading or saving template…'),
+                if (libraryState.busy)
+                  const Text('Loading or saving template…'),
                 if (libraryError != null) Text(libraryError!),
                 if (libraryNotice != null) Text(libraryNotice!),
                 if ((widget.templates?['bundles'] as List? ?? []).isNotEmpty)
@@ -1672,7 +1676,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                     ],
                     onChanged: (v) => setState(() {
                       teamPreset = v ?? '';
-                      sourceTemplate = null;
+                      libraryState.source = null;
                       savedChoice = '';
                       final bundle =
                           (widget.templates?['bundles'] as List? ?? [])
@@ -1777,7 +1781,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
                   TextButton(
                     onPressed:
                         loading ||
-                            libraryBusy ||
+                            libraryState.busy ||
                             widget.preview == null ||
                             !widget.projectFolders.containsKey(project.text)
                         ? null
@@ -1848,7 +1852,6 @@ class _OrganizationFormState extends State<OrganizationForm> {
                           decoration: const InputDecoration(
                             labelText: 'Template name',
                           ),
-                          onChanged: (_) => libraryPending = null,
                         ),
                         TextField(
                           controller: templateDescription,
@@ -1856,19 +1859,18 @@ class _OrganizationFormState extends State<OrganizationForm> {
                             labelText: 'Template description',
                           ),
                           maxLines: 3,
-                          onChanged: (_) => libraryPending = null,
                         ),
                         Wrap(
                           children: [
                             TextButton(
-                              onPressed: libraryBusy
+                              onPressed: libraryState.busy
                                   ? null
                                   : () => saveReusableTemplate(false),
                               child: const Text('Save as new template'),
                             ),
-                            if (sourceTemplate != null)
+                            if (libraryState.source != null)
                               TextButton(
-                                onPressed: libraryBusy
+                                onPressed: libraryState.busy
                                     ? null
                                     : () => saveReusableTemplate(true),
                                 child: const Text('Save new version'),
@@ -1907,8 +1909,10 @@ class _OrganizationFormState extends State<OrganizationForm> {
                           'Reports to: ${member['manager_name'] ?? (member['manager_role'] == '' ? 'Organization owner' : 'Lead Developer')} · Reasoning: ${member['reasoning'] == '' ? 'Model default' : member['reasoning']}',
                         ),
                         Text('${member['selection_note']}'),
-                        const Text(
-                          'Separate worktree · CLI default permissions',
+                        Text(
+                          memberExecutionSummary(
+                            Map<String, dynamic>.from(member),
+                          ),
                         ),
                         SelectableText('${member['persona']}'),
                       ],
@@ -1928,7 +1932,7 @@ class _OrganizationFormState extends State<OrganizationForm> {
       FilledButton(
         onPressed: () {
           if (form.currentState!.validate()) {
-            if (libraryBusy) {
+            if (libraryState.busy) {
               setState(
                 () =>
                     previewError = 'Wait for the template operation to finish.',
@@ -1954,9 +1958,9 @@ class _OrganizationFormState extends State<OrganizationForm> {
                 'template_plan': team!['template_plan'],
                 'team_preset': teamPreset,
                 'resource_limits': resources,
-                if (sourceTemplate != null) ...{
-                  'template_id': sourceTemplate!['id'],
-                  'template_version': sourceTemplate!['version'],
+                if (libraryState.source != null) ...{
+                  'template_id': libraryState.source!['id'],
+                  'template_version': libraryState.source!['version'],
                 },
               },
             });

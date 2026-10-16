@@ -1,5 +1,5 @@
 """Durable, idle-only integration inbox and coordinator reports."""
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -92,11 +92,13 @@ class IntegrationCoordinator:
         self.lock = threading.RLock()
         self.stopped = threading.Event()
         self._dispatch_jobs = None
+        self._template_revision = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as db, db:
             db.executescript('CREATE TABLE IF NOT EXISTS settings (repository TEXT PRIMARY KEY, data TEXT NOT NULL);'
                              'CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, data TEXT NOT NULL);'
                              'CREATE TABLE IF NOT EXISTS audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);')
+        self.sync_template_workflows()
 
     def close(self):
         self.stopped.set()
@@ -195,6 +197,8 @@ class IntegrationCoordinator:
                     raise ValueError('Coordinator profile is unavailable.')
                 config = dict(old if old.get('profile_id') == profile_id else {}, repository=repository, enabled=True,
                               profile_id=profile_id, organization_id=profile['organization_id'])
+            config.pop('template_organization_id', None)
+            config.pop('template_unavailable', None)
             if auto_sdk is not None:
                 config['auto_sdk'] = auto_sdk
             if auto_build is not None:
@@ -206,22 +210,45 @@ class IntegrationCoordinator:
         return config
 
     def sync_template_workflows(self):
-        """Materialize saved defaults once, preserving every explicit setting.
+        """Reconcile generated defaults on startup/metadata changes, outside reads.
 
-        The organization transaction is the source of truth. This can recover
-        after a restart or import without making organization creation depend
-        on a second database transaction or starting an idle coordinator.
+        Store metadata is frozen before taking the coordinator lock. Explicit
+        operator configurations never inherit subsequent template changes.
         """
         import template_workflows
-        defaults = template_workflows.coordinator_configurations(self.store)
-        if not defaults:
-            return
+        with getattr(self.store, 'lock', nullcontext()):
+            revision = getattr(self.store, 'workflow_revision', None)
+            if isinstance(revision, int) and revision == self._template_revision:
+                return
+            defaults = template_workflows.coordinator_configurations(self.store)
+        by_repository = {}
+        for config in defaults:
+            by_repository.setdefault(config['repository'], []).append(config)
         with self.lock, closing(self.connect()) as db, db:
-            for config in defaults:
-                inserted = db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)',
-                                      (config['repository'], json.dumps(config)))
-                if inserted.rowcount:
+            saved = {r[0]: json.loads(r[1]) for r in db.execute('SELECT * FROM settings')}
+            # Older configure() retained the template marker. Its durable audit
+            # still proves explicit ownership; do not reset those settings.
+            explicit = {r[0] for r in db.execute("SELECT DISTINCT json_extract(data, '$.repository') FROM audit "
+                                               "WHERE json_extract(data, '$.action')='configuration'")}
+            for repository in saved.keys() | by_repository.keys():
+                old = saved.get(repository)
+                if old and old.get('template_organization_id') and repository in explicit:
+                    old = dict(old)
+                    old.pop('template_organization_id', None)
+                    old.pop('template_unavailable', None)
+                    db.execute('UPDATE settings SET data=? WHERE repository=?', (json.dumps(old), repository))
+                    self.audit(db, dict(action='template_ownership_reconciled', **old))
+                if old and not old.get('template_organization_id'):
+                    continue
+                candidates = by_repository.get(repository, [])
+                config = next((c for c in candidates if old and c['profile_id'] == old.get('profile_id')),
+                              candidates[0] if candidates else None)
+                if config is None and old:
+                    config = dict(old, enabled=False, template_unavailable=True)
+                if config is not None and config != old:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?, ?)', (repository, json.dumps(config)))
                     self.audit(db, dict(action='template_configuration', **config))
+        self._template_revision = revision  # Only cache metadata after a successful commit.
 
     def observe(self, notices):
         self.sync_template_workflows()
@@ -778,7 +805,6 @@ class IntegrationCoordinator:
 
     def configuration_records(self):
         """Small binding read for organization polls; no jobs, events or audit."""
-        self.sync_template_workflows()
         with closing(self.connect()) as db:
             return [json.loads(row[0]) for row in db.execute('SELECT data FROM settings')]
 
@@ -821,7 +847,6 @@ class IntegrationCoordinator:
                                     repository=event['repository'], **result))
 
     def snapshot(self):
-        self.sync_template_workflows()
         # A reader must not wait for dispatch/network work holding the writer lock.
         jobs = self.store.job_records()
         with closing(self.connect()) as db, db:

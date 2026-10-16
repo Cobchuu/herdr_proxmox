@@ -72,8 +72,10 @@ For a Git repository root, the Integration Engineer is also saved as the default
 repository coordinator; an existing manual coordinator setting takes precedence.
 These defaults recover after restart or configuration import. Newly created tasks
 automatically use the independent Reviewer for acceptance, with QA as the fallback
-when the reviewer is the assignee or unavailable. Per-task review settings remain
-editable. Template creation does not enable publishing, automatic builds or SDK
+when the reviewer is the assignee or ineligible at task creation. That reviewer
+selection is retained for the task; a busy or subsequently removed reviewer is
+not silently replaced. Launch the reviewer before acceptance dispatch, or change
+the per-task review settings explicitly. Template creation does not enable publishing, automatic builds or SDK
 installation. Non-Git or nested directories show a workflow setup note in preview.
 
 Model selection uses installed CLIs with current Herdr integrations. Codex and
@@ -130,8 +132,8 @@ saving preserves edits made while a save was in flight.
 
 Versions freeze member names, persona responsibilities and reporting references,
 plus model policy, explicit CLI/model/effort overrides, fallback CLI preferences,
-and resource limits. They exclude project paths, account data, organization
-branding and live sessions. Automatic model choices are evaluated against the
+resource limits and preset provenance when supplied. They exclude project paths,
+account data, organization branding and live sessions. Automatic model choices are evaluated against the
 new project's CLI catalog whenever a saved template is used. Each created
 organization records the source template ID/version/digest; its member profiles
 and initial limits remain independent of later template updates.
@@ -139,7 +141,13 @@ and initial limits remain independent of later template updates.
 The library supports 50 templates and 25 immutable versions per template, stored
 alongside the organization database. Configuration exports include its complete
 history; imports validate definitions, version continuity and content digests,
-and reject conflicting records. The existing 2 MB import limit still applies.
+and reject conflicting records. The same 2 MB limit applies to export and import.
+Oversized exports fail explicitly without omitting records or historical versions;
+back up the organization SQLite database directly for libraries beyond that limit.
+The authenticated team save, preview and library endpoints separately allow up to
+4,395,136 request bytes (about 4.4 MB) to accommodate the maximum roster, paths and
+escaped Unicode text. This deliberately exceeds the 2 MB configuration transfer
+limit; other endpoints retain their existing caps, normally 64 KiB.
 Shared-library writes and imports require an administrator; authenticated
 operators can load templates and create organizations using them.
 

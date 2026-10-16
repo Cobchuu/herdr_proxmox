@@ -37,6 +37,8 @@ def organizations(store):
 
 def coordinator_configurations(store):
     orgs = organizations(store)
+    orgs = [o for o in orgs if not o.get('removed_at') and isinstance(o.get('team_workflows'), dict)
+            and o['team_workflows'].get('coordinator_id')]
     if not orgs:
         return []
     profiles = {p['id']: p for p in store.profile_records()}
@@ -55,7 +57,9 @@ def coordinator_configurations(store):
         if profile.get('removed_at') or profile.get('archived') or profile.get('organization_id') != org['id']:
             continue
         path = (store.projects / repository).resolve()
-        if not path.is_relative_to(store.projects) or Path(profile.get('project', '')).resolve() != path:
+        project = profile.get('project')
+        if (not isinstance(project, str) or not project or not path.is_relative_to(store.projects)
+                or Path(project).resolve() != path):
             continue
         result.append(dict(repository=repository, profile_id=profile['id'], organization_id=org['id'],
                            enabled=True, auto_build=False, auto_sdk=False, template_organization_id=org['id']))
@@ -71,7 +75,8 @@ def acceptance(store, organization_id, repository, assignee, profiles):
         profile = next((p for p in profiles if p.get('id') == profile_id), None)
         if (not profile or profile_id == assignee or profile.get('organization_id') != organization_id
                 or profile.get('group_id') or profile.get('removed_at') or profile.get('archived')
-                or not profile.get('use_worktree', True) or Path(profile.get('project', '')).resolve() != repository):
+                or not profile.get('use_worktree', True) or not isinstance(profile.get('project'), str)
+                or not profile['project'] or Path(profile['project']).resolve() != repository):
             continue
         return dict(reviewer_profile_id=profile_id, reviewer_name=profile.get('name', 'Reviewer'),
                     auto=True, state='waiting', source='organization_template')

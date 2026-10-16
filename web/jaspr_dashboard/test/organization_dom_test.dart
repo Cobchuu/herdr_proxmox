@@ -2,6 +2,7 @@
 library;
 
 import 'dart:convert';
+import 'package:herdr_jaspr_dashboard/pages/org_forms.dart' as forms;
 import 'dart:js_interop';
 import 'package:test/test.dart';
 import 'package:http/http.dart' as http;
@@ -1115,6 +1116,137 @@ void main() {
       expect(p['profiles'], data['profiles']);
       expect(p['groups'], data['groups']);
       expect(actions('launch'), isEmpty);
+    },
+  );
+  test(
+    'template preview renders actual worktree and permission settings',
+    () async {
+      await mount(dom.div([]));
+      final form = forms.organizationForm(
+        null,
+        {
+          'roles': [
+            {'id': 'lead_developer', 'name': 'Lead Developer'},
+          ],
+          'policies': {'balanced': 'Balanced'},
+        },
+        (body) async => {
+          'member_specs': body['team_members'],
+          'members': [
+            {
+              'template_key': (body['team_members'] as List).first['key'],
+              'name': 'Shared reviewer',
+              'runtime': 'opencode',
+              'model_name': 'Coder',
+              'reasoning': '',
+              'manager_name': 'Organization owner',
+              'selection_note': '',
+              'persona': 'Review changes.',
+              'use_worktree': false,
+              'permission_mode': 'full_autonomy',
+              'accessible_paths': ['/shared/**'],
+            },
+          ],
+        },
+        null,
+        true,
+        {'/projects/app': '/projects/app'},
+      );
+      await settle();
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await choose('Team project directory', '/projects/app');
+      await click('Preview team');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains(
+          'Shared project directory · Full autonomy · Additional access: /shared/**',
+        ),
+      );
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        isNot(contains('Separate worktree · CLI default permissions')),
+      );
+      await click('Cancel');
+      await form;
+    },
+  );
+
+  test(
+    'template save preserves newer draft edits and advances saved identity',
+    () async {
+      await mount(dom.div([]));
+      final pending = Completer<Map<String, dynamic>>();
+      final next = Completer<Map<String, dynamic>>();
+      Map<String, dynamic>? submitted;
+      final form = forms.organizationForm(
+        null,
+        {
+          'roles': [
+            {
+              'id': 'lead_developer',
+              'name': 'Lead Developer',
+              'persona_instruction': 'Lead delivery.',
+            },
+          ],
+          'policies': {'balanced': 'Balanced'},
+        },
+        null,
+        (body) {
+          submitted = body;
+          return pending.isCompleted ? next.future : pending.future;
+        },
+        true,
+        {'/projects/app': '/projects/app'},
+      );
+      await settle();
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await input('Template name', 'Saved team');
+      await click('Save as new template');
+      expect(submitted, isNotNull);
+      await input('Member name', 'Edited during save');
+      final definition = Map<String, dynamic>.from(submitted!['definition']);
+      definition['team_members'] = [
+        {
+          ...(definition['team_members'] as List).single as Map,
+          'name': 'Lead Developer',
+          'persona': 'Lead delivery.',
+          'manager_key': '',
+          'use_worktree': true,
+        },
+      ];
+      pending.complete({
+        'id': 'a' * 32,
+        'version': 1,
+        'latest_version': 1,
+        'name': 'Saved team',
+        'description': '',
+        'definition': definition,
+      });
+      await settle();
+      await settle();
+      expect(
+        (control('Member name') as web.HTMLInputElement).value,
+        'Edited during save',
+      );
+      expect(
+        nodes('button').any((n) => n.textContent == 'Save new version'),
+        isTrue,
+        reason:
+            'A successful save should establish the saved identity even when newer draft edits prevent hydration.',
+      );
+      await click('Save new version');
+      expect(submitted!['template_id'], 'a' * 32);
+      expect(submitted!['expected_version'], 1);
+      next.complete({
+        ...await pending.future,
+        'version': 2,
+        'latest_version': 2,
+      });
+      await settle();
+      await click('Cancel');
+      await form;
     },
   );
 }

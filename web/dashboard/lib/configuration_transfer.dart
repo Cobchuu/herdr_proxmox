@@ -59,10 +59,11 @@ class _ConfigurationTransferState extends State<ConfigurationTransfer> {
           ),
         );
         if (confirmed != true) return;
-        await connection.request('organizations/import', data);
+        final imported = await connection.request('organizations/import', data);
+        final counts = imported['imported'] as Map? ?? {};
         await widget.onImported();
         message =
-            'Configuration imported. Review project paths and connect CLI accounts before launching.';
+            'Configuration imported: ${counts['team_templates'] ?? 0} saved templates and ${counts['team_template_versions'] ?? 0} template versions. Review project paths and connect CLI accounts before launching.';
       }
     } catch (e) {
       message = 'Configuration transfer failed: $e';
@@ -74,7 +75,9 @@ class _ConfigurationTransferState extends State<ConfigurationTransfer> {
   @override
   Widget build(BuildContext context) => ExpansionTile(
     title: const Text('Migration & backup'),
-    subtitle: const Text('Export organizations, agent settings and groups'),
+    subtitle: const Text(
+      'Export organizations, agent settings, groups and templates',
+    ),
     children: [
       const Padding(
         padding: EdgeInsets.all(12),

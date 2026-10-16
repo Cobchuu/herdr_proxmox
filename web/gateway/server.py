@@ -538,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if not 0 < size <= (2_000_000 if self.path == '/api/organizations/import' else
-                                256_000 if self.path in ('/api/organizations/save', '/api/organizations/templates', '/api/organizations/templates/library') else 65536):
+                                team_templates.MAX_REQUEST_BYTES if self.path in ('/api/organizations/save', '/api/organizations/templates', '/api/organizations/templates/library') else 65536):
                 raise ValueError('Invalid request size.')
             body = json.loads(self.rfile.read(size))
             if self.path == '/api/organizations/templates/library':

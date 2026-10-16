@@ -48,6 +48,8 @@ def definition(values):
         for key, value in normalized.items():
             if key in spec:
                 spec[key] = value
+        if spec.get('provider') and not spec.get('model'):
+            raise ValueError('Select a model with the overridden provider.')
         if runtime:
             settings = model_settings(spec, runtime)
             permission_mode(spec, runtime)
@@ -63,8 +65,11 @@ def definition(values):
     for spec, member in zip(specs, plan['members']):
         frozen.append(dict(spec, name=member['name'], persona=member['persona_instruction'],
                            manager_key=member['manager_key'], use_worktree=member['use_worktree']))
-    return dict(team_members=frozen, model_policy=policy, runtime_preferences=team_templates.preferences(values),
-                resource_limits=template_resources.validate(values.get('resource_limits')))
+    result = dict(team_members=frozen, model_policy=policy, runtime_preferences=team_templates.preferences(values),
+                  resource_limits=template_resources.validate(values.get('resource_limits')))
+    if values.get('team_preset'):
+        result['team_preset'] = values['team_preset']
+    return result
 
 
 def digest(record):
@@ -72,13 +77,14 @@ def digest(record):
 
 
 def catalog(db):
-    result = []
-    for row in db.execute('SELECT data FROM team_templates ORDER BY rowid'):
-        item = json.loads(row[0])
-        item['versions'] = [dict(version=r[0], name=json.loads(r[1])['name']) for r in db.execute(
-            'SELECT version,data FROM team_template_versions WHERE template_id=? ORDER BY version DESC', (item['id'],))]
-        result.append(item)
-    return result
+    versions = {}
+    # Project names in SQLite: do not decode every historical member roster.
+    for identifier, version, name in db.execute(
+            "SELECT template_id, version, json_extract(data, '$.name') FROM team_template_versions "
+            "ORDER BY template_id, version DESC"):
+        versions.setdefault(identifier, []).append(dict(version=version, name=name))
+    return [dict(json.loads(row[0]), versions=versions.get(row[1], []))
+            for row in db.execute('SELECT data,id FROM team_templates ORDER BY rowid')]
 
 
 def read(db, identifier, version=None):

@@ -30,6 +30,14 @@ progress() {
   fi
   return 0
 }
+staging=
+cleanup() {
+  local status=$?
+  rm -f -- "$state/progress.json" "$state/progress.tmp" || true
+  if [[ -n $staging ]]; then rm -rf -- "$staging" || true; fi
+  return "$status"
+}
+trap cleanup EXIT
 progress 1 starting
 install -d -o herdr -g herdr -m 0755 /home/herdr/.local/share /home/herdr/.local/bin
 if [[ ! -d $sdk ]]; then
@@ -38,7 +46,6 @@ if [[ ! -d $sdk ]]; then
   apt-get -o Acquire::Retries=5 update
   apt-get -o Acquire::Retries=5 install -y ca-certificates curl git python3 xz-utils unzip libglu1-mesa
   staging=$(mktemp -d)
-  trap 'rm -rf -- "$staging"' EXIT
   chmod 0755 "$staging"
   # Release archives live under /releases; /flutter contains engine artifacts.
   origin=https://storage.googleapis.com/flutter_infra_release/releases
