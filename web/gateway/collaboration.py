@@ -16,6 +16,15 @@ from herdr_errors import HerdrError, parse_completion
 # decides when a discussion has finished; this only prevents a hung call from
 # occupying the worker indefinitely.
 DISCUSSION_WAIT_SECONDS = 7200
+TRANSCRIPT_LIMIT = 750000  # Raw UTF-8 bytes, including JSON and optional knowledge.
+MAX_CONTRIBUTIONS = 120
+MAX_ROUNDS = 20
+
+
+def transcript_contribution_budget(member_count):
+    """Reserve JSON/knowledge space even for the largest permitted discussion."""
+    entries = min(MAX_CONTRIBUTIONS, max(1, member_count) * MAX_ROUNDS)
+    return min(8000, (TRANSCRIPT_LIMIT - 50000) // entries)
 
 
 def console_token(run, output):
@@ -133,7 +142,11 @@ def action(store, db, name, body, org):
         return dict(content=json.dumps(data, ensure_ascii=False, indent=2) + '\n', filename='discussion.json')
     if name == 'recover':
         job = store.get(db, 'jobs', text(body, 'job_id', 40), org_id)
-        if job['kind'] != 'discussion' or job['state'] not in ('needs_attention', 'uncertain', 'artifact_ready'):
+        # 'waiting_for_input' belongs here: the discussion was submitted and a
+        # participant stopped on a decision, which is exactly the interrupted
+        # state the operator needs to recover from. Without it the automatic
+        # recovery ran every pass while the manual button refused the same job.
+        if job['kind'] != 'discussion' or job['state'] not in ('needs_attention', 'uncertain', 'artifact_ready', 'waiting_for_input'):
             raise ValueError('Only interrupted discussions can recover saved output.')
         if job['state'] == 'artifact_ready' and (job.get('completion') or {}).get('state'):
             return job
@@ -434,16 +447,44 @@ def read_contribution(path, limit=40000, label='discussion document'):
     return text
 
 
+# Hard ceiling for one transcript contribution. The prompt asks members to aim
+# for under 8 KB, so this is deliberately looser than the target: when the two
+# were the same number, a member who wrote slightly over produced a transcript
+# the validator rejected outright and the discussion could never be finalized.
+# Matches read_contribution's default for documents, so the transcript is held to
+# the same bound as the artifact it accompanies.
+CONTRIBUTION_LIMIT = 40000
+
+
+def truncate_contribution(text, limit=CONTRIBUTION_LIMIT):
+    """Bound a contribution without splitting a character."""
+    encoded = text.encode('utf-8')
+    if len(encoded) <= limit:
+        return text
+    marker = '\n[truncated at the gateway limit]'
+    budget = max(0, limit - len(marker.encode('utf-8')))
+    return encoded[:budget].decode('utf-8', 'ignore') + marker
+
+
 def validate_contributions(contributions, runs):
     ids = {r['profile_id']: r['profile']['name'] for r in runs}
-    if not isinstance(contributions, list) or not 1 <= len(contributions) <= 120:
+    if not isinstance(contributions, list) or not 1 <= len(contributions) <= MAX_CONTRIBUTIONS:
         raise ValueError('Group agent did not provide a valid discussion transcript.')
     for part in contributions:
         if (not isinstance(part, dict) or part.get('profile_id') not in ids or
-            type(part.get('round')) is not int or not 1 <= part['round'] <= 20 or
-            not isinstance(part.get('content'), str) or not part['content'].strip() or
-            len(part['content'].encode('utf-8')) > 6000):
+            type(part.get('round')) is not int or not 1 <= part['round'] <= MAX_ROUNDS or
+            not isinstance(part.get('content'), str) or not part['content'].strip()):
             raise ValueError('Invalid member contribution in group transcript.')
+        # Bound the content instead of rejecting it. A contribution over the
+        # limit is still a real one, and rejecting it made the whole transcript
+        # invalid — so a discussion whose members wrote at length could never be
+        # finalized: automatic recovery and the operator's button both failed on
+        # the same file, on every pass, with no way forward.
+        content = part['content'].strip()
+        if len(content.encode('utf-8')) > CONTRIBUTION_LIMIT:
+            content = truncate_contribution(content)
+            part['truncated'] = True
+        part['content'] = content
         part['name'] = ids[part['profile_id']]
     return contributions
 
@@ -487,7 +528,7 @@ def parse_discussion_transcript(text, job):
 def discussion_transcript(store, job):
     """Normalized export; the original agent-written document stays untouched."""
     return parse_discussion_transcript(
-        read_contribution(discussion_directory(store, job) / 'discussion.json', 750000), job)
+        read_contribution(discussion_directory(store, job) / 'discussion.json', TRANSCRIPT_LIMIT), job)
 
 
 def discussion_documents(store, job):
@@ -627,7 +668,7 @@ def finalize_discussion(store, job_id, actor):
     # Output. The receipt is hashed over the exact bytes the agent wrote, so
     # verification uses those bytes rather than a normalized copy.
     artifact_bytes, artifact_text = read_document(discussion_directory(store, job) / 'action-plan.md')
-    transcript_bytes, transcript_text = read_document(discussion_directory(store, job) / 'discussion.json', 750000,
+    transcript_bytes, transcript_text = read_document(discussion_directory(store, job) / 'discussion.json', TRANSCRIPT_LIMIT,
                                         'discussion transcript')
     result = artifact_text.strip()
     if not result:
@@ -690,7 +731,18 @@ def recover_interrupted(store, offset=0, limit=20):
     for saved in rows:
         try:
             finalized = finalize_discussion(store, saved['id'], 'discussion_recovery')
-        except (ValueError, OSError, sqlite3.Error, HerdrError):
+        except (ValueError, OSError, sqlite3.Error, HerdrError) as error:
+            # Recovery runs every pass, so a discussion that keeps failing looks
+            # monitored while nothing is happening. Record the reason on the job
+            # so the operator sees what is blocking it instead of waiting out the
+            # deadline; only when it changes, to avoid churn on every poll.
+            reason = ('Recovery could not finalize this discussion: '
+                      + (str(error) or error.__class__.__name__))[:500]
+            if saved.get('error') != reason:
+                try:
+                    store.update_job(saved['id'], error=reason)
+                except (ValueError, OSError, sqlite3.Error):
+                    pass
             continue
         recovered.append(finalized['id'])
     # Advance past the window actually scanned, minus the rows recovery removed,
@@ -937,7 +989,11 @@ def execute(store, job):
         "Set needs_review=true for anything that changes scope, adds dependencies or touches sensitive areas; those "
         "stay drafts for an operator. An empty array is a valid and common outcome. "
         f"Also write {transcript} as JSON with a contributions array. Each entry must have "
-        "profile_id (from the roster below), name, round (integer 1 to 20), and content (Markdown under 6 KB). "
+        f"profile_id (from the roster below), name, round (integer 1 to {MAX_ROUNDS}), and content (Markdown). "
+        f"Budget at most {transcript_contribution_budget(len(job['runs']))} UTF-8 bytes per contribution, "
+        f"at most {MAX_CONTRIBUTIONS} entries, and {TRANSCRIPT_LIMIT} UTF-8 bytes for the ENTIRE discussion.json, "
+        "including JSON formatting and optional knowledge. Summarize lengthy replies and use compact JSON "
+        "to stay within that total. Finish all compaction before hashing the exact final bytes in the receipt. "
         f"Profile IDs: {json.dumps({r['alias']: r['profile_id'] for r in job['runs']})}. "
         "Record actual member responses, never invent them. Update discussion.json after each member reply "
         "using a complete valid JSON document so the dashboard can show rounds as they arrive. "

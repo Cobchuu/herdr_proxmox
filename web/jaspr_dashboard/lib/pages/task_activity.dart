@@ -1,6 +1,7 @@
 import 'native_task_ui.dart';
 import 'package:jaspr/dom.dart' as dom;
 import '../ui.dart' as ui;
+import 'task_state.dart';
 
 /// JSON collections are dynamic: extension getters must not be dispatched on them.
 String taskAgentName(
@@ -110,6 +111,11 @@ String taskNextStep(Map task, {String executor = 'service'}) {
     if (task['blocking_execution'] is Map)
       return 'The assigned agent is finishing other work. Hand off when its evidence is complete, or queue this task.';
     return 'Ready to launch the assigned agent.';
+  }
+  if (candidateWaiting(task)) {
+    return task['auto_validate'] == true && executor == 'service'
+        ? 'Candidate committed; automatic capture is pending.'
+        : 'Candidate committed; capture it from Changes to continue.';
   }
   if (task['state'] == 'implementing') {
     // "Awaiting a committed candidate" describes an agent that is still

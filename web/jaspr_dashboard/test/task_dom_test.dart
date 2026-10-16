@@ -187,6 +187,146 @@ void main() {
       ? task
       : {'workspaces': [], 'agents': []};
 
+  Map<String, dynamic> publishingResponse(http.Request request) {
+    final github = {
+      'configured': true,
+      'login': 'contributor',
+      'repositories': ['owner/repo'],
+      'pr_configured': true,
+      'pr_login': 'owner',
+      'publication': {
+        'owner/repo': {
+          'mode': 'fork',
+          'publishing_repository': 'contributor/repo',
+        },
+      },
+    };
+    if (request.url.path == '/api/tasks')
+      return {'tasks': [], 'github': github};
+    if (request.url.path == '/api/github/configure') return github;
+    return {'workspaces': [], 'agents': []};
+  }
+
+  test(
+    'publishing sends a separate PR token without asking for its account',
+    () async {
+      await mount(const TasksPage(), publishingResponse);
+      await click('GitHub publishing');
+      expect(
+        web.document.getElementById('task-dom-test')!.textContent,
+        contains('Separate PR credential configured for owner.'),
+      );
+      expect(
+        elements(
+          'label',
+        ).where((e) => e.textContent?.contains('Pull request account') == true),
+        isEmpty,
+      );
+      await type('Personal access token', 'p' * 40);
+      await type('Pull request token (optional)', 'github_pat_${'r' * 40}');
+      await click('Validate and save');
+      await settle();
+      expect(posts.single['path'], '/api/github/configure');
+      expect(posts.single['pr_token'], 'github_pat_${'r' * 40}');
+      expect(posts.single.containsKey('pr_login'), false);
+      expect(posts.single.containsKey('clear_pr_credential'), false);
+      expect(posts.single['publication'], {
+        'owner/repo': {
+          'mode': 'fork',
+          'publishing_repository': 'contributor/repo',
+        },
+      });
+    },
+  );
+
+  test(
+    'publishing preserves the PR credential when its field stays blank',
+    () async {
+      await mount(const TasksPage(), publishingResponse);
+      await click('GitHub publishing');
+      await type('Personal access token', 'p' * 40);
+      await click('Validate and save');
+      await settle();
+      expect(posts.single.containsKey('pr_token'), false);
+      expect(posts.single.containsKey('pr_login'), false);
+      expect(posts.single.containsKey('clear_pr_credential'), false);
+    },
+  );
+
+  test(
+    'publishing removes the separate PR credential only on explicit selection',
+    () async {
+      await mount(const TasksPage(), publishingResponse);
+      await click('GitHub publishing');
+      await type('Personal access token', 'p' * 40);
+      final checkbox =
+          elements('label')
+                  .firstWhere(
+                    (e) =>
+                        e.textContent?.contains(
+                          'Remove separate PR credential',
+                        ) ==
+                        true,
+                  )
+                  .querySelector('input')!
+              as web.HTMLInputElement;
+      checkbox.click();
+      await settle();
+      await click('Validate and save');
+      await settle();
+      expect(posts.single['clear_pr_credential'], true);
+      expect(posts.single.containsKey('pr_token'), false);
+    },
+  );
+
+  test(
+    'publishing configuration cannot submit credentials after an account change',
+    () async {
+      await mount(const TasksPage(), publishingResponse);
+      await click('GitHub publishing');
+      await type('Personal access token', 'p' * 40);
+      await type('Pull request token (optional)', 'github_pat_${'r' * 40}');
+      await connection!.disconnect();
+      await settle();
+      await click('Validate and save');
+      await settle();
+      expect(posts, isEmpty);
+    },
+  );
+
+  test('publishing credentials remain restricted to administrators', () async {
+    await mount(const TasksPage(), publishingResponse, role: 'operator');
+    expect(button('GitHub publishing').disabled, true);
+    button('GitHub publishing').click();
+    await settle();
+    expect(elements('input[type=password]'), isEmpty);
+    expect(posts, isEmpty);
+  });
+
+  test(
+    'missing SDK blockers link to configuration without triggering an installation',
+    () async {
+      final oldHash = web.window.location.hash;
+      addTearDown(
+        () => web.window.history.replaceState(
+          null,
+          '',
+          oldHash.isEmpty ? '#' : oldHash,
+        ),
+      );
+      final task = publishedTask()
+        ..['error'] = 'Missing required SDK'
+        ..['delivery_blocker'] = {'kind': 'missing_toolchain'};
+      await mount(
+        const TasksPage(taskId: 'task'),
+        (r) => taskResponse(r, task),
+      );
+      await click('Install the required SDK');
+      expect(web.window.location.hash, '#/configuration');
+      expect(posts, isEmpty);
+    },
+  );
+
   test(
     'PR preview retains public destinations, validation, cancellation and explicit excerpt opt-in',
     () async {

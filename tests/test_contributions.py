@@ -21,7 +21,7 @@ from organizations import OrganizationStore
 import contributions
 import toolchain_policy
 from contributions import Contributions, remote_info
-from github_api import GitHub, GitHubError
+from github_api import GitHub, GitHubError, GitHubCredential
 import project_git
 import server
 
@@ -100,6 +100,125 @@ class GitHubTests(unittest.TestCase):
         self.path = Path(self.temp.name) / 'github.json'
         self.api = GitHub(self.path)
 
+    def split_body(self):
+        return dict(token='p' * 40, pr_token='github_pat_' + 'r' * 40,
+                    repositories=['owner/repo'], publication={
+                        'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')})
+
+    def split_response(self, path, *args, token=None, **kwargs):
+        if path == '/user':
+            return dict(login='owner' if token == self.split_body()['pr_token'] else 'contributor')
+        if path == '/repos/owner/repo':
+            return dict(full_name='owner/repo', permissions=dict(push=False))
+        if path == '/repos/contributor/repo':
+            return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                        permissions=dict(push=True))
+        raise AssertionError(path)
+
+    def test_split_credential_verifies_identity_and_never_exposes_secrets(self):
+        body = self.split_body()
+        with patch.object(self.api, 'request', side_effect=self.split_response) as request:
+            snapshot = self.api.configure(body)
+        self.assertEqual(snapshot['pr_login'], 'owner')
+        self.assertTrue(snapshot['pr_configured'])
+        self.assertEqual(self.api.pr_credential(), GitHubCredential(body['pr_token'], 'owner'))
+        self.assertEqual(self.api.configuration()['pr_login'], 'owner')
+        request.assert_any_call('/user', token=body['pr_token'])
+        self.assertEqual(snapshot['publication']['owner/repo']['verification']['upstream_pr_creation'], 'not_exercised')
+        for secret in (body['token'], body['pr_token']):
+            self.assertNotIn(secret, json.dumps(snapshot))
+            self.assertNotIn(secret, repr(self.api.pr_credential()))
+        if os.name != 'nt':
+            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_split_credential_is_preserved_until_explicitly_removed(self):
+        body = self.split_body()
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(body)
+            for value in (None, '', '   '):
+                updated = dict(body, pr_token=value)
+                self.assertTrue(self.api.configure(updated)['pr_configured'])
+            updated = {k: v for k, v in body.items() if k != 'pr_token'}
+            self.assertTrue(self.api.configure(updated)['pr_configured'])
+            removed = self.api.configure(dict(updated, clear_pr_credential=True))
+        self.assertFalse(removed['pr_configured'])
+        self.assertNotIn('pr_token', self.api.configuration())
+        self.assertNotIn('pr_login', self.api.configuration())
+        self.assertEqual(self.api.pr_credential(), GitHubCredential(body['token'], 'contributor'))
+
+    def test_split_credential_rejects_malformed_fields_before_network_calls(self):
+        for changes in (dict(pr_token=0), dict(pr_token=False), dict(pr_token=[]), dict(pr_token={}),
+                        dict(pr_token='short'), dict(pr_login=[]), dict(pr_login='bad/account'),
+                        dict(clear_pr_credential='yes'), dict(clear_pr_credential=True)):
+            with self.subTest(changes=changes), patch.object(self.api, 'request') as request:
+                with self.assertRaises(ValueError):
+                    self.api.configure(dict(self.split_body(), **changes))
+                request.assert_not_called()
+
+    def test_split_credential_rejects_false_identity_and_preserves_saved_configuration(self):
+        body = self.split_body()
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(body)
+            saved = self.path.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'account changed'):
+                self.api.configure(dict(body, pr_login='somebody-else'))
+        self.assertEqual(self.path.read_bytes(), saved)
+        with patch.object(self.api, 'request', side_effect=GitHubError(401)):
+            with self.assertRaises(GitHubError) as error:
+                self.api.configure(body)
+        self.assertNotIn(body['pr_token'], str(error.exception))
+        self.assertEqual(self.path.read_bytes(), saved)
+
+    def test_split_pr_reads_use_the_pr_token_without_reusing_push_cache(self):
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(self.split_body())
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.read.return_value = b'[]'
+        response.headers = {'ETag': 'pr-result'}
+        with patch('github_api.build_opener', return_value=opener):
+            self.api.find_pull('owner/repo', 'task-branch', 'contributor', 'main')
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'), 'Bearer ' + self.split_body()['pr_token'])
+            for path in ('/repos/owner/repo/pulls/7', '/repos/owner/repo/pulls/7/reviews?per_page=100'):
+                self.api.cache[path] = ('push-cache', dict(stale=True))
+                self.api.request(path)
+                request = opener.open.call_args.args[0]
+                self.assertEqual(request.get_header('Authorization'), 'Bearer ' + self.split_body()['pr_token'])
+                self.assertIsNone(request.get_header('If-none-match'))
+            self.api.request('/repos/contributor/repo/git/ref/heads/task-branch')
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer ' + self.split_body()['token'])
+            self.api.request('/repos/owner/repo/pulls/7', token='override-token')
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer override-token')
+
+    def test_preflight_rechecks_split_identity_without_changing_push_identity(self):
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            self.api.configure(self.split_body())
+            result = self.api.publication_preflight('owner/repo', 'contributor/repo')
+        self.assertEqual(result['login'], 'contributor')
+        def changed(path, *args, token=None, **kwargs):
+            if path == '/user' and token == self.split_body()['pr_token']:
+                return dict(login='changed')
+            return self.split_response(path, *args, token=token, **kwargs)
+        with patch.object(self.api, 'request', side_effect=changed):
+            with self.assertRaisesRegex(ValueError, 'account changed'):
+                self.api.publication_preflight('owner/repo', 'contributor/repo')
+
+    def test_single_credential_pr_transport_keeps_using_the_push_token(self):
+        with patch.object(self.api, 'request', side_effect=self.split_response):
+            body = {k: v for k, v in self.split_body().items() if k != 'pr_token'}
+            self.api.configure(body)
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.read.return_value = b'{}'
+        response.headers = {}
+        with patch('github_api.build_opener', return_value=opener):
+            self.api.request('/repos/owner/repo/pulls', 'POST', dict(head='contributor:branch'),
+                             token=self.api.pr_credential().token)
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer ' + body['token'])
+            self.api.find_pull('owner/repo', 'branch', 'contributor')
+            self.assertEqual(opener.open.call_args.args[0].get_header('Authorization'), 'Bearer ' + body['token'])
+
     def test_configuration_never_returns_token_and_is_private(self):
         token = 'github_pat_' + 'x' * 50
         with patch.object(self.api, 'request', side_effect=[{'login': 'owner'}, {'permissions': {'push': True}}]):
@@ -144,11 +263,36 @@ class GitHubTests(unittest.TestCase):
         self.assertEqual(entry['verification']['account_write_to_publishing'], 'verified')
         # Setup never creates a branch or pull request to prove write access.
         self.assertEqual(entry['verification']['token_write_capability'], 'not_exercised')
-        self.assertEqual(entry['verification']['upstream_pr_creation'], 'needs_different_authentication')
+        self.assertEqual(entry['verification']['upstream_pr_creation'], 'not_exercised')
         self.assertEqual(self.api.publication_options(), {'owner/repo': ['owner/repo', 'contributor/repo']})
         self.api.allow_publishing('owner/repo', 'contributor/repo')
+        with patch.object(self.api, 'request', side_effect=answer):
+            self.assertEqual(self.api.publication_preflight('owner/repo', 'contributor/repo')['mode'], 'fork')
         with self.assertRaisesRegex(ValueError, 'configured fork'):
             self.api.allow_publishing('owner/repo', 'stranger/repo')
+
+    def test_upstream_push_access_does_not_prove_fine_grained_pr_permission(self):
+        # Account push permission cannot establish the token's separate PR
+        # permission. Preflight leaves that verdict to the publication attempt.
+        def answer(path, *arguments, **keywords):
+            if path == '/user':
+                return {'login': 'contributor'}
+            if path == '/repos/owner/repo':
+                return dict(full_name='owner/repo', fork=False, permissions=dict(push=True))
+            if path == '/repos/contributor/repo':
+                return dict(full_name='contributor/repo', fork=True, source=dict(full_name='owner/repo'),
+                            permissions=dict(push=True))
+            raise AssertionError(path)
+
+        token = 'github_pat_' + 'x' * 40
+        with patch.object(self.api, 'request', side_effect=answer):
+            result = self.api.configure(dict(
+                token=token, repositories=['owner/repo'],
+                publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')}))
+        entry = result['publication']['owner/repo']
+        self.assertEqual(entry['verification']['upstream_pr_creation'], 'not_exercised')
+        with patch.object(self.api, 'request', side_effect=answer):
+            self.assertEqual(self.api.publication_preflight('owner/repo', 'contributor/repo')['mode'], 'fork')
 
     def test_direct_publication_keeps_requiring_upstream_push_access(self):
         def answer(path, *arguments, **keywords):
@@ -199,7 +343,7 @@ class GitHubTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid or expired'):
                 self.api.publication_preflight('owner/repo', 'owner/repo')
 
-    def test_publication_preflight_checks_fork_network_and_upstream_pr_authentication(self):
+    def test_publication_preflight_checks_fork_network_without_guessing_pr_permissions(self):
         config = dict(token='x' * 40, login='contributor', repositories=['owner/repo'],
             publication={'owner/repo': dict(mode='fork', publishing_repository='contributor/repo')})
         self.path.write_text(json.dumps(config))
@@ -215,8 +359,9 @@ class GitHubTests(unittest.TestCase):
         config['token'] = 'github_pat_' + 'x' * 50
         self.path.write_text(json.dumps(config))
         with patch.object(self.api, 'request', side_effect=[dict(login='contributor'), target, fork]):
-            with self.assertRaisesRegex(ValueError, 'upstream fork PR'):
-                self.api.publication_preflight('owner/repo', 'contributor/repo')
+            result = self.api.publication_preflight('owner/repo', 'contributor/repo')
+        self.assertEqual(result['mode'], 'fork')
+        self.assertEqual(result['token_write'], 'not_exercised')
 
     def test_pull_discovery_uses_the_fork_owner(self):
         calls = []
@@ -297,6 +442,7 @@ class ContributionTests(unittest.TestCase):
         self.git('update-ref', 'refs/remotes/origin/main', self.base)
         self.api = MagicMock()
         self.api.publication_preflight.return_value = dict(login='owner', account_write='verified', token_write='not_exercised')
+        self.api.pr_credential.return_value = GitHubCredential('pr-token', 'upstream-owner')
         self.api.path = self.root / 'github.json'
         self.api.snapshot.return_value = dict(configured=True)
         self.api.publication_settings.return_value = {}
@@ -325,7 +471,18 @@ class ContributionTests(unittest.TestCase):
         self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent')]
         return self.service.action('candidate', dict(request_id='candidate-1', task_id=self.task['id']), 'admin', 'admin')
 
-    def _delivery_task(self, publish=True, build_state='complete', verified=True):
+    def inherited_task(self, publish=False):
+        self.store.snapshot.return_value['organizations'] = [dict(id='org')]
+        self.service.validation = MagicMock()
+        self.service.validation.snapshot.return_value = dict(executor='service')
+        self.service.set_automation_policy(dict(organization_id='org', auto_validate=True,
+                                               auto_publish=publish), 'policy-admin')
+        self.task = self.service.action('create', dict(self.body, request_id='inherited-task'), 'scheduler', 'admin')
+        return self.task
+
+    def _delivery_task(self, publish=True, build_state='complete', verified=True, inherited=False):
+        if inherited:
+            self.inherited_task(publish)
         task = self.candidate()
         run = self.store.snapshot.return_value['jobs'][0]
         run.update(profile_id='worker', kind='launch', task_id=task['id'], completion_token='handoff-token', alias='worker-alias')
@@ -334,8 +491,9 @@ class ContributionTests(unittest.TestCase):
         self.store.action.return_value = dict(id='feedback')
         self.service.validation = MagicMock()
         self.service.validation.snapshot.return_value = dict(executor='service')
-        task = self.service.action('policy', dict(request_id='delivery-policy', task_id=task['id'],
-                                    auto_validate=True, auto_publish=publish), 'admin', 'admin')
+        if not inherited:
+            task = self.service.action('policy', dict(request_id='delivery-policy', task_id=task['id'],
+                                        auto_validate=True, auto_publish=publish), 'admin', 'admin')
         task['builds'] = {task['head_sha']: dict(target=task['head_sha'], state=build_state,
                                                 required_checks_verified=verified, checks=[dict(id='tests', status='passed')],
                                                 # Evidence carries the policy it was produced
@@ -345,7 +503,7 @@ class ContributionTests(unittest.TestCase):
         self.service.save(task, 'build_result', 'tests')
         pull = self.pull_data(task, mergeable=True)
         self.api.find_pull.return_value = []
-        def response(path, method='GET', body=None):
+        def response(path, method='GET', body=None, token=None):
             if path.endswith('/pulls') and method == 'POST':
                 return pull
             if '/pulls/' in path:
@@ -359,6 +517,88 @@ class ContributionTests(unittest.TestCase):
         result.update(changes)
         self.store.snapshot.return_value['jobs'].append(dict(id='feedback', kind='chat', state='answered',
             profile_id='worker', runs=[run], result=json.dumps(result), delivery=dict(stage='reply_verified')))
+
+    def assert_inherited_publication(self, fork=False):
+        import task_delivery
+        destination = 'contributor/repo' if fork else 'owner/repo'
+        self.api.publication_settings.return_value = {
+            'owner/repo': dict(mode='fork' if fork else 'direct', publishing_repository=destination)}
+        task, run, pull = self._delivery_task(inherited=True)
+        authorization = task['publication_authorization']
+        self.assertEqual((authorization['repository'], authorization['branch']), (destination, task['branch']))
+        self.assertEqual(authorization['organization_policy']['updated_by'], 'policy-admin')
+        remote = [None]
+        def pushed(*args):
+            remote[0] = task['head_sha']
+        with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', side_effect=lambda t: remote[0]), \
+                patch('contributions.push', side_effect=pushed) as push:
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['state'], 'pr_open')
+            self.assertFalse(self.service.execution_finished(waiting, run)[0])
+            self._delivery_reply(task, run)
+            task_delivery.advance(self.service)
+            done = self.service.get(task['id'])
+            self.assertEqual(done['delivery_workflow']['state'], 'complete')
+            self.assertTrue(self.service.execution_finished(done, run)[0])
+            push.assert_called_once()
+            self.assertEqual(push.call_args.args[-1], destination)
+        task['publishing_repository'] = 'changed/repo'
+        with self.assertRaisesRegex(ValueError, 'destination changed'):
+            task_delivery.verify_authorization(task)
+
+    def test_inherited_direct_publication_completes_and_binds_authorization(self):
+        self.assert_inherited_publication()
+
+    def test_inherited_fork_publication_completes_and_binds_authorization(self):
+        self.assert_inherited_publication(fork=True)
+
+    def test_inherited_verification_reserves_agent_until_build_and_inspection_finish(self):
+        import task_delivery
+        task, run, _ = self._delivery_task(publish=False, inherited=True, build_state='queued', verified=False)
+        self.assertTrue(task['await_verification'])
+        with patch('collaboration.current_run'):
+            self.assertFalse(self.service.execution_finished(task, run)[0])
+            task_delivery.advance(self.service)
+            self.store.action.assert_not_called()
+            evidence = task['builds'][task['head_sha']]
+            evidence.update(state='complete', required_checks_verified=True)
+            self.service.save(task, 'build_complete', 'tests')
+            task_delivery.advance(self.service)
+            waiting = self.service.get(task['id'])
+            self.assertEqual(waiting['delivery_workflow']['state'], 'waiting_agent')
+            self.assertFalse(self.service.execution_finished(waiting, run)[0])
+            self._delivery_reply(task, run)
+            task_delivery.advance(self.service)
+            self.assertTrue(self.service.execution_finished(self.service.get(task['id']), run)[0])
+        self.api.publication_preflight.assert_not_called()
+
+    def test_organization_pause_and_limit_edits_survive_executor_loss(self):
+        self.inherited_task(publish=True)
+        self.service.validation.snapshot.return_value = dict(executor='gateway')
+        self.service.set_automation_policy(dict(organization_id='org', paused=True), 'admin')
+        self.service.set_automation_policy(dict(organization_id='org', daily_cap=3), 'admin')
+        policy = self.service.policy('org')
+        self.assertTrue(policy['paused'])
+        self.assertTrue(policy['auto_validate'])
+        self.assertEqual(policy['daily_cap'], 3)
+        self.service.set_automation_policy(dict(organization_id='org', auto_publish=False, auto_validate=False), 'admin')
+        with self.assertRaisesRegex(ValueError, 'durable build service'):
+            self.service.set_automation_policy(dict(organization_id='org', auto_validate=True), 'admin')
+
+    def test_inherited_publication_requires_publishing_configuration_and_preflight(self):
+        self.inherited_task()
+        self.api.snapshot.return_value = dict(configured=False)
+        with self.assertRaisesRegex(ValueError, 'Configure GitHub'):
+            self.service.set_automation_policy(dict(organization_id='org', auto_publish=True), 'admin')
+        self.api.snapshot.return_value = dict(configured=True)
+        self.service.set_automation_policy(dict(organization_id='org', auto_publish=True), 'admin')
+        self.api.publication_preflight.side_effect = ValueError('Destination is not allowlisted')
+        base_configuration = self.repo / '.git' / 'herdr-base.json'
+        base_configuration.unlink()
+        with self.assertRaisesRegex(ValueError, 'not allowlisted'):
+            self.service.action('create', dict(self.body, request_id='invalid-destination'), 'admin', 'admin')
+        self.assertFalse(base_configuration.exists(), 'Rejected creation must not write repository configuration.')
 
     def test_delivery_automatically_publishes_exact_sha_then_waits_for_agent_inspection(self):
         import task_delivery
@@ -429,7 +669,7 @@ class ContributionTests(unittest.TestCase):
         task, run, pull = self._delivery_task()
         checks = [dict(name='CI', status='in_progress', conclusion=None)]
         original = self.api.request.side_effect
-        self.api.request.side_effect = lambda path, *args: dict(check_runs=checks) if path.endswith('/check-runs') else original(path, *args)
+        self.api.request.side_effect = lambda path, *args, **kwargs: dict(check_runs=checks) if path.endswith('/check-runs') else original(path, *args)
         with patch('collaboration.current_run'), patch.object(self.service, 'remote_head', return_value=task['head_sha']), \
                 patch('task_delivery.time.time', return_value=100):
             task_delivery.advance(self.service)
@@ -453,7 +693,7 @@ class ContributionTests(unittest.TestCase):
         import task_delivery
         task, run, pull = self._delivery_task()
         original = self.api.request.side_effect
-        def fail(path, method='GET', body=None):
+        def fail(path, method='GET', body=None, token=None):
             if path.endswith('/pulls') and method == 'POST':
                 raise GitHubError(403)
             return original(path, method, body)
@@ -691,7 +931,7 @@ class ContributionTests(unittest.TestCase):
             self.service.action('policy', body, 'admin', 'admin')
         self.api.snapshot.return_value = dict(configured=True)
         body.update(request_id='disable-verify', auto_validate=False)
-        with self.assertRaisesRegex(ValueError, 'requires automatic verification'):
+        with self.assertRaisesRegex(ValueError, 'requires automatic capture and validation'):
             self.service.action('policy', body, 'admin', 'admin')
 
     def test_automatic_receipt_capture_and_build_are_exact_and_deduplicated(self):
@@ -1140,6 +1380,69 @@ class ContributionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'administrator'):
             restarted.action('launch', dict(request_id='launch', task_id=self.task['id']), 'operator', 'operator')
 
+    def test_candidate_waiting_requires_a_clean_commit_beyond_task_base(self):
+        tree = self.root / 'tree'
+        self.git('worktree', 'add', '-b', self.task['branch'], str(tree), self.base)
+        self.task.update(worktree=str(tree), run_id='run', state='implementing', awaiting_candidate=True)
+        self.service.save(self.task, 'launch', 'admin')
+        self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent')]
+        self.assertFalse(self.service.awaiting_candidate(self.task))
+        self.assertFalse(self.service.snapshot()['tasks'][0]['awaiting_candidate'])
+        self.assertFalse(self.service.detail(self.task['id'])['awaiting_candidate'])
+        (tree / 'file').write_text('Implementation\n')
+        self.git('add', '.', path=tree)
+        self.git('commit', '-m', 'Implementation', path=tree)
+        self.assertTrue(self.service.snapshot()['tasks'][0]['awaiting_candidate'])
+        self.assertTrue(self.service.detail(self.task['id'])['awaiting_candidate'])
+        with patch.object(project_git, 'merge_state', return_value=True):
+            self.assertFalse(self.service.awaiting_candidate(self.task))
+        (tree / 'pending').write_text('Work still in progress')
+        self.assertFalse(self.service.awaiting_candidate(self.task))
+        self.assertFalse(self.service.awaiting_candidate(dict(self.task, base_sha=None)))
+        self.assertFalse(self.service.awaiting_candidate(dict(self.task, worktree=None)))
+        self.assertFalse(self.service.awaiting_candidate(dict(self.task, state='completed')))
+
+    def test_candidate_waiting_rejects_an_unborn_branch(self):
+        unborn = self.root / 'unborn'
+        unborn.mkdir()
+        self.git('init', '-b', self.task['branch'], path=unborn)
+        status = self.git('status', '--porcelain=v2', '--branch', path=unborn)
+        self.assertIn('# branch.oid (initial)', status)
+        task = dict(self.task, state='implementing', repository='unborn', worktree=str(unborn))
+        self.assertFalse(self.service.awaiting_candidate(task))
+
+    def test_candidate_and_tree_checks_reject_the_same_foreign_checkout(self):
+        foreign = self.root / 'foreign'
+        foreign.mkdir()
+        self.git('init', '-b', self.task['branch'], path=foreign)
+        self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+                 'commit', '--allow-empty', '-m', 'Foreign history', path=foreign)
+        task = dict(self.task, state='implementing', worktree=str(foreign))
+        with self.assertRaisesRegex(ValueError, 'different repository'):
+            self.service.tree_for(task)
+        self.assertFalse(self.service.awaiting_candidate(task))
+
+    def test_candidate_snapshot_batches_git_metadata_without_caching_live_readiness(self):
+        candidate = self.candidate()
+        trees = []
+        for index in range(4):
+            tree, branch = self.root / f'bench-{index}', f'bench-{index}'
+            self.git('worktree', 'add', '-b', branch, str(tree), candidate['head_sha'])
+            task = dict(candidate, id=f'{index:032x}', branch=branch, worktree=str(tree),
+                        state='implementing', head_sha=None)
+            self.service.save(task, 'benchmark', 'tests')
+            trees.append(tree)
+        with patch.object(subprocess, 'run', wraps=subprocess.run) as git:
+            snapshot = self.service.snapshot()
+        active = [task for task in snapshot['tasks'] if task['state'] == 'implementing']
+        self.assertEqual(len(active), 4)
+        self.assertTrue(all(task['awaiting_candidate'] for task in active))
+        self.assertEqual(git.call_count, 9)  # Two commands per tree, one per shared repository.
+        (trees[0] / 'new-directory').mkdir()
+        (trees[0] / 'new-directory' / 'untracked').write_text('unfinished')
+        refreshed = {task['id']: task for task in self.service.snapshot()['tasks']}
+        self.assertFalse(refreshed['0' * 32]['awaiting_candidate'])
+
     def test_task_captures_explicit_base_and_launch_parameters(self):
         self.store.action.return_value = dict(id='run')
         launched = self.service.action('launch', dict(request_id='launch', task_id=self.task['id']), 'admin', 'admin')
@@ -1404,6 +1707,7 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(self.api.find_pull.call_args.args,
                          (task['github_repository'], task['branch'], 'contributor', 'main'))
         self.assertEqual(self.api.request.call_args.args[0], '/repos/owner/repo/pulls')
+        self.assertEqual(self.api.request.call_args.kwargs['token'], 'pr-token')
         payload = self.api.request.call_args.args[2]
         self.assertEqual(payload['head'], 'contributor:' + task['branch'])
         self.assertEqual(payload['base'], 'main')
@@ -1452,6 +1756,7 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(result['pull']['number'], 7)
         self.assertIn('existing PR was reused', result['pull_notice'])
         self.assertEqual(self.api.find_pull.call_args.args[2], 'contributor')
+        self.assertEqual(next(c for c in self.api.request.call_args_list if len(c.args) > 1 and c.args[1] == 'POST').kwargs['token'], 'pr-token')
 
     def test_publication_destination_is_frozen_once_published(self):
         task = self.fork(self.candidate())
@@ -1827,7 +2132,7 @@ class ContributionTests(unittest.TestCase):
                     with self.assertRaises(HTTPError) as unavailable:
                         urlopen(Request(base + endpoint, headers=operator_headers))
                     self.assertEqual(unavailable.exception.code, 503)
-            for endpoint in ('tasks/launch', 'github/configure'):
+            for endpoint in ('tasks/launch', 'tasks/start_proposal', 'github/configure'):
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(base + '/api/' + endpoint, headers={'Authorization': 'Bearer viewer'},
                                     data=json.dumps(dict(request_id='denied', task_id=self.task['id'])).encode()))
@@ -1859,7 +2164,7 @@ class ContributionTests(unittest.TestCase):
             # Registration is one allowlist tuple, so the rest cover the risk.
             for action in ('publication', 'publish', 'pull', 'refresh', 'complete',
                            'discuss', 'proposal', 'handover', 'consult', 'acceptance', 'assignment',
-                           'build', 'policy', 'review_policy', 'automation'):
+                           'build', 'policy', 'review_policy', 'automation', 'start_proposal'):
                 body = json.dumps(dict(request_id='route-' + action, task_id=self.task['id'])).encode()
                 try:
                     urlopen(Request(base + '/api/tasks/' + action, headers=headers, data=body))
@@ -2517,6 +2822,117 @@ class ContributionTests(unittest.TestCase):
                     result='```json\n' + json.dumps({'task_proposals': [
                         dict(title='Follow up ' + str(i), description='Acceptance criteria and required checks.',
                              profile_id='worker', needs_review=False) for i in range(count)]}) + '\n```')
+
+    def manual_proposal_job(self, **changes):
+        job = self.taskless_proposal_job('a' * 32, count=2)
+        job.update(changes)
+        self.store.get.return_value = job
+        self.store.snapshot.return_value['jobs'] = [job]
+        self.store.update_job.side_effect = lambda job_id, **fields: job.update(fields)
+        return job
+
+    def start_manual_proposal(self, job, request='manual-1', actor='admin'):
+        key = self.service.discussion_proposals(job)[0]['key']
+        return self.service.action('start_proposal', dict(
+            request_id=request, job_id=job['id'], proposal_key=key), actor, 'admin')
+
+    def test_manual_proposal_preserves_frozen_verdict_and_bypasses_limits(self):
+        verdict = dict(unavailable='Before automatic follow-up was enabled.', queued=[], skipped={})
+        job = self.manual_proposal_job(proposals=verdict)
+        with patch.object(self.service, 'proposal_queue_reason', side_effect=AssertionError('Automatic limit applied')):
+            made = self.start_manual_proposal(job)
+        self.assertEqual(made['assignment']['state'], 'queued')
+        self.assertEqual(job['proposals'], verdict)
+        key = self.service.discussion_proposals(job)[0]['key']
+        self.assertEqual(job['manual_proposal_starts'][key], made['id'])
+        self.assertEqual(made['source']['proposal']['started_by'], 'admin')
+        self.assertNotIn('auto_queued', made['source'])
+
+    def test_manual_retry_recovers_lost_job_update_and_started_task(self):
+        job = self.manual_proposal_job()
+        self.store.update_job.side_effect = OSError('Lost acknowledgement')
+        with self.assertRaises(OSError):
+            self.start_manual_proposal(job)
+        new_id = contributions.uuid.uuid5(contributions.uuid.NAMESPACE_URL,
+            'herdr:' + job['id'] + ':' + self.service.discussion_proposals(job)[0]['key']).hex
+        original = self.service.get(new_id)
+        self.store.update_job.side_effect = lambda job_id, **fields: job.update(fields)
+        recovered = self.start_manual_proposal(job, 'manual-2', actor='other-admin')
+        self.assertEqual(recovered['source'], original['source'])
+        self.assertEqual(recovered['assignment'], original['assignment'])
+        with patch.object(self.service, 'perform', side_effect=AssertionError('Request replay repeated work')):
+            replayed = self.start_manual_proposal(job, 'manual-2', actor='other-admin')
+        for field in ('id', 'state', 'source', 'assignment'):
+            self.assertEqual(replayed[field], recovered[field])
+        recovered.update(state='implementing', run_id='run')
+        self.service.save(recovered, 'launch', 'scheduler')
+        resumed = self.start_manual_proposal(job, 'manual-3')
+        self.assertEqual(resumed['state'], 'implementing')
+        self.assertEqual(resumed['run_id'], 'run')
+        self.assertEqual(resumed['source'], original['source'])
+
+    def test_manual_start_does_not_freeze_other_automatic_proposals(self):
+        job = self.manual_proposal_job()
+        made = self.start_manual_proposal(job)
+        self.assertNotIn('proposals', job)
+        self.service.materialize_discussion(job, dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue')
+        self.assertEqual(len(job['proposals']['created']), 2)
+        key = self.service.discussion_proposals(job)[0]['key']
+        self.assertEqual(job['proposals']['created'][key], made['id'])
+        self.assertNotIn('auto_queued', self.service.get(made['id'])['source'])
+
+    def test_manual_start_serializes_with_automatic_materialization(self):
+        job = self.manual_proposal_job()
+        reached = threading.Event()
+        results, errors = [], []
+        operation = self.service.operation
+        @contextmanager
+        def tracked(key, **kwargs):
+            if key == 'proposal-budget:org':
+                reached.set()
+            with operation(key, **kwargs):
+                yield
+        def start():
+            try:
+                results.append(self.start_manual_proposal(job))
+            except Exception as error:
+                errors.append(error)
+        with operation('proposal-budget:org'), patch.object(self.service, 'operation', tracked):
+            thread = threading.Thread(target=start)
+            thread.start()
+            self.assertTrue(reached.wait(3))
+            self.assertEqual(results, [])
+            self.service._materialize_discussion(job, dict(contributions.AUTOMATION_DEFAULTS),
+                                                'group_auto_queue', queue_allowed=False)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        key = self.service.discussion_proposals(job)[0]['key']
+        self.assertEqual(results[0]['id'], job['proposals']['created'][key])
+        self.assertEqual(results[0]['assignment']['state'], 'queued')
+
+    def test_manual_start_rejects_cross_organization_and_invalid_assignees(self):
+        job = self.manual_proposal_job()
+        for changes in (dict(organization_id='other'), dict(archived=True), dict(project=None)):
+            self.store.snapshot.return_value['profiles'] = [dict(self.profile, **changes)]
+            with self.assertRaises(ValueError):
+                self.start_manual_proposal(job)
+        self.assertNotIn('manual_proposal_starts', job)
+
+    def test_manual_task_linked_proposal_reuses_automatic_identity(self):
+        job = self.manual_proposal_job(task_id=self.task['id'])
+        self.task['meetings'] = [dict(job_id=job['id'], group_id='review')]
+        self.service.save(self.task, 'discuss', 'admin')
+        self.service.materialize_meeting(self.task['id'], job['id'],
+            dict(contributions.AUTOMATION_DEFAULTS), 'group_auto_queue', queue_allowed=False)
+        key = self.service.discussion_proposals(job)[0]['key']
+        automatic_id = self.service.get(self.task['id'])['follow_up_tasks'][key]
+        made = self.start_manual_proposal(job)
+        self.assertEqual(made['id'], automatic_id)
+        self.assertEqual(made['source']['task_id'], self.task['id'])
+        self.assertEqual(made['source']['depth'], 1)
+        self.assertEqual(made['assignment']['state'], 'queued')
+        self.assertEqual(self.service.get(self.task['id'])['follow_up_tasks'][key], made['id'])
 
     def test_taskless_proposals_cannot_cross_organization_boundaries(self):
         self.store.snapshot.return_value['profiles'] = [dict(self.profile, organization_id='other-org')]

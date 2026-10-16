@@ -148,6 +148,10 @@ Component statusDot(String activity, {String? tone}) => el(
   attributes: {
     'data-tone': tone ?? agentActivityTone(activity),
     'data-activity': activity,
+    // Pulsing marks live work. Carried on the dot itself so every caller —
+    // including the sidebar agent list, which has no room for a role tile —
+    // breathes while the agent is working.
+    'data-live': '${activity == 'working'}',
     'data-shape': switch (activity) {
       'working' || 'idle' => 'filled',
       'attention' => 'diamond',
@@ -502,25 +506,41 @@ void closeDialogs() {
   }
 }
 
+/// Keeps the visible heading authoritative, with a valid name for custom bodies.
+class DialogLabel {
+  DialogLabel(this.headingId, {this.fallback = 'Dialog'});
+  final String headingId;
+  final String fallback;
+  final headings = ValueNotifier<int>(0);
+  String get fallbackId => '$headingId-fallback';
+  String get id => headings.value > 0 ? headingId : fallbackId;
+}
+
 class _Dialog {
-  _Dialog(this.title, this.content, this.close, this.dismissible);
+  _Dialog(this.title, this.content, this.close, this.dismissible, this.label);
   final String title;
   final Component Function() content;
   final void Function() close;
   final bool dismissible;
+  final DialogLabel? label;
 }
 
 Future<T?> showDialog<T>(
   String title,
   Component Function(void Function(T?) close) content, {
   bool dismissible = true,
+  DialogLabel? label,
 }) {
   final result = Completer<T?>();
   final previouslyFocused = web.document.activeElement;
+  // Headings mount while their dialog is building; rebuild after that frame.
+  void headingChanged() => scheduleMicrotask(refreshDialogs);
+  label?.headings.addListener(headingChanged);
   late _Dialog dialog;
   void close(T? value) {
     if (result.isCompleted) return;
     _dialogs.remove(dialog);
+    label?.headings.removeListener(headingChanged);
     result.complete(value);
     refreshDialogs();
     scheduleMicrotask(() {
@@ -529,7 +549,13 @@ Future<T?> showDialog<T>(
     });
   }
 
-  dialog = _Dialog(title, () => content(close), () => close(null), dismissible);
+  dialog = _Dialog(
+    title,
+    () => content(close),
+    () => close(null),
+    dismissible,
+    label,
+  );
   _dialogs.add(dialog);
   refreshDialogs();
   scheduleMicrotask(() {
@@ -570,6 +596,13 @@ Component buildDialogs() => el('div', [
               // leaves a gap under the close button. Dialogs built through the
               // Flutter-shaped AlertDialog carry their own title instead.
               if (dialog.title.isNotEmpty) el('h2', [text(dialog.title)]),
+              if (dialog.label case final label?)
+                el(
+                  'h2',
+                  [text(label.fallback)],
+                  classes: 'visually-hidden',
+                  attributes: {'id': label.fallbackId},
+                ),
               if (dialog.dismissible) button('Close', dialog.close),
             ], classes: 'dialog__header'),
             dialog.content(),
@@ -578,7 +611,10 @@ Component buildDialogs() => el('div', [
           attributes: {
             'role': 'dialog',
             'aria-modal': '${_dialogs.last == dialog}',
-            'aria-label': dialog.title,
+            if (dialog.label != null)
+              'aria-labelledby': dialog.label!.id
+            else
+              'aria-label': dialog.title,
             'tabindex': '-1',
             if (_dialogs.last != dialog) 'inert': '',
           },

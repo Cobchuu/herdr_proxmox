@@ -1,4 +1,5 @@
 import 'native_task_ui.dart';
+import '../navigation.dart';
 import '../services.dart';
 import 'discovery_panel.dart';
 import 'task_activity.dart';
@@ -6,26 +7,10 @@ import 'task_timeline.dart';
 import 'task_workflow.dart';
 import 'task_clipboard.dart';
 import 'task_list.dart';
+import 'task_state.dart';
+export 'task_state.dart';
 import '../ui.dart' as ui;
 import '../overview.dart' show activityFor;
-
-/// Task lifecycle labels. The gateway owns these states; an unknown value is
-/// shown verbatim rather than guessed.
-const taskStates = <String, String>{
-  'completed': 'Done',
-  'draft': 'Draft',
-  'implementing': 'Implementing',
-  'review_ready': 'Review ready',
-  'published': 'Published',
-  'pr_open': 'Pull request open',
-  'merged': 'Merged',
-  'closed': 'Closed',
-};
-
-String taskState(Map<String, dynamic> task) =>
-    (task['assignment'] as Map?)?['state'] == 'queued'
-    ? 'Queued'
-    : taskStates['${task['state']}'] ?? '${task['state']}';
 
 bool needsPrAuthentication(Map github, String? repository) =>
     (github['publication']
@@ -310,6 +295,8 @@ class _TasksPageState extends State<TasksPage> {
 
   Future<void> configure() async {
     final token = TextEditingController();
+    final prToken = TextEditingController();
+    var clearPrCredential = false;
     final repos = TextEditingController(
       text: (github['repositories'] as List? ?? []).join('\n'),
     );
@@ -345,7 +332,7 @@ class _TasksPageState extends State<TasksPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
+                      'The push token needs Contents write on the branch destination. Workflow changes may require Workflows write. If this token also handles upstream PRs, it needs Pull requests write there. Setup verifies identity and account access; actual publishing verifies token permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; credentials are not isolated from same-user agents. Use only trusted agents and repositories.',
                     ),
                     TextField(
                       controller: token,
@@ -357,6 +344,36 @@ class _TasksPageState extends State<TasksPage> {
                       ),
                       maxLength: 255,
                     ),
+                    const Text(
+                      'An optional separate token handles upstream PR operations while the token above pushes the branch. '
+                      'For a split between personal accounts, the upstream account needs write access to the fork, '
+                      'and its token needs Pull requests write on the upstream. GitHub verifies the account name. '
+                      'Leave blank to preserve an existing PR credential; without one, the push token is used.',
+                    ),
+                    if (github['pr_configured'] == true)
+                      Text(
+                        'Separate PR credential configured for ${github['pr_login'] ?? 'a verified account'}.',
+                      ),
+                    TextField(
+                      controller: prToken,
+                      obscureText: true,
+                      enableSuggestions: false,
+                      autocorrect: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Pull request token (optional)',
+                      ),
+                      maxLength: 255,
+                    ),
+                    if (github['pr_configured'] == true)
+                      CheckboxListTile(
+                        value: clearPrCredential,
+                        onChanged: (value) => setDialogState(
+                          () => clearPrCredential = value == true,
+                        ),
+                        title: const Text(
+                          'Remove separate PR credential and use the push token',
+                        ),
+                      ),
                     TextField(
                       controller: repos,
                       minLines: 2,
@@ -368,7 +385,7 @@ class _TasksPageState extends State<TasksPage> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access. A fine-grained token for your fork cannot authorize a cross-owner upstream PR. For that workflow, use a classic token with appropriate repository scopes. The dashboard currently stores one credential for both push and PR creation; separate PR credentials are not supported.',
+                      'Direct publishes the branch and PR in the same repository. Through a fork publishes the branch to the fork and opens the PR upstream. Separate credentials narrow GitHub permissions; both are stored under the same gateway user. Setup verifies identity and account access; actual PR creation verifies token permission.',
                     ),
                     for (final name in listed()) ...[
                       Row(
@@ -445,6 +462,8 @@ class _TasksPageState extends State<TasksPage> {
         'token': token.text.trim(),
         'repositories': listed(),
         'publication': publication,
+        if (prToken.text.trim().isNotEmpty) 'pr_token': prToken.text.trim(),
+        if (clearPrCredential) 'clear_pr_credential': true,
       });
       await refresh();
     } catch (e) {
@@ -453,6 +472,8 @@ class _TasksPageState extends State<TasksPage> {
     } finally {
       token.clear();
       token.dispose();
+      prToken.clear();
+      prToken.dispose();
       repos.dispose();
       for (final controller in forks.values) {
         controller.dispose();
@@ -2463,7 +2484,8 @@ class _TasksPageState extends State<TasksPage> {
             if (section == 'Overview') ...[
               _groupReviewStatus(task),
               if (task['availability']?['state'] == 'decision') _decision(task),
-              if (task['source'] is Map)
+              if (task['source'] is Map &&
+                  '${task['source']['group_id'] ?? ''}'.isNotEmpty)
                 ui.el('div', [
                   ui.el('p', [
                     ui.icon('git-branch'),
@@ -2471,10 +2493,13 @@ class _TasksPageState extends State<TasksPage> {
                       'Follow-up proposed by group ${task['source']['group_id']} in meeting ${task['source']['meeting_id']}',
                     ),
                   ], classes: 'task-page__status'),
-                  TextButton(
-                    onPressed: () => openTask('${task['source']['task_id']}'),
-                    child: const Text('Open originating task'),
-                  ),
+                  // Only when there is an originating task to open: a group
+                  // proposal has none, and linking to it produced /tasks/null.
+                  if ('${task['source']['task_id'] ?? ''}'.isNotEmpty)
+                    TextButton(
+                      onPressed: () => openTask('${task['source']['task_id']}'),
+                      child: const Text('Open originating task'),
+                    ),
                 ], classes: 'task-detail__source'),
               if (task['outcome_notice'] is Map)
                 _outcomeNotice(task['outcome_notice'] as Map),
@@ -2535,6 +2560,20 @@ class _TasksPageState extends State<TasksPage> {
                       ),
                   if (task['error'] != null)
                     ui.notice('Task issue: ${task['error']}', error: true),
+                  // The gateway marks why delivery is blocked, so the action
+                  // can be offered without matching on the message text. A
+                  // missing toolchain is an operator task; the install lives
+                  // on the Settings page rather than being duplicated here.
+                  if ((task['delivery_blocker'] as Map?)?['kind'] ==
+                      'missing_toolchain')
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () => navigate('/configuration'),
+                          child: const Text('Install the required SDK'),
+                        ),
+                      ],
+                    ),
                   if (task['automation_error'] != null)
                     ui.notice(
                       'Automation waiting: ${task['automation_error']}',
