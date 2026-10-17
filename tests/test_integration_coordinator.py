@@ -21,6 +21,20 @@ class Store:
         self.profiles = [dict(id=p, organization_id='org') for p in self.jobs]
         self.busy = set()
         self.calls, self.requests = [], {}
+        # Declared tool requirements by managed project; the real store owns
+        # these, and an undeclared project is the case that must install nothing.
+        self.toolchains = {}
+
+    def project_toolchain(self, repository):
+        # Models the real store's contract: whatever was written, a reader gets
+        # the current shape. Legacy `version` records upgrade on read.
+        import project_toolchains
+        return project_toolchains.normalized(self.toolchains.get(repository))
+
+    def project_toolchains_all(self):
+        import project_toolchains
+        return {repository: project_toolchains.normalized(record)
+                for repository, record in self.toolchains.items()}
 
     def snapshot(self, **kwargs):
         return dict(jobs=list(self.jobs.values()), profiles=self.profiles)
@@ -48,6 +62,11 @@ class Store:
                                  profile_id=body['profile_id'], integration_event=body.get('integration_event'))
         self.requests[body['request_id']] = {'id': job_id}
         return {'id': job_id}
+
+
+def report_for(service, repository):
+    """The resolved requirement report a coordinator would act on."""
+    return service.effective_requirements(repository)
 
 
 class CoordinatorTests(unittest.TestCase):
@@ -80,9 +99,10 @@ class CoordinatorTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        (self.root / 'repo').mkdir()  # the managed project the events name
         self.store = Store(self.root)
         self.path = self.root / 'coordination.sqlite3'
-        self.service = IntegrationCoordinator(self.path, self.store)
+        self.service = self.coordinator()
         with patch('integration_coordinator.project_git.inspect', return_value={'repository': True, 'repository_path': 'repo'}):
             self.service.configure(dict(repository='repo', profile_id='coordinator', enabled=True))
         recovery = patch('integration_coordinator.project_git.recovery_snapshot', return_value=dict(ref='refs/herdr/recovery/test', commit='b' * 40))
@@ -96,6 +116,19 @@ class CoordinatorTests(unittest.TestCase):
 
     def event(self):
         return self.service.snapshot()['events'][0]
+
+    def coordinator(self, **kwargs):
+        """A coordinator wired to the real resolver and a release provisioning Flutter."""
+        import project_analysis
+        analysis = project_analysis.ProjectAnalysis(
+            self.store.projects,
+            overrides=self.store.project_toolchains_all,
+            toolchains=lambda: {'flutter': {'required': '3.44.8',
+                                            'executable': '/opt/flutter/bin/flutter'}},
+            catalog=lambda: {'flutter': {'script': 'install/dev-tools-install.sh'}})
+        service = IntegrationCoordinator(self.path, self.store, **kwargs)
+        service.effective_requirements = lambda repository: analysis.effective(repository)
+        return service
 
     def answer(self, decision):
         event = self.event()
@@ -732,7 +765,8 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_missing_toolchain_queues_one_opt_in_sdk_request(self):
         queued = []
-        service = IntegrationCoordinator(self.path, self.store, sdk_request=lambda: queued.append(True))
+        self.store.toolchains['repo'] = {'toolchain': 'flutter', 'version': ''}
+        service = self.coordinator(sdk_request=lambda name: queued.append(name))
         with closing(service.connect()) as db, db:
             config = json.loads(db.execute('SELECT data FROM settings').fetchone()[0])
             config['auto_sdk'] = True
@@ -743,14 +777,79 @@ class CoordinatorTests(unittest.TestCase):
         self.store.jobs[event['job_id']].update(
             state='answered', result=json.dumps({'decision': 'blocked', 'blocker': 'missing_toolchain', 'reason': 'No Flutter'}))
         service.tick()
-        self.assertEqual(queued, [True])
+        self.assertEqual(queued, ['flutter'])
         self.assertTrue(service.snapshot()['events'][0]['sdk_requested'])
         service.tick()
-        self.assertEqual(queued, [True])
+        self.assertEqual(queued, ['flutter'])
+
+    def test_an_undeclared_project_never_queues_an_installation(self):
+        # A worker reports a category, not a tool. Without a declared identity
+        # there is nothing to install, so the blocked build is told why rather
+        # than defaulting to whatever the release happens to provision.
+        queued = []
+        service = self.coordinator(sdk_request=lambda name: queued.append(name))
+        with closing(service.connect()) as db, db:
+            config = json.loads(db.execute('SELECT data FROM settings').fetchone()[0])
+            config['auto_sdk'] = True
+            db.execute('UPDATE settings SET data=?', (json.dumps(config),))
+        service.observe([self.notice])
+        service.tick()
+        self.store.jobs[service.snapshot()['events'][0]['job_id']].update(
+            state='answered', result=json.dumps({'decision': 'blocked', 'blocker': 'missing_toolchain', 'reason': 'No Flutter'}))
+        service.tick()
+        event = service.snapshot()['events'][0]
+        self.assertEqual(queued, [])
+        self.assertFalse(event.get('sdk_requested'))
+        self.assertIn('No requirement of this project can be satisfied', event['reason'])
+
+    def test_a_tool_the_release_cannot_install_is_reported_not_queued(self):
+        queued = []
+        self.store.toolchains['repo'] = {'toolchain': 'php', 'version': '8.2'}
+        service = self.coordinator(sdk_request=lambda name: queued.append(name))
+        with closing(service.connect()) as db, db:
+            config = json.loads(db.execute('SELECT data FROM settings').fetchone()[0])
+            config['auto_sdk'] = True
+            db.execute('UPDATE settings SET data=?', (json.dumps(config),))
+        event = {'blocker': 'missing_toolchain', 'repository': 'repo', 'reason': 'No PHP'}
+        service.missing_toolchain({'auto_sdk': True}, event)
+        self.assertEqual(queued, [])
+        self.assertIn('No requirement of this project can be satisfied', event['reason'])
+        # The release ships no PHP installer, so nothing is even offered.
+        self.assertEqual([entry['tool'] for entry in
+                          report_for(self.service, 'repo')['requirements']
+                          if entry['assessment']['installer']], [])
+
+    def test_the_recorded_failure_decides_between_several_installable_tools(self):
+        # The blocker names a category, never a tool. The build recorded which
+        # tools it measured and which failed to match, so a failed tool that is
+        # also installable is the one the blocker is about.
+        service = self.coordinator()
+        service.effective_requirements = lambda repository: dict(
+            provisionable=['dart', 'flutter'],
+            project_requirement=dict(reason="Several of this project's requirements are installable."))
+        event = {'repository': 'repo', 'blocker': 'missing_toolchain'}
+        with self.assertRaisesRegex(ValueError, 'Several'):
+            service.required_toolchain(event)
+        event['validation_run'] = {'toolchain_evidence': [
+            {'name': 'dart', 'matches': True}, {'name': 'flutter', 'matches': False}]}
+        self.assertEqual(service.required_toolchain(event), 'flutter')
+
+    def test_evidence_that_identifies_nothing_leaves_the_refusal_standing(self):
+        service = self.coordinator()
+        service.effective_requirements = lambda repository: dict(
+            provisionable=['dart', 'flutter'],
+            project_requirement=dict(reason="Several of this project's requirements are installable."))
+        for evidence in ([], [{'name': 'php', 'matches': False}],
+                         [{'name': 'dart', 'matches': False}, {'name': 'flutter', 'matches': False}]):
+            with self.subTest(evidence=evidence):
+                with self.assertRaisesRegex(ValueError, 'Several'):
+                    service.required_toolchain({'repository': 'repo', 'blocker': 'missing_toolchain',
+                                                'validation_run': {'toolchain_evidence': evidence}})
 
     def test_missing_toolchain_does_not_install_without_the_opt_in(self):
         queued = []
-        service = IntegrationCoordinator(self.path, self.store, sdk_request=lambda: queued.append(True))
+        self.store.toolchains['repo'] = {'toolchain': 'flutter', 'version': ''}
+        service = self.coordinator(sdk_request=lambda name: queued.append(name))
         service.observe([self.notice])
         service.tick()
         event = service.snapshot()['events'][0]
@@ -761,11 +860,12 @@ class CoordinatorTests(unittest.TestCase):
         self.assertFalse(service.snapshot()['events'][0].get('sdk_requested'))
 
     def test_a_refused_automatic_sdk_request_is_explained_once(self):
-        # Several absent toolchains leave the automatic path with nothing to
-        # choose, so the blocked build must say so rather than stall silently.
-        def refuse():
-            raise ValueError('Several toolchains are missing; choose which to install: flutter, go')
-        service = IntegrationCoordinator(self.path, self.store, sdk_request=refuse)
+        # The gateway can still refuse a named request; the blocked build must
+        # say so rather than stall silently.
+        def refuse(name):
+            raise ValueError('That toolchain is already installed.')
+        self.store.toolchains['repo'] = {'toolchain': 'flutter', 'version': ''}
+        service = self.coordinator(sdk_request=refuse)
         with closing(service.connect()) as db, db:
             config = json.loads(db.execute('SELECT data FROM settings').fetchone()[0])
             config['auto_sdk'] = True
@@ -776,15 +876,16 @@ class CoordinatorTests(unittest.TestCase):
             state='answered', result=json.dumps({'decision': 'blocked', 'blocker': 'missing_toolchain', 'reason': 'No Go'}))
         service.tick()
         event = service.snapshot()['events'][0]
-        self.assertIn('choose which to install', event['reason'])
+        self.assertIn('already installed', event['reason'])
         self.assertFalse(event.get('sdk_requested'))
         service.tick()
         service.tick()
         self.assertEqual(service.snapshot()['events'][0]['reason'], event['reason'])
 
     def test_sdk_refusal_stays_visible_after_a_long_build_reason(self):
-        service = IntegrationCoordinator(self.path, self.store, sdk_request=Mock(side_effect=ValueError('Choose a toolchain')))
-        event = {'blocker': 'missing_toolchain', 'reason': 'x' * 2000}
+        self.store.toolchains['repo'] = {'toolchain': 'flutter', 'version': ''}
+        service = self.coordinator(sdk_request=Mock(side_effect=ValueError('Choose a toolchain')))
+        event = {'blocker': 'missing_toolchain', 'repository': 'repo', 'reason': 'x' * 2000}
         service.missing_toolchain({'auto_sdk': True}, event)
         self.assertTrue(event['reason'].endswith('Choose a toolchain'))
         self.assertLessEqual(len(event['reason']), 2000)
@@ -853,6 +954,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_merged_work_with_missing_toolchain_queues_authorized_sdk_install(self):
         from unittest.mock import Mock
+        self.store.toolchains['repo'] = {'toolchain': 'flutter', 'version': ''}
         self.service.sdk_request = Mock()
         with closing(self.service.connect()) as db, db:
             config = json.loads(db.execute('SELECT data FROM settings').fetchone()[0])
@@ -870,4 +972,4 @@ class CoordinatorTests(unittest.TestCase):
             self.service.tick()
         self.assertEqual(self.event()['state'], 'validation_pending')
         self.assertEqual(self.event()['blocker'], 'missing_toolchain')
-        self.service.sdk_request.assert_called_once_with()
+        self.service.sdk_request.assert_called_once_with('flutter')

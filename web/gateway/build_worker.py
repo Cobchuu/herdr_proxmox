@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shutil
 import logging
+import os
 import time
 
 from build_queue import BuildQueue
@@ -56,6 +57,12 @@ def recover_interrupted(queue, runner):
 def main():
     config = json.loads(CONFIG.read_text())
     projects = Path(config['projects'])
+    from environment_policy import EnvironmentPolicies
+    from environment_store import EnvironmentPlanStore
+    import toolchain_policy
+    database = Path(os.environ.get('HERDR_ORGANIZATION_DB', '/home/herdr/.config/herdr-web/organizations.sqlite3'))
+    toolchain_policy.PROJECT_RESOLVER = EnvironmentPolicies(projects,
+        EnvironmentPlanStore(database.parent / 'environments.sqlite3')).resolve
     runner = ValidationRuns(projects, lambda _: None, external=True)
     queue = BuildQueue(config['queue'])
     recover_interrupted(queue, runner)

@@ -126,8 +126,18 @@ def parse_models(output):
             variants = [v.get('id') for v in variants if isinstance(v, dict) and not v.get('disabled')]
         else:
             variants = []
-        models.append({'provider': provider, 'id': model, 'name': metadata.get('name', model),
-                       'reasoning': sorted(v for v in variants if isinstance(v, str))})
+        entry = {'provider': provider, 'id': model, 'name': metadata.get('name', model),
+                 'reasoning': sorted(v for v in variants if isinstance(v, str))}
+        cost = metadata.get('cost')
+        if isinstance(cost, dict):
+            entry['cost'] = {k: cost[k] for k in ('input', 'output') if k in cost}
+        capabilities = metadata.get('capabilities')
+        if isinstance(capabilities, dict) and isinstance(capabilities.get('toolcall'), bool):
+            entry['tool_call'] = capabilities['toolcall']
+        limits = metadata.get('limit')
+        if isinstance(limits, dict) and type(limits.get('context')) is int and limits['context'] > 0:
+            entry['context'] = limits['context']
+        models.append(entry)
     return list({(m['provider'], m['id']): m for m in models}.values())
 
 

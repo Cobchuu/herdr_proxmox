@@ -8,7 +8,7 @@ A discussion waiting for input can resume and must retain its participants.
 
 # waiting_for_members has not acquired participants and must not prevent the
 # work that already owns them from finishing.
-ACTIVE_JOB_STATES = ('queued', 'running', 'waiting_for_input')
+ACTIVE_JOB_STATES = ('queued', 'running', 'waiting_for_input', 'waiting_environment')
 
 
 def active(job):

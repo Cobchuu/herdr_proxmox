@@ -1,6 +1,7 @@
 import 'org_form_values.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:herdr_dashboard_state/project_directory_choices.dart';
 import 'package:web/web.dart' as web;
 import '../services.dart';
 import '../ui.dart';
@@ -29,6 +30,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
       ? 'collaborate'
       : component.initialView;
   String? error;
+  String? readinessError;
   bool cleaningSessions = false, transferring = false;
   final sessionRequests = <String, String>{};
   ModelCatalog catalog = const ModelCatalog({});
@@ -55,6 +57,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
           bind();
           sessionRequests.clear();
           error = null;
+          readinessError = null;
           catalog = const ModelCatalog({});
         }
         setState(() {});
@@ -118,7 +121,53 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Future<void> editOrganization([Json? org]) async {
     final epoch = connection.generation;
-    final values = await organizationForm(org);
+    Json? templates;
+    var projectFolders = <String, String>{};
+    String? projectFolderError;
+    if (org == null) {
+      try {
+        templates = Json.from(
+          await connection.request('organizations/templates'),
+        );
+      } catch (e) {
+        templates = {'error': 'Role presets could not load: $e'};
+      }
+      try {
+        projectFolders = projectDirectoryChoices(
+          Json.from(await connection.request('projects/browse', {'path': ''})),
+        );
+      } catch (e) {
+        projectFolderError = 'Project folders could not load: $e';
+      }
+    }
+    if (!mounted || epoch != connection.generation) return;
+    final values = await organizationForm(
+      org,
+      templates,
+      (body) async {
+        if (epoch != connection.generation || !connection.state.connected)
+          throw StateError('Connection changed. Reopen the organization form.');
+        final result = Json.from(
+          await connection.request('organizations/templates', body),
+        );
+        if (epoch != connection.generation)
+          throw StateError('Connection changed. Reopen the organization form.');
+        return result;
+      },
+      (body) async {
+        if (epoch != connection.generation || !connection.state.connected)
+          throw StateError('Connection changed. Reopen the organization form.');
+        final result = Json.from(
+          await connection.request('organizations/templates/library', body),
+        );
+        if (epoch != connection.generation)
+          throw StateError('Connection changed. Reopen the organization form.');
+        return result;
+      },
+      connection.operator.value['role'] == 'admin',
+      projectFolders,
+      projectFolderError,
+    );
     if (values == null || !mounted || epoch != connection.generation) return;
     final previous = bloc.state.organizations.map((o) => o['id']).toSet();
     await submit('save', values);
@@ -132,6 +181,30 @@ class _OrganizationPageState extends State<OrganizationPage> {
 
   Future<void> hire(Json org, [Json? profile]) async {
     final epoch = connection.generation;
+    // A failed lookup is a request error, not evidence of missing CLI accounts.
+    var runtimes = const <Json>[];
+    try {
+      final status = await connection.request('cli-setup');
+      runtimes = [
+        for (final cli in (status['clis'] as List? ?? []))
+          if (cli is Json) cli,
+      ];
+    } catch (failure) {
+      if (mounted &&
+          epoch == connection.generation &&
+          connection.state.connected) {
+        setState(
+          () => readinessError =
+              'Could not load runtime readiness: $failure. Try hiring or editing again to retry.',
+        );
+      }
+      return;
+    }
+    if (!mounted ||
+        epoch != connection.generation ||
+        !connection.state.connected)
+      return;
+    setState(() => readinessError = null);
     final values = await hireForm(
       org,
       bloc.state.profiles
@@ -141,6 +214,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
           .toList(),
       catalog,
       profile,
+      runtimes,
     );
     if (values != null && mounted && epoch == connection.generation) {
       await submit('hire', values);
@@ -573,11 +647,12 @@ class _OrganizationPageState extends State<OrganizationPage> {
         ))
           return;
         if (!mounted || epoch != connection.generation) return;
-        await connection.request('organizations/import', data);
+        final imported = await connection.request('organizations/import', data);
+        final counts = imported['imported'] as Map? ?? {};
         if (!mounted || epoch != connection.generation) return;
         await bloc.send(OrganizationCommand('refresh'));
         toast(
-          'Configuration imported. Review paths and connect CLI accounts before launching.',
+          'Configuration imported: ${counts['team_templates'] ?? 0} saved templates and ${counts['team_template_versions'] ?? 0} template versions. Review paths and connect CLI accounts before launching.',
         );
       }
     } catch (e) {
@@ -591,6 +666,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
   Component run(Json job, bool busy) {
     final admin = connection.operator.value['role'] == 'admin';
     final launch = job['kind'] == 'launch';
+    final preparation = job['kind'] == 'environment_preparation';
     final profile = bloc.state.profiles
         .where((p) => p['id'] == job['profile_id'])
         .firstOrNull;
@@ -643,7 +719,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
             iconName: 'rotate-ccw',
           ),
       ],
-      if (launch && !['queued', 'running', 'released'].contains(job['state']))
+      if ((launch || preparation) &&
+          !['queued', 'running', 'released', 'finished'].contains(job['state']))
         button(
           'Release run binding',
           () => release(job),
@@ -677,7 +754,13 @@ class _OrganizationPageState extends State<OrganizationPage> {
       el('div', [
         el('div', [
           el('h3', [
-            text(launch ? 'Launch' : 'Delegation'),
+            text(
+              preparation
+                  ? 'Environment preparation'
+                  : launch
+                  ? 'Launch'
+                  : 'Delegation',
+            ),
             el('span', [text(' · $name')], classes: 'org-run__agent'),
           ], classes: 'org-run__title'),
           statePill(job['state']),
@@ -702,6 +785,11 @@ class _OrganizationPageState extends State<OrganizationPage> {
           if (job['alias'] != null) ('Herdr name', mono(job['alias'])),
           if (job['alias'] != null)
             ('Pane', mono(job['pane_id'] ?? 'not allocated')),
+          if (job['progress'] != null) ('Progress', textBlock(job['progress'])),
+          if (job['preparation_execution_id'] != null)
+            ('Preparation execution', mono(job['preparation_execution_id'])),
+          if (job['parent_execution_id'] != null)
+            ('Waiting launch', mono(job['parent_execution_id'])),
           if (job['task'] != null)
             ('From ${job['sender_name']}', textBlock(job['task'])),
           if (job['workspace_mode'] == 'worktree')
@@ -1036,6 +1124,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
       ),
       if (state.error != null) notice(state.error, error: true),
       if (error != null) notice(error, error: true),
+      if (readinessError != null) notice(readinessError, error: true),
       if (bloc.pending != null)
         el('div', [
           icon('history', classes: 'icon--sm'),

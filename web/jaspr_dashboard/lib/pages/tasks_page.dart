@@ -1,4 +1,5 @@
 import 'native_task_ui.dart';
+import '../navigation.dart';
 import '../services.dart';
 import 'discovery_panel.dart';
 import 'task_activity.dart';
@@ -6,27 +7,13 @@ import 'task_timeline.dart';
 import 'task_workflow.dart';
 import 'task_clipboard.dart';
 import 'task_list.dart';
+import 'task_state.dart';
+export 'task_state.dart';
 import '../ui.dart' as ui;
 import '../overview.dart' show activityFor;
 
-/// Task lifecycle labels. The gateway owns these states; an unknown value is
-/// shown verbatim rather than guessed.
-const taskStates = <String, String>{
-  'completed': 'Done',
-  'draft': 'Draft',
-  'implementing': 'Implementing',
-  'review_ready': 'Review ready',
-  'published': 'Published',
-  'pr_open': 'Pull request open',
-  'merged': 'Merged',
-  'closed': 'Closed',
-};
-
-String taskState(Map<String, dynamic> task) =>
-    (task['assignment'] as Map?)?['state'] == 'queued'
-    ? 'Queued'
-    : taskStates['${task['state']}'] ?? '${task['state']}';
-
+// Keep the legacy verdict for older gateways and persisted configurations during
+// upgrades. Current gateways emit supported or not_exercised instead.
 bool needsPrAuthentication(Map github, String? repository) =>
     (github['publication']
         as Map?)?[repository]?['verification']?['upstream_pr_creation'] ==
@@ -42,7 +29,7 @@ String publicationSummary(String repository, Map entry) {
       ? 'Different GitHub authentication is required to create a PR in $repository. Configure a credential authorized for the upstream repository.'
       : verification['upstream_pr_creation'] == 'supported'
       ? 'PR authentication is compatible; creation has not been tested.'
-      : 'Upstream PR authentication has not been verified.';
+      : 'Upstream PR write permission has not been verified. A branch push may succeed before PR creation is rejected; confirm the credential can write pull requests in $repository.';
   return '$repository → ${entry['publishing_repository']}\n$account. '
       'Token write access has not been tested. $pr';
 }
@@ -310,6 +297,8 @@ class _TasksPageState extends State<TasksPage> {
 
   Future<void> configure() async {
     final token = TextEditingController();
+    final prToken = TextEditingController();
+    var clearPrCredential = false;
     final repos = TextEditingController(
       text: (github['repositories'] as List? ?? []).join('\n'),
     );
@@ -345,7 +334,7 @@ class _TasksPageState extends State<TasksPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Use a fine-grained token for selected repositories: Contents write, Pull requests write, Checks read, and Commit statuses read. Workflow changes may also require Workflows write. Setup verifies account access; it cannot prove the token has these write permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; this credential is not isolated from same-user agents. Use only trusted agents and repositories.',
+                      'The push token needs Contents write on the branch destination. Workflow changes may require Workflows write. If this token also handles upstream PRs, it needs Pull requests write there. Setup verifies identity and account access; actual publishing verifies token permissions. Keep branch protection enabled.\n\nAgents and gateway share a Linux user; credentials are not isolated from same-user agents. Use only trusted agents and repositories.',
                     ),
                     TextField(
                       controller: token,
@@ -357,6 +346,36 @@ class _TasksPageState extends State<TasksPage> {
                       ),
                       maxLength: 255,
                     ),
+                    const Text(
+                      'An optional separate token handles upstream PR operations while the token above pushes the branch. '
+                      'For a split between personal accounts, the upstream account needs write access to the fork, '
+                      'and its token needs Pull requests write on the upstream. GitHub verifies the account name. '
+                      'Leave blank to preserve an existing PR credential; without one, the push token is used.',
+                    ),
+                    if (github['pr_configured'] == true)
+                      Text(
+                        'Separate PR credential configured for ${github['pr_login'] ?? 'a verified account'}.',
+                      ),
+                    TextField(
+                      controller: prToken,
+                      obscureText: true,
+                      enableSuggestions: false,
+                      autocorrect: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Pull request token (optional)',
+                      ),
+                      maxLength: 255,
+                    ),
+                    if (github['pr_configured'] == true)
+                      CheckboxListTile(
+                        value: clearPrCredential,
+                        onChanged: (value) => setDialogState(
+                          () => clearPrCredential = value == true,
+                        ),
+                        title: const Text(
+                          'Remove separate PR credential and use the push token',
+                        ),
+                      ),
                     TextField(
                       controller: repos,
                       minLines: 2,
@@ -368,7 +387,7 @@ class _TasksPageState extends State<TasksPage> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Publication mode. Direct pushes the task branch and opens the pull request in the same repository. Through a fork pushes the branch to your fork and opens the pull request upstream, so the upstream repository does not need push access. A fine-grained token for your fork cannot authorize a cross-owner upstream PR. For that workflow, use a classic token with appropriate repository scopes. The dashboard currently stores one credential for both push and PR creation; separate PR credentials are not supported.',
+                      'Direct publishes the branch and PR in the same repository. Through a fork publishes the branch to the fork and opens the PR upstream. Separate credentials narrow GitHub permissions; both are stored under the same gateway user. Setup verifies identity and account access; actual PR creation verifies token permission.',
                     ),
                     for (final name in listed()) ...[
                       Row(
@@ -445,6 +464,8 @@ class _TasksPageState extends State<TasksPage> {
         'token': token.text.trim(),
         'repositories': listed(),
         'publication': publication,
+        if (prToken.text.trim().isNotEmpty) 'pr_token': prToken.text.trim(),
+        if (clearPrCredential) 'clear_pr_credential': true,
       });
       await refresh();
     } catch (e) {
@@ -453,6 +474,8 @@ class _TasksPageState extends State<TasksPage> {
     } finally {
       token.clear();
       token.dispose();
+      prToken.clear();
+      prToken.dispose();
       repos.dispose();
       for (final controller in forks.values) {
         controller.dispose();
@@ -2463,7 +2486,8 @@ class _TasksPageState extends State<TasksPage> {
             if (section == 'Overview') ...[
               _groupReviewStatus(task),
               if (task['availability']?['state'] == 'decision') _decision(task),
-              if (task['source'] is Map)
+              if (task['source'] is Map &&
+                  '${task['source']['group_id'] ?? ''}'.isNotEmpty)
                 ui.el('div', [
                   ui.el('p', [
                     ui.icon('git-branch'),
@@ -2471,10 +2495,13 @@ class _TasksPageState extends State<TasksPage> {
                       'Follow-up proposed by group ${task['source']['group_id']} in meeting ${task['source']['meeting_id']}',
                     ),
                   ], classes: 'task-page__status'),
-                  TextButton(
-                    onPressed: () => openTask('${task['source']['task_id']}'),
-                    child: const Text('Open originating task'),
-                  ),
+                  // Only when there is an originating task to open: a group
+                  // proposal has none, and linking to it produced /tasks/null.
+                  if ('${task['source']['task_id'] ?? ''}'.isNotEmpty)
+                    TextButton(
+                      onPressed: () => openTask('${task['source']['task_id']}'),
+                      child: const Text('Open originating task'),
+                    ),
                 ], classes: 'task-detail__source'),
               if (task['outcome_notice'] is Map)
                 _outcomeNotice(task['outcome_notice'] as Map),
@@ -2535,6 +2562,20 @@ class _TasksPageState extends State<TasksPage> {
                       ),
                   if (task['error'] != null)
                     ui.notice('Task issue: ${task['error']}', error: true),
+                  // The gateway marks why delivery is blocked, so the action
+                  // can be offered without matching on the message text. A
+                  // missing toolchain is an operator task; the install lives
+                  // on the Settings page rather than being duplicated here.
+                  if ((task['delivery_blocker'] as Map?)?['kind'] ==
+                      'missing_toolchain')
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () => navigate('/configuration'),
+                          child: const Text('Install the required SDK'),
+                        ),
+                      ],
+                    ),
                   if (task['automation_error'] != null)
                     ui.notice(
                       'Automation waiting: ${task['automation_error']}',
@@ -2558,11 +2599,37 @@ class _TasksPageState extends State<TasksPage> {
                 title: const Text('Automation settings'),
                 children: [
                   SwitchListTile(
-                    title: const Text('Automatically capture and validate'),
+                    title: const Text(
+                      'Automatically capture completed candidates',
+                    ),
+                    subtitle: const Text(
+                      'Check the completion receipt and capture the committed candidate. No build service is required; validation is a separate setting.',
+                    ),
+                    value: taskAutoCapture(task),
+                    onChanged:
+                        admin &&
+                            !busy &&
+                            ![
+                              'merged',
+                              'closed',
+                              'completed',
+                            ].contains(task['state'])
+                        ? (value) => act('policy', {
+                            'task_id': task['id'],
+                            'auto_capture': value,
+                            'auto_validate': task['auto_validate'] == true,
+                            'auto_publish': task['auto_publish'] == true,
+                          })
+                        : null,
+                  ),
+                  SwitchListTile(
+                    title: const Text(
+                      'Automatically validate captured candidates',
+                    ),
                     subtitle: Text(
                       executor == 'service'
                           ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
-                          : 'Install the durable build service to enable automation.',
+                          : 'Uses the gateway build executor. Builds stop if the gateway restarts; install the durable build service for restart resilience.',
                     ),
                     value: task['auto_validate'] == true,
                     onChanged:
@@ -2572,11 +2639,10 @@ class _TasksPageState extends State<TasksPage> {
                               'merged',
                               'closed',
                               'completed',
-                            ].contains(task['state']) &&
-                            (task['auto_validate'] == true ||
-                                executor == 'service')
+                            ].contains(task['state'])
                         ? (value) => act('policy', {
                             'task_id': task['id'],
+                            'auto_capture': taskAutoCapture(task),
                             'auto_validate': value,
                             if (!value) 'auto_publish': false,
                           })
@@ -2603,6 +2669,7 @@ class _TasksPageState extends State<TasksPage> {
                             ].contains(task['state'])
                         ? (value) => act('policy', {
                             'task_id': task['id'],
+                            'auto_capture': taskAutoCapture(task),
                             'auto_validate':
                                 value || task['auto_validate'] == true,
                             'auto_publish': value,
@@ -2624,6 +2691,7 @@ class _TasksPageState extends State<TasksPage> {
                         onPressed: admin && !busy
                             ? () => act('policy', {
                                 'task_id': task['id'],
+                                'auto_capture': taskAutoCapture(task),
                                 'auto_validate': false,
                                 'auto_publish': false,
                               })
@@ -2636,6 +2704,7 @@ class _TasksPageState extends State<TasksPage> {
                             admin && !busy && task['auto_validate'] == true
                             ? () => act('policy', {
                                 'task_id': task['id'],
+                                'auto_capture': taskAutoCapture(task),
                                 'auto_validate': true,
                                 'auto_publish': task['auto_publish'] == true,
                                 'retry_delivery': true,

@@ -6,22 +6,12 @@ import 'package:web/web.dart' as web;
 import '../ui.dart';
 import '../navigation.dart' as navigation;
 import 'task_activity.dart' show taskAgentName, taskNextStep, shortSha;
+import 'task_state.dart';
 
 part 'task_workflow_layout.dart';
 part 'task_workflow_panels.dart';
 part 'task_workflow_inspector.dart';
 part 'task_workflow_canvas.dart';
-
-const _stateLabels = {
-  'draft': 'Draft',
-  'implementing': 'Implementing',
-  'review_ready': 'Review ready',
-  'published': 'Published',
-  'pr_open': 'Pull request open',
-  'merged': 'Merged',
-  'closed': 'Closed',
-  'completed': 'Done',
-};
 
 /// Summary order: finished work first, then what is closest to finishing.
 const _progressOrder = [
@@ -30,6 +20,7 @@ const _progressOrder = [
   'pr_open',
   'published',
   'review_ready',
+  'awaiting_candidate',
   'implementing',
   'queued',
   'draft',
@@ -42,6 +33,7 @@ String _stateTone(String state) => switch (state) {
   'completed' || 'merged' => 'success',
   'pr_open' || 'published' => 'accent',
   'review_ready' => 'warning',
+  'awaiting_candidate' => 'warning',
   'implementing' => 'info',
   _ => 'neutral',
 };
@@ -54,11 +46,11 @@ bool taskNeedsAttention(Map task) =>
     (task['availability'] as Map?)?['state'] == 'decision';
 
 /// Tone of a task's recorded state alone (group dots, legends).
-String taskStateTone(Map task) => _stateTone('${task['state']}');
+String taskStateTone(Map task) => _stateTone(taskStateKey(task));
 
 /// Pill tone for a task: attention first, then its recorded state.
 String taskTone(Map task) =>
-    taskNeedsAttention(task) ? 'danger' : _stateTone('${task['state']}');
+    taskNeedsAttention(task) ? 'danger' : taskStateTone(task);
 
 /// Phase 2's native workflow board, driven exclusively by recorded task data.
 /// Relationships are provenance or execution waits, never inferred prerequisites.
@@ -160,17 +152,9 @@ class _TaskWorkflowState extends State<TaskWorkflow> {
       ? null
       : component.activity![owner] ?? 'offline';
 
-  String _stateKey(Map task) =>
-      (task['assignment'] as Map?)?['state'] == 'queued'
-      ? 'queued'
-      : '${task['state']}';
-  String _stateLabel(String key) => key == 'queued'
-      ? 'Queued'
-      : _stateLabels[key] ?? (key == 'null' ? 'State not recorded' : key);
-  String _state(Map task) => (task['assignment'] as Map?)?['state'] == 'queued'
-      ? 'Queued'
-      : _stateLabels['${task['state']}'] ??
-            '${task['state'] ?? 'State not recorded'}';
+  String _stateKey(Map task) => taskStateKey(task);
+  String _stateLabel(String key) => taskStateLabel(key);
+  String _state(Map task) => taskState(task);
   Map? _evidence(Map task) {
     final target = task['merge_sha'] ?? task['head_sha'];
     final record = (task['builds'] as Map?)?[target];
@@ -198,7 +182,7 @@ class _TaskWorkflowState extends State<TaskWorkflow> {
       .where(
         (task) =>
             (repository.isEmpty || task['repository'] == repository) &&
-            (status.isEmpty || '${task['state']}' == status) &&
+            (status.isEmpty || _stateKey(task) == status) &&
             (validation.isEmpty || _validation(task) == validation) &&
             !(hideMerged && task['state'] == 'merged'),
       )
@@ -383,9 +367,8 @@ class _TaskWorkflowState extends State<TaskWorkflow> {
           }, (value) => setState(() => repository = value)),
           select('Task state', status, {
             '': 'All states',
-            for (final state
-                in component.tasks.map((task) => '${task['state']}').toSet())
-              state: _stateLabels[state] ?? state,
+            for (final state in component.tasks.map(_stateKey).toSet())
+              state: taskStateLabel(state),
           }, (value) => setState(() => status = value)),
           select('Validation', validation, {
             '': 'All evidence',

@@ -20,8 +20,12 @@ retry creates a new attempt; repeated requests for queued/running attempts retur
 the same job. The worker runs without a browser and gateway polls publish durable
 result feedback to each linked integration event without rerunning the build.
 
-install/build-install.sh is explicit root bootstrap, not repository code executed
-by the build worker. It configures an unprivileged systemd service with CPUQuota,
+`install/build-install.sh` is a fixed release installer, invoked directly as root
+or through the administrator's **Install build service** action. The latter uses
+an option-free request and a separate root worker provisioned by the container
+installer; existing containers bootstrap that worker once with
+`bash /opt/herdr-web/install/build-service-setup.sh`. Task repository code is never
+executed as root by this path. It configures an unprivileged systemd service with CPUQuota,
 MemoryHigh/Max, TasksMax, IOWeight, nice and a disk-space precondition. Bootstrap
 refuses unavailable CPU/memory controllers instead of claiming unenforced limits.
 Limits are initial budgets and have not been measured on the LXC. Gateway fallback
