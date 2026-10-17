@@ -190,6 +190,7 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
   var reapOrphaned = policy['reap_orphaned_panes'] == true;
   var autoPrepare = policy['auto_prepare'] == true;
   var autoPrepareChecks = policy['auto_prepare_checks'] == true;
+  var autoPrepareAgent = policy['auto_prepare_agent'] == true;
   final perMeeting = TextEditingController(
     text: '${policy['max_per_meeting'] ?? 1}',
   );
@@ -264,10 +265,21 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                       onChanged: (value) =>
                           update(() => autoPrepareChecks = value == true),
                       title: const Text(
-                        'Approve native .NET and Rust build/test recipes automatically',
+                        'Approve supported project build/test recipes automatically',
                       ),
                       subtitle: const Text(
                         'Separate from SDK installation: these commands can restore dependencies and execute project code.',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: autoPrepareAgent,
+                      onChanged: (value) =>
+                          update(() => autoPrepareAgent = value == true),
+                      title: const Text(
+                        'Allow a preparation agent to install Node.js when needed',
+                      ),
+                      subtitle: const Text(
+                        'Requires SDK preparation. A dedicated session can download and execute installers; provenance remains an unverified claim. It shares the service account and is not a sandbox.',
                       ),
                     ),
                     _limitField(
@@ -334,6 +346,7 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                   'reap_orphaned_panes': reapOrphaned,
                   'auto_prepare': autoPrepare,
                   'auto_prepare_checks': autoPrepareChecks,
+                  'auto_prepare_agent': autoPrepareAgent,
                   'max_per_meeting': int.tryParse(perMeeting.text.trim()),
                   'max_open_per_agent': int.tryParse(perAgent.text.trim()),
                   'max_follow_up_depth': int.tryParse(depth.text.trim()),

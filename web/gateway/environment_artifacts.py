@@ -5,6 +5,7 @@ installer command. Provider metadata supplies immutable artifact hashes. Network
 access occurs only during explicit preparation, never during analysis reads.
 """
 from contextlib import closing
+import environment_adapters
 import hashlib
 import json
 import os
@@ -17,7 +18,6 @@ import sys
 import tarfile
 import tempfile
 import time
-import tomllib
 import uuid
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -30,8 +30,7 @@ EXTRACT_LIMIT = 4 * DOWNLOAD_LIMIT
 FILE_LIMIT = 100_000
 HOSTS = frozenset(('dotnetcli.blob.core.windows.net', 'builds.dotnet.microsoft.com',
                   'ci.dot.net', 'download.visualstudio.microsoft.com', 'static.rust-lang.org'))
-METADATA = {'dotnet-sdk': 'https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/',
-            'rust-toolchain': 'https://static.rust-lang.org/dist/'}
+
 
 
 def trusted_url(value):
@@ -96,34 +95,10 @@ def resolve(capability, version, target=None, read=metadata):
     if target not in (dict(os='linux', architecture='x64', libc='glibc'),
                        dict(os='linux', architecture='arm64', libc='glibc')):
         raise ValueError('The SDK provider does not support this executor.')
-    if capability == 'dotnet-sdk':
-        url = METADATA[capability] + '.'.join(version.split('.')[:2]) + '/releases.json'
-        data = json.loads(read(url))
-        candidates = []
-        for release in data.get('releases', []):
-            candidates.extend(release.get('sdks', []))
-            if isinstance(release.get('sdk'), dict):
-                candidates.append(release['sdk'])
-        rid = 'linux-' + target['architecture']
-        files = [item for sdk in candidates if sdk.get('version') == version
-                 for item in sdk.get('files', [])
-                 if item.get('rid') == rid and str(item.get('url', '')).endswith('.tar.gz')]
-        if not files:
-            raise ValueError(f'The publisher has no .NET SDK {version} artifact for {rid}.')
-        item = files[0]
-        archives = [artifact(item['url'], item.get('hash'), 'sha512', component='sdk')]
-    elif capability == 'rust-toolchain':
-        url = METADATA[capability] + 'channel-rust-' + version + '.toml'
-        data = tomllib.loads(read(url).decode('utf-8'))
-        triple = ('x86_64' if target['architecture'] == 'x64' else 'aarch64') + '-unknown-linux-gnu'
-        archives = []
-        for package in ('rustc', 'cargo', 'rust-std'):
-            item = data.get('pkg', {}).get(package, {}).get('target', {}).get(triple, {})
-            if not item.get('available'):
-                raise ValueError(f'Rust {version} has no {package} artifact for {triple}.')
-            archives.append(artifact(item.get('xz_url', ''), item.get('xz_hash'), 'sha256', component=package))
-    else:
+    adapter = environment_adapters.get(capability)
+    if adapter.resolver is None:
         raise ValueError(f'No trusted artifact provider exists for {capability}.')
+    url, archives = adapter.resolver(version, target, read, artifact)
     return dict(provider_version=PROVIDER_VERSION, capability=capability,
                 version=version, target=target, metadata=url, archives=archives)
 
@@ -157,29 +132,27 @@ def unpack(archive, destination, limit=EXTRACT_LIMIT):
 
 
 def probe(capability, root, run=subprocess.run):
-    executable = root / ('dotnet' if capability == 'dotnet-sdk' else 'bin/rustc')
-    arguments = ['--list-sdks'] if capability == 'dotnet-sdk' else ['-Vv']
-    environment = dict(os.environ, DOTNET_ROOT=str(root), DOTNET_MULTILEVEL_LOOKUP='0')
-    result = run([str(executable), *arguments], cwd=root, env=environment,
+    adapter = environment_adapters.get(capability)
+    executable = root / adapter.executable
+    environment = dict(os.environ, **adapter.environment(executable))
+    environment['PATH'] = str(executable.parent) + os.pathsep + environment.get('PATH', '')
+    result = run([str(executable), *adapter.inventory_arguments], cwd=root, env=environment,
                  capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise ValueError('The installed SDK probe failed; inspect native host dependencies. '
                          + (result.stderr or '')[-600:])
     output = result.stdout[:16_000]
-    versions = re.findall(r'^([0-9]+\.[0-9]+\.[0-9]+)\s+\[', output, re.MULTILINE) if capability == 'dotnet-sdk' else re.findall(
-        r'^release: ([0-9]+\.[0-9]+\.[0-9]+)$', output, re.MULTILINE)
+    versions = re.findall(adapter.version_pattern, output, re.MULTILINE)
     if not versions:
         raise ValueError('The installed SDK did not report an identifiable version.')
     measured = dict(executable=str(executable), versions=versions, output=output)
-    if capability == 'rust-toolchain':
-        cargo = run([str(root / 'bin/cargo'), '--version'], cwd=root, env=environment,
-                    capture_output=True, text=True, timeout=30)
-        cargo_version = re.match(r'cargo ([0-9]+\.[0-9]+\.[0-9]+)\b', cargo.stdout)
-        if cargo.returncode or not cargo_version:
-            raise ValueError('The installed Cargo probe failed; the Rust SDK is incomplete.')
-        # Cargo and rustc patch versions need not match. Both must be usable,
-        # and their downloaded artifacts already have distinct publisher hashes.
-        measured['cargo_version'] = cargo_version[1]
+    if adapter.companion:
+        companion = run([adapter.command(executable, adapter.companion), '--version'],
+                        cwd=root, env=environment, capture_output=True, text=True, timeout=30)
+        match = re.search(adapter.companion_pattern, companion.stdout or '')
+        if companion.returncode or not match:
+            raise ValueError('The installed ' + ('Cargo' if adapter.companion == 'cargo' else adapter.companion) + ' probe failed; the SDK is incomplete.')
+        measured[adapter.companion + '_version'] = match[1]
     return measured
 
 
@@ -233,21 +206,10 @@ def acquire(specification, store, fetch=download, verify=probe, cancelled=lambda
                     digest.update(chunk)
             if digest.hexdigest() != entry['hash']:
                 raise ValueError('SDK archive failed its publisher digest check.')
-            if specification['capability'] == 'dotnet-sdk':
-                unpacked_bytes += unpack(archive, prefix, EXTRACT_LIMIT - unpacked_bytes)
-            else:
-                extracted = stage / f'unpacked-{index}'
-                extracted.mkdir()
-                unpacked_bytes += unpack(archive, extracted, EXTRACT_LIMIT - unpacked_bytes)
-                roots = list(extracted.iterdir())
-                if len(roots) != 1 or not roots[0].is_dir():
-                    raise ValueError('Rust distribution has an unsupported archive layout.')
-                components = (roots[0] / 'components').read_text(encoding='utf-8').splitlines()
-                for component in components:
-                    if not re.fullmatch(r'[A-Za-z0-9_-]+', component):
-                        raise ValueError('Rust distribution names an invalid component.')
-                    shutil.copytree(roots[0] / component, prefix, dirs_exist_ok=True,
-                                    ignore=shutil.ignore_patterns('manifest.in'))
+            adapter = environment_adapters.get(specification['capability'])
+            if adapter.unpacker is None:
+                raise ValueError('No trusted archive layout is registered for this SDK.')
+            unpacked_bytes += adapter.unpacker(archive, prefix, stage, index, EXTRACT_LIMIT - unpacked_bytes, unpack)
         measured = verify(specification['capability'], prefix)
         if specification['version'] not in measured['versions']:
             raise ValueError('The acquired SDK does not report the requested version.')

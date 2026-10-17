@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / 'web/gateway'))
 import environment_plan
 import environment_policy
 import environment_launch
+import environment_dispatch
 from environment_policy import EnvironmentPolicies
 from environment_preparation import EnvironmentPreparation
 from project_analysis import ProjectAnalysis
@@ -50,6 +51,21 @@ class ClaimTests(unittest.TestCase):
             self.assertTrue(evidence[0]['matches'])
             self.assertEqual(evidence[1]['name'], 'cargo')
             self.assertFalse(evidence[1]['matches'])
+
+    def test_validation_scope_blockers_gate_publication_separately(self):
+        base = dict(toolchains=[dict(name='dotnet-sdk', required='8.0.100', component='Api',
+                                     executables=['/sdk/dotnet'])],
+                    blockers=[], validation_blockers=[], plan_digest='plan',
+                    recipes=[dict(id='Api:0:build')], declarations={}, lockfiles={}, checks=[])
+        evidence = dict(policy_changes=[], plan_digest='plan', required_checks_verified=True,
+                        checks=[dict(id='Api:0:build', status='passed', exit_code=0)],
+                        toolchain_evidence=[dict(name='dotnet-sdk', component='Api', actual='8.0.100',
+                                                 matches=True, path='/sdk/dotnet')])
+        for policy, expected in ((base, True),
+                                 (dict(base, validation_blockers=['No approved validation recipes.']), False),
+                                 (dict(base, blockers=['Api: no prepared binding.']), False)):
+            self.assertEqual(toolchain_policy.evidence_matches(policy, dict(evidence,
+                policy_digest=toolchain_policy.digest(policy))), expected)
 
     def test_reported_mismatches_are_claims_and_missing_claims_are_not_passes(self):
         frozen = {'policy': {'toolchains': [dict(name='dotnet-sdk', component='Api', required='8.0.100')]}}
@@ -94,6 +110,36 @@ class LaunchBindingTests(unittest.TestCase):
             self.assertEqual(record['selection'], 'component_dispatch')
             self.assertEqual(record['environment']['DOTNET_ROOT'], '')
             self.assertNotIn(str(Path(folder) / 'other'), record['environment']['PATH'])
+
+    def test_non_conflicting_capability_keeps_its_direct_sdk(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            frozen = self.frozen(root / 'sdk' / 'dotnet')
+            frozen['policy']['toolchains'].append(dict(name='dotnet-sdk', required='9.0.100',
+                component='Other', cwd='Other', executables=[str(root / 'other' / 'dotnet')]))
+            rustc = root / 'rust' / 'bin' / 'rustc'
+            frozen['policy']['toolchains'].append(dict(name='rust-toolchain', required='1.85.1',
+                component='Crate', cwd='Crate', executables=[str(rustc)]))
+            record = environment_launch.binding(frozen, root / 'caches')
+            self.assertEqual(record['selection'], 'component_dispatch')
+            self.assertEqual(record['environment']['DOTNET_ROOT'], '')
+            self.assertEqual(record['environment']['RUSTC'], str(rustc))
+            self.assertIn(str(rustc.parent), record['environment']['PATH'].split(environment_launch.os.pathsep))
+            self.assertNotIn(str(root / 'other'), record['environment']['PATH'])
+            self.assertNotIn(str(root / 'sdk'), record['environment']['PATH'])
+
+    def test_dispatcher_only_shims_capabilities_that_conflict(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            frozen = self.frozen(root / 'sdk' / 'dotnet')
+            frozen['policy']['toolchains'].append(dict(name='dotnet-sdk', required='9.0.100',
+                component='Other', cwd='Other', executables=[str(root / 'other' / 'dotnet')]))
+            frozen['policy']['toolchains'].append(dict(name='rust-toolchain', required='1.85.1',
+                component='Crate', cwd='Crate', executables=[str(root / 'rust' / 'bin' / 'rustc')]))
+            launchers, _ = environment_dispatch.install(frozen['policy'], root, root / 'caches')
+            self.assertTrue((launchers / 'dotnet').exists())
+            self.assertFalse((launchers / 'rustc').exists())
+            self.assertFalse((launchers / 'cargo').exists())
 
     def test_binding_uses_daemon_tab_creation_and_only_closes_its_original_pane(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -324,6 +370,30 @@ class GatewayPolicyTests(unittest.TestCase):
         folder.mkdir(parents=True)
         runner._execute(run, folder)
         return run
+
+    def test_validation_scope_blockers_do_not_read_as_environment_failures(self):
+        plan = self.service.plan('app', self.baseline)
+        plan = self.service.select(plan['digest'], [], 'test_admin')
+        job = self.service.prepare(plan['digest'])
+        self.service.tick()
+        self.assertEqual(self.service.store.job(job['id'])['state'], 'ready')
+        organizations = OrganizationStore.__new__(OrganizationStore)
+        organizations.projects = self.projects
+        frozen = organizations.frozen_policy({'source_project': str(self.repo)}, {})
+        self.assertEqual(frozen['policy']['blockers'], [])
+        self.assertTrue(frozen['policy']['validation_blockers'])
+        self.assertNotIn('Environment blocker', policy_guidance(frozen))
+        self.assertFalse(self.contributions.policy_matches({}, {}))
+        runner = ValidationRuns(self.projects, lambda _: None, root=self.root / 'validation')
+        run = dict(id='a' * 32, event_id='b' * 64, repository='app', path=str(self.repo),
+                   target=self.baseline, started_at='test', actor='test',
+                   frozen_plan_digest=frozen['plan_digest'], frozen_policy_digest=frozen['digest'])
+        folder = runner.root / run['id']
+        folder.mkdir(parents=True)
+        runner._execute(run, folder)
+        self.assertEqual(run['state'], 'error')
+        self.assertEqual(run['blocker'], 'validation_unapproved')
+        self.assertIn('No approved validation recipes selected', run['note'])
 
     def test_unprepared_dotnet_cannot_publish_even_without_a_flutter_declaration(self):
         policy = self.policies.resolve(self.repo)

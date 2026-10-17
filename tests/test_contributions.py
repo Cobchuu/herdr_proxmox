@@ -31,6 +31,7 @@ class TaskBaseTests(unittest.TestCase):
         policy = contributions.resolved_automation_policy({'auto_sdk': True})
         self.assertIs(policy['auto_prepare'], False)
         self.assertIs(policy['auto_prepare_checks'], False)
+        self.assertIs(policy['auto_prepare_agent'], False)
     @patch('project_git.configured_base', return_value=None)
     @patch('project_git.git')
     def test_origin_default_is_resolved_to_explicit_branch(self, git, configured):

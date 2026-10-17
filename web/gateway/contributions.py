@@ -81,7 +81,7 @@ AUTOMATION_DEFAULTS = dict(auto_queue_proposals=False, max_per_meeting=1, max_op
                            # manual, so capture, validation and publication were
                            # clicked through one task at a time.
                            auto_capture=False, auto_validate=False, auto_publish=False,
-                           auto_prepare=False, auto_prepare_checks=False)
+                           auto_prepare=False, auto_prepare_checks=False, auto_prepare_agent=False)
 AUTOMATION_LIMITS = (('max_per_meeting', 0, 10), ('max_open_per_agent', 0, 50),
                      ('max_follow_up_depth', 0, 10), ('daily_cap', 0, 100),
                      ('max_active_sessions', 0, 50), ('max_active_meetings', 0, 10),
@@ -1282,12 +1282,12 @@ class Contributions:
             was_enabled = policy['auto_queue_proposals']
             previous = dict(policy)
             for key in ('auto_queue_proposals', 'paused', 'reap_finished_sessions', 'reap_orphaned_panes',
-                        'auto_capture', 'auto_validate', 'auto_publish', 'auto_prepare', 'auto_prepare_checks'):
+                        'auto_capture', 'auto_validate', 'auto_publish', 'auto_prepare', 'auto_prepare_checks', 'auto_prepare_agent'):
                 if key in body:
                     if not isinstance(body[key], bool):
                         raise FieldValidationError('Invalid automation policy value.', [key])
                     policy[key] = body[key]
-            if any(policy[key] != previous[key] for key in ('auto_prepare', 'auto_prepare_checks')):
+            if any(policy[key] != previous[key] for key in ('auto_prepare', 'auto_prepare_checks', 'auto_prepare_agent')):
                 policy['auto_prepare_revision'] = uuid.uuid4().hex
             if 'auto_validate' in body and 'auto_capture' not in body:
                 policy['auto_capture'] = body['auto_validate']  # Legacy combined control.

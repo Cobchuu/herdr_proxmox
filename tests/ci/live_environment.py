@@ -132,7 +132,7 @@ def runtime(root):
         os.environ.update(previous)
 
 
-def qualify(root, command, name, files):
+def qualify(root, command, name, files, assisted=False):
     from types import SimpleNamespace
     projects = root / 'projects'
     projects.mkdir(exist_ok=True)
@@ -150,7 +150,7 @@ def qualify(root, command, name, files):
     preparation = EnvironmentPreparation(ProjectAnalysis(projects), root / (name + '-plans.sqlite3'), root / 'sdks')
     organizations = OrganizationStore(root / (name + '-org.sqlite3'), projects, command)
     organizations.contributions = SimpleNamespace(policy=lambda _: dict(auto_prepare=True,
-        auto_prepare_checks=True, auto_prepare_revision='release-qualification'))
+        auto_prepare_checks=True, auto_prepare_agent=assisted, auto_prepare_revision='release-qualification'))
     admission = EnvironmentAdmission(organizations, preparation)
     organizations.environment_admission = admission
     preparation.admission = admission
@@ -164,6 +164,28 @@ def qualify(root, command, name, files):
         identity = organizations.action('launch', dict(request_id='qualification-launch', organization_id=org, profile_id=profile))['id']
         organizations.wait_idle(timeout=20)
         admission.tick()
+        if assisted:
+            waiter = preparation.store.waiter(identity)
+            helper = preparation.store.assistance(waiter['id'])
+            if not helper or helper['state'] != 'monitoring':
+                raise RuntimeError('The dedicated preparation agent was not admitted: ' + json.dumps(dict(helper=helper, jobs=organizations.job_records())))
+            # The credential-free CLI stub never installs software. This fixture
+            # qualifies the real daemon protocol, not Node distribution trust.
+            allocation = organizations.path.parent / 'environment-assistance' / helper['id']
+            source = preparation.store.get(helper['plan_digest'])
+            tools = []
+            for index, requirement in enumerate(source['requirements']):
+                if requirement.get('preparation_method') != 'agent':
+                    continue
+                prefix = allocation / f'sdk-{index}' / 'bin'
+                prefix.mkdir()
+                for tool, version in (('node', 'v20.19.0'), ('npm', '10.8.0')):
+                    executable = prefix / tool
+                    executable.write_text('#!/bin/sh\necho ' + version + '\n')
+                    executable.chmod(0o755)
+                tools.append(dict(index=index, provenance=dict(source='https://example.invalid/fixture', method='qualification fixture')))
+            (allocation / 'result.json').write_text(json.dumps(dict(token=helper['token'], plan_digest=source['digest'], tools=tools)))
+            admission.tick()
         preparation.tick()
         admission.tick()
         organizations.wait_idle(timeout=100)
@@ -188,7 +210,8 @@ def qualify(root, command, name, files):
         for invalid in (dict(run, plan_digest='wrong'), dict(run, toolchain_evidence=[])):
             if contribution.policy_matches(task, invalid):
                 raise RuntimeError('Publication accepted missing or mismatched environment evidence.')
-        print(name + ': real daemon admission, SDK inheritance, native validation and evidence gate passed', flush=True)
+        detail = 'real daemon assisted adoption and binding with fixture SDK passed' if assisted else 'real daemon admission, SDK inheritance, native validation and evidence gate passed'
+        print(name + ': ' + detail, flush=True)
     finally:
         organizations.close()
         toolchain_policy.PROJECT_RESOLVER = previous
@@ -206,6 +229,8 @@ def main():
                 'global.json': '{"sdk":{"version":"8.0.100","rollForward":"disable"}}',
                 'Api/App.csproj': '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
                 'Api/App.cs': 'public class Example {}'})
+            qualify(root, command, 'node-protocol', {
+                'package.json': json.dumps(dict(engines=dict(node='>=20 <23'), scripts=dict(test='echo fixture')))}, assisted=True)
             qualify(root, command, 'rust', {
                 'rust-toolchain.toml': '[toolchain]\nchannel="1.85.1"\nprofile="minimal"\n',
                 'Cargo.toml': '[package]\nname="qualification"\nversion="0.1.0"\nedition="2021"\nrust-version="1.70"\n',

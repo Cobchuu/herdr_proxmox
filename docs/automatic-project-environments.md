@@ -5,16 +5,20 @@ automatic launch/validation path below remains the target, not a shipped claim.
 
 Implemented now:
 
+- A shared SDK adapter contract and opt-in Node.js/npm agent-assisted adoption.
+  See [Agent-assisted environments](agent-assisted-environments.md) for the
+  permission boundary, lifecycle, provenance claims and current limitations.
+
 - Immutable, evidence-bearing plans per component, with persisted identities.
   Different components can select different versions of one SDK.
 - Opt-in organization **Prepare supported project SDKs before agent launch**
   admits launches before any runtime pane exists. Planning and downloads run on
   the preparation lane, not organization launch workers. The starting commit,
   permission revision and intended execution are recorded before work is queued.
-- **Approve native .NET and Rust build/test recipes automatically** is a separate
+- **Approve supported project build/test recipes automatically** is a separate
   opt-in. It selects only the adapter's bounded native build/test proposals.
-  Neither repository-declared commands nor the old `auto_sdk` setting imply this
-  permission. Without check approval, SDK preparation can succeed while candidate
+  Node's declared build/test scripts are also eligible under this separate
+  permission. Neither declarations alone nor the old `auto_sdk` setting imply it. Without check approval, SDK preparation can succeed while candidate
   validation still explicitly requires check selection.
 - Explicit administrator actions in both project explorer dashboards:
   **Plan environment**, then **Prepare SDKs**, with progress, cancellation and

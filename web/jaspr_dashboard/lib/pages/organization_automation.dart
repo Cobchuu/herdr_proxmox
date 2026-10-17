@@ -272,7 +272,9 @@ const automationLabels = <String, String>{
   'auto_publish': 'Publish validated tasks automatically',
   'auto_prepare': 'Prepare supported project SDKs before agent launch',
   'auto_prepare_checks':
-      'Approve native .NET and Rust build/test recipes automatically',
+      'Approve supported project build/test recipes automatically',
+  'auto_prepare_agent':
+      'Allow a preparation agent to install Node.js when needed',
   'max_per_meeting': 'Max automatic tasks per meeting',
   'max_open_per_agent': 'Max open tasks per agent',
   'max_follow_up_depth': 'Max follow-up depth',
@@ -294,6 +296,7 @@ Future<Json?> editOrganizationAutomation(
     'auto_publish': false,
     'auto_prepare': false,
     'auto_prepare_checks': false,
+    'auto_prepare_agent': false,
     'reap_finished_sessions': false,
     'reap_orphaned_panes': false,
     'max_per_meeting': 1,
@@ -337,10 +340,11 @@ Future<Json?> editOrganizationAutomation(
       'auto_publish',
       'auto_prepare',
       'auto_prepare_checks',
+      'auto_prepare_agent',
     },
     extra: (v) => [
       note(
-        'SDK preparation uses trusted providers and waits without starting an agent. Native check approval is separate: build and test commands can restore dependencies and execute project code. Unsupported requirements stop the launch; disabling preparation does not silently resume a waiting launch.',
+        'Managed SDK preparation uses trusted providers. Agent-assisted preparation is a separate opt-in for Node.js: a dedicated session can download and run installers in its allocation, and its provenance remains an unverified claim. This shares the service account and is not a sandbox. Native check approval is separate: build and test commands can restore dependencies and execute project code. Unsupported requirements stop the launch; disabling preparation does not silently resume a waiting launch.',
       ),
       note(
         'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Capture checks the agent receipt and committed candidate without a build service. Automatic validation uses the current build executor. Gateway builds stop on restart; install the durable build service under Builds & deployments for restart resilience. Automatic publication requires that service and automatic validation.',

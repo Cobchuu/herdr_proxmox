@@ -270,9 +270,9 @@ class ValidationRuns:
                                  + ', '.join(run['policy_changes']))
             # Probe the real executables before running anything. A declared pin
             # cannot prove which SDK runs, so verification measures it.
-            if policy.get('blockers'):
-                run['blocker'] = 'environment_unavailable'
-                raise ValueError('; '.join(policy['blockers']))
+            if policy.get('blockers') or policy.get('validation_blockers'):
+                run['blocker'] = 'environment_unavailable' if policy.get('blockers') else 'validation_unapproved'
+                raise ValueError('; '.join([*policy.get('blockers', []), *policy.get('validation_blockers', [])]))
             probed = toolchain_policy.verify(policy, root=worktree)
             run['toolchain_evidence'] = probed
             mismatch = [item for item in probed if not item['matches']]

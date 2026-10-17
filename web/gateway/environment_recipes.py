@@ -35,3 +35,17 @@ def select(plan, identifiers, actor):
     if set(identifiers) - proposals.keys():
         raise ValueError('A selected check is not a proposal in this committed plan.')
     return [dict(proposals[identifier], selected_by=actor) for identifier in identifiers]
+
+
+def automatic(plan):
+    """Only named build/test entry points, under separate project-code permission."""
+    found = []
+    for item in plan.get('check_candidates', []):
+        arguments = item['arguments']
+        conventional = (item['source'] == 'convention' and arguments[0] in ('dotnet', 'cargo')
+                        and len(arguments) in (2, 3) and arguments[1] in ('build', 'test'))
+        node = (item['source'] == 'package.json#scripts' and arguments in (
+            ['npm', 'run', 'build'], ['npm', 'run', 'test']))
+        if conventional or node:
+            found.append(item['id'])
+    return found[:20]

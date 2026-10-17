@@ -384,14 +384,20 @@ def bindings(plan, receipt=None):
             entry = dict(name=item['capability'], label=item['label'], required=item.get('version') or item.get('constraint') or 'unresolved',
                          component=component, cwd=component, declared_by=declared_by,
                          rule=dict(evidence=item.get('evidence', []), override=item.get('override')),
+                         adapter_version=item.get('adapter_version', 1),
                          executables=[executable] if executable else [], source='prepared' if executable else 'unavailable')
-            if executable and item['capability'] == 'rust-toolchain':
-                cargo_version = matches[0]['probe'].get('cargo_version')
-                if cargo_version:
-                    entry['companions'] = [dict(name='cargo', required=cargo_version,
-                        executables=[str(Path(executable).with_name('cargo'))], component=component)]
-                else:
-                    blockers.append(f'{component}: the Rust receipt has no Cargo version evidence; prepare again.')
+            if executable:
+                import environment_adapters
+                adapter = environment_adapters.get(item['capability'])
+                if item.get('artifact', {}).get('provider') == 'agent_adopted':
+                    entry['adoption'] = item['artifact']
+                if adapter.companion:
+                    version = matches[0]['probe'].get(adapter.companion + '_version')
+                    if version:
+                        entry['companions'] = [dict(name=adapter.companion, required=version,
+                            executables=[adapter.command(executable, adapter.companion)], component=component)]
+                    else:
+                        blockers.append(f'{component}: the receipt has no {adapter.companion} version evidence; prepare again.')
             entries.append(entry)
             if not executable:
                 record = unbound.setdefault(item['capability'], dict(item=item, components=[]))
@@ -401,8 +407,9 @@ def bindings(plan, receipt=None):
     # under forty copies of itself.
     for capability in sorted(unbound):
         blockers.append(_unbound(unbound[capability]['item'], unbound[capability]['components']))
-    return dict(toolchains=entries, blockers=blockers, plan_digest=plan['digest'],
-                checks=[], declarations={}, lockfiles={}, recipes=plan.get('selected_checks') or [])
+    return dict(toolchains=entries, blockers=blockers, validation_blockers=[],
+                plan_digest=plan['digest'], checks=[], declarations={}, lockfiles={},
+                recipes=plan.get('selected_checks') or [])
 
 
 def _unbound(item, components):

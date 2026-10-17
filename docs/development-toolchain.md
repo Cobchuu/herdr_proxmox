@@ -236,29 +236,24 @@ work and the real installation qualification command.
 
 ## Project requirements are a separate scope
 
-Herdr's build stack is not evidence about a managed project. A project states
-its own requirement in the project explorer, on its repository root, under
-**Project toolchains**: a tool name (`php`, `flutter`, `go`, …) and optionally a
-version the project declares. Herdr reports what that project needs and how the
-host stands against it — ready, not installed, version mismatch or unreadable —
-by locating the executable and asking it for its real version.
+Project discovery reads repository evidence without requiring an operator to name
+an SDK. The release catalog describes Herdr's own installer capability, not what
+every hosted project needs. Overrides use the same constraint shape as discovery.
+The project explorer reports requirements, unresolved evidence, host observations
+and explicit preparation/activation blockers separately.
 
-Discovery and installation capability stay apart. A project may declare a tool
-the release ships no installer for; that is reported as *this release ships no
-installer for X* with the requirement still visible, and nothing is installed.
-`GET /api/projects/toolchains` returns the per-project findings alongside the
-release-scoped catalogue so a client cannot present one as the other.
-`POST /api/projects/toolchain` (administrator) sets or clears one declaration;
-an empty tool clears it.
+The shared `environment_adapters.py` contract supplies provider resolution,
+archive layout, probes, command names and activation variables. Managed .NET and
+Rust acquisition remains publisher-backed. Node.js/npm can instead be prepared by
+a dedicated agent under separate administrator permission, then adopted into a
+new immutable plan. Reported provenance remains an unverified claim; gateway
+inspection, tree fingerprints and contextual probes establish the recorded bytes
+and version evidence. See [Agent-assisted environments](agent-assisted-environments.md).
 
-Automatic provisioning consumes a verified identity. The Integration coordinator
-keeps only the policy — whether a build blocked on `missing_toolchain` should
-queue a request — and the tool it queues is the one the blocked project
-declared, re-checked against the release catalog before any request is written.
-A worker reports a blocker *category*, never a tool, so a build with no
-declaration, or one naming a tool the release cannot provision, records a
-specific reason and installs nothing. An install request must always name its
-toolchain; the gateway refuses a bare request rather than inferring it.
+Automatic project launch waits for its exact prepared bindings. Unsupported
+capabilities remain blockers; discovery does not grant installation or project
+code execution. The old release-scoped SDK request chain above remains limited
+to installers shipped by the release and never infers a tool from a bare request.
 
 ## What an agent does with a missing tool
 

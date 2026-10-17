@@ -16,6 +16,7 @@ import tempfile
 from contextlib import ExitStack
 
 import environment_artifacts
+import environment_adapters
 import environment_capabilities
 import environment_plan
 import environment_recipes
@@ -59,6 +60,7 @@ class EnvironmentPreparation:
         plan['selected_checks'] = []
         specifications = {}
         for item in plan['requirements']:
+            item['adapter_version'] = environment_adapters.ADAPTERS[item['capability']].version if item['capability'] in environment_adapters.ADAPTERS else None
             item.update(activation='unavailable',
                         activation_reason='This capability has no managed activation adapter yet.')
             if item['capability'] not in environment_capabilities.MANAGED:
@@ -108,6 +110,23 @@ class EnvironmentPreparation:
         plan['digest'] = environment_plan.digest(plan)
         self.store.save(plan)
         return plan
+
+    def assisted_plan(self, plan):
+        """Offer supported adoption contracts, never silently replace a managed provider."""
+        import copy
+        assisted = copy.deepcopy(plan)
+        for item in assisted['requirements']:
+            try:
+                adapter = environment_adapters.get(item['capability'])
+            except ValueError:
+                continue
+            if adapter.assisted and not item.get('conflicts') and (item.get('constraint') or any(
+                    entry.get('constraint') or entry.get('selected') for entry in item['evidence'])):
+                item.update(preparation_method='agent', activation='awaiting_adoption',
+                            activation_reason='A separately authorized preparation agent must submit an SDK for adoption.')
+        assisted['digest'] = environment_plan.digest(assisted)
+        self.store.save(assisted)
+        return assisted
 
     def select(self, digest, identifiers, actor):
         plan = self.store.get(digest)
@@ -221,11 +240,17 @@ class EnvironmentPreparation:
             verify_source()
             acquired = {}
             for item in plan['requirements']:
+                if item.get('adapter_version', 1) != environment_adapters.get(item['capability']).version:
+                    raise ValueError('The SDK adapter contract changed; create a new plan.')
                 if cancelled():
                     raise ValueError('Environment preparation was cancelled.')
                 key = environment_plan.canonical(item['artifact'])
                 if key not in acquired:
-                    acquired[key] = self.acquire(item['artifact'], self.root, cancelled=cancelled)
+                    if item['artifact'].get('provider') == 'agent_adopted':
+                        import environment_adoption
+                        acquired[key] = environment_adoption.receipt(item['artifact'], self.root, cancelled=cancelled)
+                    else:
+                        acquired[key] = self.acquire(item['artifact'], self.root, cancelled=cancelled)
                 receipt = acquired[key]
                 # Downloads can take minutes. Check again before reading cwd-
                 # dependent SDK configuration, and before certifying the result.
@@ -233,10 +258,10 @@ class EnvironmentPreparation:
                 for component in item['components']:
                     cwd = checkout / component
                     executable = receipt['probe']['executable']
-                    sdk_root = Path(executable).parent if item['capability'] == 'dotnet-sdk' else Path(executable).parent.parent
-                    arguments = ['--version'] if item['capability'] == 'dotnet-sdk' else ['-Vv']
-                    environment = dict(os.environ, PATH=str(Path(executable).parent) + os.pathsep + os.environ.get('PATH', ''),
-                        DOTNET_ROOT=str(sdk_root), DOTNET_MULTILEVEL_LOOKUP='0')
+                    adapter = environment_adapters.get(item['capability'])
+                    arguments = adapter.context_arguments
+                    environment = dict(os.environ, **adapter.environment(executable))
+                    environment['PATH'] = str(Path(executable).parent) + os.pathsep + environment.get('PATH', '')
                     measured = subprocess.run([executable, *arguments], cwd=cwd, env=environment,
                         capture_output=True, text=True, timeout=30)
                     if measured.returncode or item['version'] not in re.findall(r'[0-9]+\.[0-9]+\.[0-9]+', measured.stdout):
@@ -263,7 +288,7 @@ class EnvironmentPreparation:
 def selection_files(plan):
     found = set()
     for item in plan['requirements']:
-        names = ('global.json',) if item.get('capability') == 'dotnet-sdk' else ('rust-toolchain', 'rust-toolchain.toml')
+        names = environment_adapters.get(item['capability']).selection_files
         for component in item.get('components', []):
             directory = Path(component)
             if directory.is_absolute() or '..' in directory.parts:

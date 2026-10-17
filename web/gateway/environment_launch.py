@@ -13,6 +13,8 @@ import sys
 import time
 import uuid
 
+import environment_adapters
+import environment_dispatch
 import toolchain_policy
 from herdr_ids import is_pane_id
 
@@ -31,23 +33,20 @@ def binding(frozen, caches):
     identity = dict(plan_digest=policy['plan_digest'], policy_digest=frozen['digest'])
     if not entries or any(not entry.get('executables') for entry in entries):
         return dict(identity, state='unavailable', reason='The approved SDK bindings are not prepared.')
-    selected = {}
-    dispatch = False
-    for entry in entries:
-        selection = (entry['required'], tuple(entry['executables']))
-        previous = selected.setdefault(entry['name'], selection)
-        if previous != selection:
-            dispatch = True
+    conflicting = environment_dispatch.conflicting(entries)
     base = {'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}
-    environment = (dict(base, DOTNET_ROOT='', RUSTC='', DOTNET_MULTILEVEL_LOOKUP='0') if dispatch else
-                   toolchain_policy.environment(policy, base=base))
+    direct = [entry for entry in entries if entry['name'] not in conflicting]
+    environment = (toolchain_policy.environment(dict(policy, toolchains=direct), base=base)
+                   if direct else dict(base))
+    for name in conflicting:
+        environment.update(environment_adapters.get(name).dispatch_variables)
     # These caches belong to this execution, never to the shared SDK tree.
     caches = Path(caches).absolute()
     environment.update(HERDR_ENVIRONMENT_PLAN=policy['plan_digest'],
                        CARGO_HOME=str(caches / 'cargo'), DOTNET_CLI_HOME=str(caches / 'dotnet'),
                        DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1')
     return dict(identity, state='requested', mechanism='herdr_tab_env',
-                selection='component_dispatch' if dispatch else 'direct', environment=environment)
+                selection='component_dispatch' if conflicting else 'direct', environment=environment)
 
 
 def configure(store, job, frozen, pane, workspace):
@@ -75,7 +74,6 @@ def configure(store, job, frozen, pane, workspace):
         (caches / name).mkdir(parents=True, exist_ok=True, mode=0o700)
     checkout = job.get('worktree_path') or job.get('source_project') or frozen['checkout']
     if record['selection'] == 'component_dispatch':
-        import environment_dispatch
         launchers, digest = environment_dispatch.install(frozen['policy'], checkout, caches)
         record['environment']['PATH'] = str(launchers) + os.pathsep + record['environment']['PATH']
         record['dispatcher_digest'] = digest

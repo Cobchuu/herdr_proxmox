@@ -13,6 +13,12 @@ preparation record. Missing bindings become blockers, not an empty policy.
 
 Implemented and covered by gateway tests:
 
+- Acquisition, activation and dispatch consume one SDK adapter contract. The
+  opt-in Node preparation agent has a separate durable execution; adoption
+  snapshots and hashes its allocated SDK, independently probes it and records
+  provenance as a claim. It does not self-approve the plan or project checks.
+  See [Agent-assisted environments](agent-assisted-environments.md).
+
 - `bindings(plan, receipt)` carries per-component cwd, exact SDK paths and the
   frozen plan identity. Guidance includes those paths and any blockers; legacy
   Herdr self-build wording remains unchanged.

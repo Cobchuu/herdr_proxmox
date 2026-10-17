@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS environment_waiters (
  lease REAL NOT NULL DEFAULT 0, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS environment_waiters_queue ON environment_waiters(state, lease);
 CREATE INDEX IF NOT EXISTS environment_waiters_intent ON environment_waiters(json_extract(data,'$.intent.preparation_key'));
+CREATE TABLE IF NOT EXISTS environment_assistance (
+ id TEXT PRIMARY KEY, waiter_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, data TEXT NOT NULL);
 '''
 
 
@@ -227,6 +229,32 @@ class EnvironmentPlanStore:
                              "AND j.state IN ('queued','running','ready') ORDER BY w.rowid LIMIT 1",
                              (preparation_key,)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def assistance(self, waiter_id):
+        with closing(sqlite3.connect(self.path)) as db:
+            row = db.execute('SELECT data FROM environment_assistance WHERE waiter_id=?', (waiter_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def assist(self, waiter, owner, states, **fields):
+        """Fence bootstrap effects with the same lease as their waiting launch.
+
+        Starting/prompting are persisted before CLI calls. A crash there is
+        ambiguous and must never cause the preparation prompt to be replayed.
+        """
+        with closing(sqlite3.connect(self.path, timeout=10)) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute("SELECT 1 FROM environment_waiters WHERE id=? AND state='planning' AND owner=? AND lease>?",
+                              (waiter['id'], owner, time.time())).fetchone():
+                raise ValueError('Assisted preparation ownership expired.')
+            row = db.execute('SELECT data FROM environment_assistance WHERE waiter_id=?', (waiter['id'],)).fetchone()
+            previous = json.loads(row[0]) if row else None
+            if (previous['state'] if previous else None) not in states:
+                raise ValueError('Assisted preparation changed; inspect its recorded execution.')
+            data = dict(previous or dict(id=uuid.uuid4().hex, waiter_id=waiter['id'], created_at=_stamp()),
+                        **fields, updated_at=_stamp())
+            db.execute('INSERT INTO environment_assistance VALUES (?,?,?,?) ON CONFLICT(waiter_id) DO UPDATE SET state=excluded.state,data=excluded.data',
+                       (data['id'], waiter['id'], data['state'], json.dumps(data)))
+            return data
 
     def claim(self, owner, lease_seconds=120):
         with closing(sqlite3.connect(self.path, timeout=10)) as db, db:

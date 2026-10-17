@@ -153,6 +153,8 @@ class OrganizationStore:
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
                 if job['state'] in ('queued', 'running'):
+                    if job['kind'] == 'environment_preparation':
+                        continue  # Its durable assistance record reconciles observations; never replay input.
                     if (job['kind'] == 'launch' and job['state'] == 'queued'
                             and job.get('launch_stage') == 'environment_ready'):
                         continue  # Admission committed, but no external runtime call was made.
@@ -201,13 +203,16 @@ class OrganizationStore:
             if data.get('kind') == 'discussion' and data.get('state') in ('queued', 'waiting_for_members'):
                 data['state'] = 'pending_members'
             return data
-        if table == 'jobs' and not previous and item.get('kind') == 'launch' and self.contributions is not None:
+        if table == 'jobs' and not previous and item.get('kind') in ('launch', 'environment_preparation') and self.contributions is not None:
             from contributions import TERMINAL_EXECUTIONS
             policy = self.contributions.policy(item['organization_id'])
             jobs = [json.loads(row[0]) for row in db.execute('SELECT data FROM jobs WHERE organization_id=?', (item['organization_id'],))]
-            active = sum(j.get('kind') == 'launch' and j.get('state') not in TERMINAL_EXECUTIONS for j in jobs)
+            active = len({j.get('parent_execution_id', j['id']) for j in jobs
+                          if j.get('kind') in ('launch', 'environment_preparation') and j.get('state') not in TERMINAL_EXECUTIONS})
+            if item.get('parent_execution_id') in {j['id'] for j in jobs if j.get('state') == 'waiting_environment'}:
+                active -= 1  # The helper uses its parked parent's sequential slot.
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            started = sum(j.get('kind') == 'launch' and str(j.get('created_at') or '') > cutoff for j in jobs)
+            started = sum(j.get('kind') in ('launch', 'environment_preparation') and str(j.get('created_at') or '') > cutoff for j in jobs)
             limit = policy.get('max_active_sessions') or 0
             daily = policy.get('daily_session_cap') or 0
             if limit and active >= limit:
@@ -892,7 +897,7 @@ class OrganizationStore:
                         elif item.get('resolution', {}).get('decision') != decision:
                             raise ValueError('This delegation was already resolved differently.')
                     elif action == 'release':
-                        if item['kind'] != 'launch':
+                        if item['kind'] not in ('launch', 'environment_preparation'):
                             raise ValueError('Only run bindings can be released.')
                         # The binding itself is persona_sent; what matters is
                         # whether another job still owns it. A blocked or
@@ -900,7 +905,8 @@ class OrganizationStore:
                         # detached, which would leave it unfinalizable forever.
                         others = [json.loads(row['data']) for row in
                                   db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
-                        if any(j['id'] != item['id'] and reserves(j, item.get('profile_id'))
+                        if any(j['id'] != item['id'] and j.get('parent_execution_id') != item['id']
+                               and reserves(j, item.get('profile_id'))
                                for j in others):
                             raise ValueError('A discussion or meeting still owns this session; resolve it before releasing.')
                         item['state'] = 'released'
@@ -1682,6 +1688,8 @@ class OrganizationStore:
                 admitted = (job.get('environment_admission') or {}).get('state') == 'ready'
                 if admitted and self.environment_admission is not None:
                     continuation = self.environment_admission.store.waiter(job_id)
+                    if continuation is None:
+                        raise ValueError('The admitted environment continuation record is missing; inspect this execution.')
                     if self.environment_admission.current(continuation, starting=True) is None:
                         raise ValueError('The task has not recorded this admitted execution.')
                 frozen = job.get('toolchain_policy') if admitted else None

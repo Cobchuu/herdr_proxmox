@@ -29,7 +29,7 @@ class AdmissionStopped(ValueError):
 
 def permission(policy):
     return {key: policy.get(key, False if key != 'auto_prepare_revision' else '')
-            for key in ('auto_prepare', 'auto_prepare_checks', 'auto_prepare_revision')}
+            for key in ('auto_prepare', 'auto_prepare_checks', 'auto_prepare_agent', 'auto_prepare_revision')}
 
 
 class EnvironmentAdmission:
@@ -40,6 +40,8 @@ class EnvironmentAdmission:
         self.policies = EnvironmentPolicies(organizations.projects, self.store)
         self.owner = uuid.uuid4().hex
         self.scheduled = set()
+        from environment_assistance import EnvironmentAssistance
+        self.assistance = EnvironmentAssistance(self)
 
     def policy(self, organization):
         contributions = self.organizations.contributions
@@ -131,9 +133,20 @@ class EnvironmentAdmission:
 
     def fail(self, waiter, error):
         message = str(error)[:1000]
-        if self.store.settle_waiter(waiter['id'], self.owner, getattr(error, 'state', 'failed'), error=message):
-            self.update(waiter['identity'], ('waiting_environment',), state='needs_attention', error=message,
-                        progress='Environment preparation stopped before runtime launch')
+        if not self.store.settle_waiter(waiter['id'], self.owner, getattr(error, 'state', 'failed'), error=message):
+            return  # An expired worker must not close a new owner's session.
+        assistance = self.store.assistance(waiter['id'])
+        if assistance and assistance['state'] not in ('ready', 'adopting'):
+            try:
+                self.assistance.close(assistance)
+            except (ValueError, OSError):
+                pass  # An ambiguous binding must be inspected, never closed by guess.
+            try:
+                self.assistance.helper(assistance, state='needs_attention', error=message)
+            except ValueError:
+                pass  # Allocation may have failed before reserving a helper.
+        self.update(waiter['identity'], ('waiting_environment',), state='needs_attention', error=message,
+                    progress='Environment preparation stopped before runtime launch')
 
     def plan(self, waiter):
         job = self.current(waiter)
@@ -154,16 +167,25 @@ class EnvironmentAdmission:
             unknown = [reason for reason in policy.get('blockers', []) if reason.startswith('Unresolved project capability:')]
             if unknown:
                 raise ValueError('; '.join(unknown))
-            plan = self.preparation.plan(intent['project'], intent['revision'])
+            assistance = self.store.assistance(waiter['id'])
+            plan = self.store.get(assistance['plan_digest']) if assistance else self.preparation.plan(intent['project'], intent['revision'])
+            if not assistance and intent['policy'].get('auto_prepare_agent'):
+                plan = self.preparation.assisted_plan(plan)
             plan['verification_scope'] = 'isolated_commit'
             plan['automatic_policy'] = intent['policy']
             if intent['policy']['auto_prepare_checks']:
-                identifiers = [item['id'] for item in plan['check_candidates']
-                    if item['source'] == 'convention' and item['arguments'][0] in ('dotnet', 'cargo')
-                    and len(item['arguments']) in (2, 3) and item['arguments'][1] in ('build', 'test')]
+                identifiers = environment_recipes.automatic(plan)
                 plan['selected_checks'] = environment_recipes.select(plan, identifiers, 'organization_environment_policy')
             plan['digest'] = environment_plan.digest(plan)
             self.store.save(plan)
+            if any(item.get('activation') != 'available' and item.get('preparation_method') != 'agent' for item in plan['requirements']):
+                raise ValueError('Some requirements have no permitted preparation/activation adapter; resolve the plan blockers first.')
+            if any(item.get('preparation_method') == 'agent' and item.get('activation') != 'available' for item in plan['requirements']):
+                prepared = self.assistance.advance(waiter, job, plan)
+                if prepared is None:
+                    self.store.settle_waiter(waiter['id'], self.owner, 'pending')
+                    return
+                plan = prepared
         self.current(waiter)  # Permission/cancellation can change during metadata resolution.
         if self.preparation.stop.is_set():
             self.store.settle_waiter(waiter['id'], self.owner, 'pending')

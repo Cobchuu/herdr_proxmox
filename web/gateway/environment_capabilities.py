@@ -25,6 +25,7 @@ import re
 import sys
 
 import toolchain_policy
+import environment_adapters
 
 # The operations an adapter may advertise, in the order the pipeline uses them.
 # A requirement that only supports some of these is still usable; it simply
@@ -63,7 +64,7 @@ PROVIDERS = {
 # lives: a plan built without preparation still has to say whether preparing
 # could ever produce a binding, and telling an operator a capability has no
 # adapter when one exists would stop them from being helped at all.
-MANAGED = ('dotnet-sdk', 'rust-toolchain')
+MANAGED = environment_adapters.managed()
 
 # Base discovery/probe capabilities. Recognition alone never implies an
 # installer, dependency restore or a check recipe: MANAGED above is the only
@@ -146,6 +147,7 @@ def registry(capability):
     entry = dict(entry, id=capability, providers=list(providers(capability)))
     entry['acquirable'] = 'acquire' in entry['operations']
     entry['managed'] = capability in MANAGED
+    entry['assisted'] = bool(environment_adapters.ADAPTERS.get(capability) and environment_adapters.ADAPTERS[capability].assisted)
     entry['supported'] = any(supported(name) for name in entry['platforms'])
     if entry['managed']:
         import environment_artifacts

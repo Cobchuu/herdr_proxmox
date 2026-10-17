@@ -306,17 +306,27 @@ void main() {
       await click('Edit policy');
       expect(policyInput('auto_prepare').checked, isFalse);
       expect(policyInput('auto_prepare_checks').checked, isFalse);
+      expect(policyInput('auto_prepare_agent').checked, isFalse);
       policyInput('auto_prepare').click();
       await settle();
       await click('Save');
       expect(policy['auto_prepare'], isTrue);
       expect(policy['auto_prepare_checks'], isFalse);
+      expect(policy['auto_prepare_agent'], isFalse);
       await click('Edit policy');
       expect(policyInput('auto_prepare').checked, isTrue);
       expect(policyInput('auto_prepare_checks').checked, isFalse);
       policyInput('auto_prepare_checks').click();
       await settle();
       await click('Save');
+      expect(policy['auto_prepare'], isTrue);
+      expect(policy['auto_prepare_checks'], isTrue);
+      expect(policy['auto_prepare_agent'], isFalse);
+      await click('Edit policy');
+      policyInput('auto_prepare_agent').click();
+      await settle();
+      await click('Save');
+      expect(policy['auto_prepare_agent'], isTrue);
       expect(policy['auto_prepare'], isTrue);
       expect(policy['auto_prepare_checks'], isTrue);
     },

@@ -139,17 +139,17 @@ class EnvironmentPolicies:
         for recipe in policy['recipes']:
             bound = [entry for entry in policy['toolchains'] if entry['component'] == recipe['cwd']]
             arguments = list(recipe['arguments'])
-            capability = {'dotnet': 'dotnet-sdk', 'cargo': 'rust-toolchain'}.get(arguments[0])
+            import environment_adapters
+            capability = environment_adapters.commands().get(arguments[0])
             sdk = next((entry for entry in bound if entry['name'] == capability and entry['executables']), None)
             if not sdk:
-                policy['blockers'].append('No managed command binding for selected check ' + recipe['id'])
+                policy['validation_blockers'].append('No managed command binding for selected check ' + recipe['id'])
                 continue
-            arguments[0] = (str(Path(sdk['executables'][0]).with_name('cargo'))
-                            if capability == 'rust-toolchain' else sdk['executables'][0])
+            arguments[0] = environment_adapters.get(capability).command(sdk['executables'][0], arguments[0])
             executable_recipes.append(dict(recipe, arguments=arguments, bindings=bound))
         policy['recipes'] = executable_recipes
         if policy['toolchains'] and not policy['recipes']:
-            policy['blockers'].append('No approved validation recipes selected for this environment.')
+            policy['validation_blockers'].append('No approved validation recipes selected for this environment.')
         if report.get('coverage', {}).get('truncated'):
             policy['blockers'].append('Project discovery was truncated; approval requires complete evidence.')
         return policy

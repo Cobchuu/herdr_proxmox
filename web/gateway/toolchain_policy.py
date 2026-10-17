@@ -262,6 +262,12 @@ def verify(policy, run=None, root=None):
                 cwd = Path(root) / entry['cwd']
                 if cwd.resolve().is_relative_to(Path(root).resolve()) and Path(executable).is_file():
                     try:
+                        import environment_adapters
+                        if entry.get('adapter_version', 1) != environment_adapters.get(entry['name']).version:
+                            raise ValueError('The SDK adapter contract changed; prepare again.')
+                        if entry.get('adoption'):
+                            import environment_adoption
+                            environment_adoption.verify(entry['adoption'])
                         runner = subprocess.run if run is None else run
                         result = runner([executable, '--version'], cwd=cwd,
                             env=environment(dict(policy, toolchains=[entry])), capture_output=True,
@@ -301,10 +307,9 @@ def environment(policy, base=None):
             parent = str(Path(executable).parent)
             if parent not in directories:
                 directories.append(parent)
-        if entry.get('executables') and entry.get('name') == 'dotnet-sdk':
-            value.update(DOTNET_ROOT=str(Path(entry['executables'][0]).parent), DOTNET_MULTILEVEL_LOOKUP='0')
-        if entry.get('executables') and entry.get('name') == 'rust-toolchain':
-            value['RUSTC'] = entry['executables'][0]
+        if entry.get('executables') and entry.get('component') is not None:
+            import environment_adapters
+            value.update(environment_adapters.get(entry['name']).environment(entry['executables'][0]))
     if directories:
         value['PATH'] = os.pathsep.join([*directories, value.get('PATH', '')]).strip(os.pathsep)
     return value
@@ -312,7 +317,7 @@ def environment(policy, base=None):
 
 def evidence_matches(policy, evidence):
     """Require complete component evidence, not merely an all([]) or one SDK pass."""
-    if policy.get('blockers'):
+    if policy.get('blockers') or policy.get('validation_blockers'):
         return False
     if not policy['toolchains']:
         return True

@@ -12,9 +12,10 @@ import shlex
 import sys
 
 import environment_plan
+import environment_adapters
 import toolchain_policy
 
-TOOLS = {'dotnet': 'dotnet-sdk', 'rustc': 'rust-toolchain', 'cargo': 'rust-toolchain'}
+TOOLS = environment_adapters.commands()
 
 
 def choose(manifest, tool, cwd):
@@ -42,6 +43,19 @@ def choose(manifest, tool, cwd):
     return entries[0]
 
 
+def conflicting(toolchains):
+    """Capabilities whose components disagree, and so need cwd dispatch.
+
+    A capability with one agreed selection keeps its prepared directory on PATH.
+    Routing it through a shim would refuse ordinary commands from a checkout root
+    that is not itself a component, for a conflict it has nothing to do with.
+    """
+    selected = {}
+    for entry in toolchains:
+        selected.setdefault(entry['name'], set()).add((entry['required'], tuple(entry['executables'])))
+    return {name for name, values in selected.items() if len(values) != 1}
+
+
 def install(policy, checkout, caches):
     root = Path(caches) / 'dispatch'
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -51,8 +65,9 @@ def install(policy, checkout, caches):
     digest = hashlib.sha256(encoded.encode()).hexdigest()
     manifest = root / 'bindings.json'
     manifest.write_text(encoded, encoding='utf-8')
+    shimmed = conflicting(policy['toolchains'])
     for tool, capability in TOOLS.items():
-        if not any(entry['name'] == capability for entry in policy['toolchains']):
+        if capability not in shimmed:
             continue
         command = shlex.join([sys.executable, str(Path(__file__).absolute()), str(manifest), digest, tool])
         launcher = root / tool
@@ -69,11 +84,16 @@ def main(arguments):
         raise ValueError('The recorded component dispatcher failed its integrity check.')
     manifest = json.loads(encoded)
     entry = choose(manifest, tool, Path.cwd())
+    if entry.get('adapter_version', 1) != environment_adapters.get(entry['name']).version:
+        raise ValueError('The SDK adapter contract changed; prepare again.')
+    if entry.get('adoption'):
+        import environment_adoption
+        environment_adoption.verify(entry['adoption'])
     executable = entry['executables'][0]
-    if tool == 'cargo':
-        companions = [item for item in entry.get('companions', []) if item['name'] == 'cargo']
+    if tool != Path(executable).name:
+        companions = [item for item in entry.get('companions', []) if item['name'] == tool]
         if len(companions) != 1 or not companions[0].get('executables'):
-            raise ValueError('The Rust component has no verified Cargo binding.')
+            raise ValueError('The component has no verified companion binding for ' + tool)
         executable = companions[0]['executables'][0]
     environment = toolchain_policy.environment(dict(toolchains=[entry]))
     cache = Path(manifest['caches']) / hashlib.sha256(entry['component'].encode()).hexdigest()[:20]

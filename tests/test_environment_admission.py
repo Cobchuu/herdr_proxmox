@@ -246,3 +246,134 @@ class AdmissionTests(unittest.TestCase):
         self.admission.tick()
         self.store.wait_idle(timeout=20)
         self.assertEqual(self.row(identity)['state'], 'persona_sent', self.row(identity).get('error'))
+
+    def node_project(self):
+        for relative in ('global.json', 'Api/App.csproj', 'Api/Class.cs'):
+            (self.repo / relative).unlink()
+        (self.repo / 'package.json').write_text(json.dumps(dict(engines=dict(node='>=20 <23'), scripts=dict(test='echo passed'))))
+        self.baseline = self.commit()
+
+    def submit_node(self, identity, version='20.19.0'):
+        waiter = self.service.store.waiter(identity)
+        assistance = self.service.store.assistance(waiter['id'])
+        self.assertIsNotNone(assistance, self.row(identity).get('error'))
+        allocation = self.store.path.parent / 'environment-assistance' / assistance['id']
+        plan = self.service.store.get(assistance['plan_digest'])
+        tools = []
+        for index, item in enumerate(plan['requirements']):
+            if item.get('preparation_method') != 'agent':
+                continue
+            sdk = allocation / f'sdk-{index}' / 'bin'
+            sdk.mkdir()
+            for name, measured in (('node', 'v' + version), ('npm', '10.8.0')):
+                executable = sdk / name
+                executable.write_text('#!/bin/sh\necho ' + measured + '\n')
+                executable.chmod(0o755)
+            tools.append(dict(index=index, provenance=dict(source='https://example.invalid/node', method='fixture')))
+        (allocation / 'result.json').write_text(json.dumps(dict(token=assistance['token'], plan_digest=plan['digest'], tools=tools)))
+        return assistance
+
+    def test_node_requires_explicit_assistance_permission_and_never_falls_back_to_project_work(self):
+        self.node_project()
+        identity = self.launch()
+        self.admission.tick()
+        self.assertEqual(self.row(identity)['state'], 'needs_attention')
+        self.assertFalse(any(call[:2] == ['agent', 'start'] for call in self.calls()))
+
+    def test_node_preparation_resumes_after_restart_and_binds_adopted_bytes(self):
+        self.node_project()
+        self.approval.update(auto_prepare_agent=True, max_active_sessions=1)
+        identity = self.launch()
+        self.admission.tick()
+        assistance = self.submit_node(identity)
+        self.assertEqual(self.row(identity)['state'], 'waiting_environment')
+        self.assertEqual(sum(call[:2] == ['agent', 'prompt'] for call in self.calls()), 1)
+        self.store.close()
+        self.create_store()
+        self.finish()
+        job = self.row(identity)
+        self.assertEqual(job['state'], 'persona_sent', job.get('error'))
+        self.assertEqual(job['environment_binding']['state'], 'inherited')
+        self.assertEqual(self.row(assistance['id'])['state'], 'finished')
+        entry = job['toolchain_policy']['policy']['toolchains'][0]
+        self.assertEqual(entry['required'], '20.19.0')
+        self.assertEqual(entry['adoption']['provenance']['verification'], 'agent_claim')
+        self.assertEqual(sum(call[:2] == ['agent', 'start'] for call in self.calls()), 2)
+        self.assertTrue(all(len(call[2]) <= 32 for call in self.calls() if call[:2] == ['agent', 'start']))
+        self.assertEqual(len(job['toolchain_policy']['policy']['recipes']), 1)
+        from validation import ValidationRuns
+        from contributions import Contributions
+        runner = ValidationRuns(self.projects, lambda _: None, root=self.root / 'node-validation')
+        frozen = job['toolchain_policy']
+        validation = dict(id='c' * 32, event_id='d' * 64, repository='app', path=str(self.repo),
+            target=job['start_sha'], actor='test', started_at='test',
+            frozen_plan_digest=frozen['plan_digest'], frozen_policy_digest=frozen['digest'])
+        output = runner.root / validation['id']
+        output.mkdir(parents=True)
+        runner._execute(validation, output)
+        self.assertEqual(validation['state'], 'complete', validation)
+        contribution = Contributions.__new__(Contributions)
+        contribution.store = self.store
+        contribution.path_for = lambda _: self.repo
+        task = dict(run_id=identity, organization_id=self.org)
+        self.assertTrue(contribution.policy_matches(task, validation))
+        self.assertFalse(contribution.policy_matches(task, dict(validation, plan_digest='wrong')))
+
+    def test_revoking_assistance_permission_stops_the_helper_and_never_launches_project_work(self):
+        self.node_project()
+        self.approval['auto_prepare_agent'] = True
+        identity = self.launch()
+        self.admission.tick()
+        assistance = self.submit_node(identity)
+        self.approval['auto_prepare_agent'] = False
+        self.admission.tick()
+        self.assertEqual(self.row(identity)['state'], 'needs_attention')
+        self.assertEqual(self.row(assistance['id'])['state'], 'needs_attention')
+        self.assertEqual(sum(call[:2] == ['agent', 'start'] for call in self.calls()), 1)
+        self.assertIsNone(self.service.store.waiter(identity).get('preparation_id'))
+
+    def test_assisted_start_lost_response_is_not_replayed_after_restart(self):
+        self.node_project()
+        self.approval['auto_prepare_agent'] = True
+        identity = self.launch()
+        (self.root / 'drop-start-response').touch()
+        self.admission.tick()
+        self.assertEqual(self.row(identity)['state'], 'needs_attention')
+        self.store.close()
+        self.create_store()
+        self.admission.tick()
+        self.assertEqual(sum(call[:2] == ['agent', 'start'] for call in self.calls()), 1)
+        self.assertFalse(any(call[:2] == ['agent', 'prompt'] for call in self.calls()))
+
+    def test_assisted_helper_honors_the_shared_daily_session_budget(self):
+        self.node_project()
+        self.approval.update(auto_prepare_agent=True, daily_session_cap=1)
+        identity = self.launch()
+        self.admission.tick()
+        self.assertEqual(self.row(identity)['state'], 'needs_attention')
+        self.assertIn('daily session budget', self.row(identity)['error'])
+        self.assertFalse(any(call[:2] == ['agent', 'start'] for call in self.calls()))
+
+    def test_assistance_refuses_a_root_gateway_before_any_runtime_effect(self):
+        self.node_project()
+        self.approval['auto_prepare_agent'] = True
+        identity = self.launch()
+        with patch('environment_assistance.os.geteuid', return_value=0):
+            self.admission.tick()
+        self.assertEqual(self.row(identity)['state'], 'needs_attention')
+        self.assertIn('unprivileged', self.row(identity)['error'])
+        self.assertEqual(self.calls(), [])
+
+    def test_releasing_a_waiting_launch_cancels_its_helper_and_inspected_helper_can_be_released(self):
+        self.node_project()
+        self.approval['auto_prepare_agent'] = True
+        identity = self.launch()
+        self.admission.tick()
+        assistance = self.submit_node(identity)
+        self.store.action('release', dict(request_id='cancel-node-wait', organization_id=self.org, job_id=identity))
+        self.admission.tick()
+        self.assertEqual(self.row(identity)['state'], 'released')
+        self.assertEqual(self.row(assistance['id'])['state'], 'needs_attention')
+        self.store.action('release', dict(request_id='release-inspected-helper', organization_id=self.org, job_id=assistance['id']))
+        self.assertEqual(self.row(assistance['id'])['state'], 'released')
+        self.assertEqual(sum(call[:2] == ['agent', 'start'] for call in self.calls()), 1)
