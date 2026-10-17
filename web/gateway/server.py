@@ -575,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
         actions = {f'/api/workspaces/{name}': name for name in ('create', 'focus', 'rename')}
         actions['/api/organizations/templates'] = 'templates'
         actions['/api/organizations/templates/library'] = 'template_library'
-        environment_actions = {f'/api/projects/environment/{name}': name for name in ('plan', 'select', 'prepare', 'cancel')}
+        environment_actions = {f'/api/projects/environment/{name}': name for name in ('plan', 'select', 'prepare', 'cancel', 'authorize-restore')}
         actions.update(environment_actions)
         organization_actions = {f'/api/organizations/{name}': name for name in ('save', 'hire', 'launch', 'delegate', 'release', 'report', 'resolve_delegation', 'group', 'discuss', 'chat', 'inspect', 'input', 'recover', 'transcript', 'retry_discussion', 'cancel_discussion', 'remove_agent', 'remove_group', 'session', 'realign_discussion_session')}
         setup_actions = {f'/api/cli-setup/{name}': name for name in ('start', 'poll', 'input', 'resize', 'close', 'verify', 'install_integration')}
@@ -608,7 +608,8 @@ class Handler(BaseHTTPRequestHandler):
                 if preparation is None:
                     raise ValueError('Environment preparation is unavailable.')
                 operation = environment_actions[self.path]
-                allowed = {'plan': {'path', 'revision'}, 'select': {'digest', 'checks'}, 'prepare': {'digest', 'retry'}, 'cancel': {'id'}}[operation]
+                allowed = {'plan': {'path', 'revision'}, 'select': {'digest', 'checks'}, 'prepare': {'digest', 'retry'},
+                           'cancel': {'id'}, 'authorize-restore': {'digest', 'allowed'}}[operation]
                 if set(body) - allowed or ('retry' in body and type(body['retry']) is not bool):
                     raise ValueError('Invalid environment request options.')
                 if operation == 'plan':
@@ -617,6 +618,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = preparation.select(body.get('digest'), body.get('checks'), actor)
                 elif operation == 'prepare':
                     result = preparation.prepare(body.get('digest'), body.get('retry', False))
+                elif operation == 'authorize-restore':
+                    result = preparation.authorize_restore(body.get('digest'), body.get('allowed'), actor)
                 else:
                     result = preparation.store.cancel(body.get('id'))
                 self.reply(200, result)

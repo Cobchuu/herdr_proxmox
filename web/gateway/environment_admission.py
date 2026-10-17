@@ -15,6 +15,7 @@ import uuid
 
 import environment_plan
 import environment_recipes
+import environment_execution
 from environment_policy import EnvironmentPolicies
 import project_git
 from repository_lock import common_directory
@@ -29,7 +30,7 @@ class AdmissionStopped(ValueError):
 
 def permission(policy):
     return {key: policy.get(key, False if key != 'auto_prepare_revision' else '')
-            for key in ('auto_prepare', 'auto_prepare_checks', 'auto_prepare_agent', 'auto_prepare_revision')}
+            for key in ('auto_prepare', 'auto_prepare_checks', 'auto_prepare_agent', 'auto_prepare_restore', 'auto_prepare_revision')}
 
 
 class EnvironmentAdmission:
@@ -173,6 +174,8 @@ class EnvironmentAdmission:
                 plan = self.preparation.assisted_plan(plan)
             plan['verification_scope'] = 'isolated_commit'
             plan['automatic_policy'] = intent['policy']
+            if environment_execution.requires_restore(plan) and not intent['policy'].get('auto_prepare_restore'):
+                raise ValueError('Dependency restoration needs separate organization project-code permission.')
             if intent['policy']['auto_prepare_checks']:
                 identifiers = environment_recipes.automatic(plan)
                 plan['selected_checks'] = environment_recipes.select(plan, identifiers, 'organization_environment_policy')

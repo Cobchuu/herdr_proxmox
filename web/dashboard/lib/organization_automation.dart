@@ -189,6 +189,7 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
   var reap = policy['reap_finished_sessions'] == true;
   var reapOrphaned = policy['reap_orphaned_panes'] == true;
   var autoPrepare = policy['auto_prepare'] == true;
+  var autoPrepareRestore = policy['auto_prepare_restore'] == true;
   var autoPrepareChecks = policy['auto_prepare_checks'] == true;
   var autoPrepareAgent = policy['auto_prepare_agent'] == true;
   final perMeeting = TextEditingController(
@@ -258,6 +259,17 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                       ),
                       subtitle: const Text(
                         'Wait for verified SDKs before starting. Unsupported requirements stop the launch.',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: autoPrepareRestore,
+                      onChanged: (value) =>
+                          update(() => autoPrepareRestore = value == true),
+                      title: const Text(
+                        'Restore project dependencies before launch',
+                      ),
+                      subtitle: const Text(
+                        'Separate project-code permission. Creates an execution environment and installs frozen dependencies; builds may execute project code.',
                       ),
                     ),
                     SwitchListTile(
@@ -345,6 +357,7 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                   'reap_finished_sessions': reap,
                   'reap_orphaned_panes': reapOrphaned,
                   'auto_prepare': autoPrepare,
+                  'auto_prepare_restore': autoPrepareRestore,
                   'auto_prepare_checks': autoPrepareChecks,
                   'auto_prepare_agent': autoPrepareAgent,
                   'max_per_meeting': int.tryParse(perMeeting.text.trim()),

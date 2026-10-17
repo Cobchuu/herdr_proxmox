@@ -29,7 +29,8 @@ DOWNLOAD_LIMIT = 1024 * 1024 * 1024
 EXTRACT_LIMIT = 4 * DOWNLOAD_LIMIT
 FILE_LIMIT = 100_000
 HOSTS = frozenset(('dotnetcli.blob.core.windows.net', 'builds.dotnet.microsoft.com',
-                  'ci.dot.net', 'download.visualstudio.microsoft.com', 'static.rust-lang.org'))
+                  'ci.dot.net', 'download.visualstudio.microsoft.com', 'static.rust-lang.org',
+                  'github.com', 'release-assets.githubusercontent.com'))
 
 
 
@@ -96,6 +97,8 @@ def resolve(capability, version, target=None, read=metadata):
                        dict(os='linux', architecture='arm64', libc='glibc')):
         raise ValueError('The SDK provider does not support this executor.')
     adapter = environment_adapters.get(capability)
+    if adapter.provider != 'archive':
+        raise ValueError('This provider requires the full requirement declarations; use resolve_requirement.')
     if adapter.resolver is None:
         raise ValueError(f'No trusted artifact provider exists for {capability}.')
     url, archives = adapter.resolver(version, target, read, artifact)
@@ -151,15 +154,26 @@ def probe(capability, root, run=subprocess.run):
                         cwd=root, env=environment, capture_output=True, text=True, timeout=30)
         match = re.search(adapter.companion_pattern, companion.stdout or '')
         if companion.returncode or not match:
-            raise ValueError('The installed ' + ('Cargo' if adapter.companion == 'cargo' else adapter.companion) + ' probe failed; the SDK is incomplete.')
+            raise ValueError('The installed ' + (adapter.companion_label or adapter.companion) + ' probe failed; the SDK is incomplete.')
         measured[adapter.companion + '_version'] = match[1]
     return measured
 
 
-def acquire(specification, store, fetch=download, verify=probe, cancelled=lambda: False):
+def acquire(specification, store, fetch=download, verify=None, cancelled=lambda: False):
+    """Dispatch a frozen specification through a release-registered strategy."""
+    import environment_providers
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        raise ValueError('Managed SDK acquisition must run as an unprivileged service user.')
+    provider = environment_providers.for_specification(specification)
+    return environment_providers.invoke(provider.acquire, specification, store, fetch=fetch,
+                                        verify=verify, cancelled=cancelled)
+
+
+def acquire_archives(specification, store, fetch=download, verify=None, cancelled=lambda: False):
     """Stage, hash, unpack and probe; publish atomically only after verification."""
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         raise ValueError('Managed SDK acquisition must run as an unprivileged service user.')
+    verify = verify or probe
     key = identity(specification)
     store = Path(store)
     store.mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -90,6 +90,9 @@ class DiscoveryTestRunnerTests(unittest.TestCase):
             script = root / 'scripts/test-project-discovery.py'
             script.parent.mkdir()
             script.write_text('# runner\n', encoding='utf-8')
+            catalog = root / 'install/python-tools.json'
+            catalog.parent.mkdir()
+            catalog.write_text('{}', encoding='utf-8')
             reference = root / 'web/gateway/skills/integration/references/merge.md'
             reference.parent.mkdir(parents=True)
             before = runner.source_fingerprint(root)

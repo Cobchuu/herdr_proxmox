@@ -42,9 +42,8 @@ def binding(frozen, caches):
         environment.update(environment_adapters.get(name).dispatch_variables)
     # These caches belong to this execution, never to the shared SDK tree.
     caches = Path(caches).absolute()
-    environment.update(HERDR_ENVIRONMENT_PLAN=policy['plan_digest'],
-                       CARGO_HOME=str(caches / 'cargo'), DOTNET_CLI_HOME=str(caches / 'dotnet'),
-                       DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1')
+    environment.update(environment_adapters.execution_caches(entries, caches))
+    environment['HERDR_ENVIRONMENT_PLAN'] = policy['plan_digest']
     return dict(identity, state='requested', mechanism='herdr_tab_env',
                 selection='component_dispatch' if conflicting else 'direct', environment=environment)
 
@@ -60,7 +59,14 @@ def configure(store, job, frozen, pane, workspace):
     if not re.fullmatch(r'[a-f0-9]{32}', job['id']):
         raise ValueError('An environment binding requires an execution identity.')
     caches = store.path.parent / 'agent-environments' / job['id']
-    record = binding(frozen, caches)
+    checkout = job.get('worktree_path') or job.get('source_project') or frozen['checkout']
+    from environment_execution import materialize_execution_policy
+    policy, restores = materialize_execution_policy(frozen.get('policy') or dict(toolchains=[]), checkout, caches,
+        authorized=(frozen.get('policy') or {}).get('restore_authorized') is True)
+    runtime = dict(frozen, policy=policy)
+    if restores:
+        store.update_job(job['id'], environment_restores=restores, execution_toolchain_policy=runtime)
+    record = binding(runtime, caches)
     if record is None or record['state'] != 'requested':
         if record is not None:
             store.update_job(job['id'], environment_binding=record)
@@ -70,11 +76,9 @@ def configure(store, job, frozen, pane, workspace):
     workspace = workspace or (pane.split(':', 1)[0] if is_pane_id(pane) else None)
     if not workspace or not is_pane_id(pane, workspace):
         raise ValueError('The assigned shell has no verifiable workspace identity.')
-    for name in ('cargo', 'dotnet'):
-        (caches / name).mkdir(parents=True, exist_ok=True, mode=0o700)
-    checkout = job.get('worktree_path') or job.get('source_project') or frozen['checkout']
+    environment_adapters.execution_caches(runtime['policy']['toolchains'], caches, create=True)
     if record['selection'] == 'component_dispatch':
-        launchers, digest = environment_dispatch.install(frozen['policy'], checkout, caches)
+        launchers, digest = environment_dispatch.install(runtime['policy'], checkout, caches)
         record['environment']['PATH'] = str(launchers) + os.pathsep + record['environment']['PATH']
         record['dispatcher_digest'] = digest
     arguments = []

@@ -154,6 +154,7 @@ def registry(capability):
         try:
             environment_artifacts.host_target()
             entry['operations'] = (*entry['operations'], 'acquire', 'activate', 'check')
+            entry['operations'] = (*entry['operations'], *environment_adapters.get(capability).operations)
             entry['acquirable'] = True
             entry['reason'] = 'Exact SDK preparation and explicitly approved component checks are available; automatic task preparation/resume is separate.'
         except ValueError as error:

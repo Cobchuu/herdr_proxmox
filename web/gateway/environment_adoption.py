@@ -108,6 +108,17 @@ def receipt(specification, store, cancelled=lambda: False):
     return dict(artifact_id=environment_artifacts.identity(specification), specification=specification, probe=measured)
 
 
+def acquire_provider(specification, store, *, fetch, verify=None, cancelled=lambda: False):
+    return receipt(specification, store, cancelled=cancelled)
+
+
+def verify_entry(entry):
+    specification = entry.get('artifact_receipt', {}).get('specification') or entry.get('adoption')
+    if not specification:
+        raise ValueError('The adopted SDK receipt is missing; prepare again.')
+    verify(specification)
+
+
 def adopt(plan, result, allocation, store, authority, cancelled=lambda: False):
     """Return a new plan; an agent can neither overwrite the source nor approve it."""
     if hasattr(os, 'geteuid') and os.geteuid() == 0:

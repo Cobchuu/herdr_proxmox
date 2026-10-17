@@ -58,6 +58,8 @@ jobs:
           persist-credentials: false
       - name: Verify publisher archives, contextual SDK selection and real builds
         run: python3 tests/ci/project_environments.py
+      - name: Qualify pinned Python and per-execution locked dependency restoration
+        run: python3 tests/ci/python_environment.py
       - name: Qualify automatic admission and binding against the pinned real Herdr daemon
         run: python3 tests/ci/live_environment.py
 

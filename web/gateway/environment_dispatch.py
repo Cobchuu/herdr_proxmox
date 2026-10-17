@@ -86,20 +86,18 @@ def main(arguments):
     entry = choose(manifest, tool, Path.cwd())
     if entry.get('adapter_version', 1) != environment_adapters.get(entry['name']).version:
         raise ValueError('The SDK adapter contract changed; prepare again.')
-    if entry.get('adoption'):
-        import environment_adoption
-        environment_adoption.verify(entry['adoption'])
-    executable = entry['executables'][0]
-    if tool != Path(executable).name:
-        companions = [item for item in entry.get('companions', []) if item['name'] == tool]
-        if len(companions) != 1 or not companions[0].get('executables'):
+    import environment_providers
+    environment_providers.verify_entry(entry)
+    adapter = environment_adapters.get(entry['name'])
+    executable = adapter.command(entry['executables'][0], tool)
+    if executable != entry['executables'][0]:
+        companions = [item for item in entry.get('companions', [])
+                      if item['name'] == tool and executable in item.get('executables', [])]
+        if len(companions) != 1:
             raise ValueError('The component has no verified companion binding for ' + tool)
-        executable = companions[0]['executables'][0]
     environment = toolchain_policy.environment(dict(toolchains=[entry]))
     cache = Path(manifest['caches']) / hashlib.sha256(entry['component'].encode()).hexdigest()[:20]
-    for name in ('cargo', 'dotnet'):
-        (cache / name).mkdir(parents=True, exist_ok=True, mode=0o700)
-    environment.update(CARGO_HOME=str(cache / 'cargo'), DOTNET_CLI_HOME=str(cache / 'dotnet'))
+    environment.update(adapter.cache_environment(cache, create=True))
     os.execve(executable, [executable, *forwarded], environment)
 
 

@@ -80,10 +80,10 @@ def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=Non
             raise ValueError('Check working directory escapes the candidate checkout.')
         if recipe:
             import toolchain_policy
+            import environment_adapters
             bound = recipe.get('bindings') or []
             environment_for_check = toolchain_policy.environment(dict(toolchains=bound))
-            environment_for_check.update(CARGO_HOME=str(folder / 'cargo'), DOTNET_CLI_HOME=str(folder / 'dotnet'),
-                                         DOTNET_CLI_TELEMETRY_OPTOUT='1')
+            environment_for_check.update(environment_adapters.execution_caches(bound, folder, create=True))
         else:
             environment_for_check = environment
         check = dict(id=identifier, name=identifier, command=' '.join(arguments), required=True,

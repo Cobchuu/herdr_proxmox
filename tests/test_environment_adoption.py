@@ -18,7 +18,7 @@ from project_access import ANCHORED_ACCESS
 
 class AdapterTests(unittest.TestCase):
     def test_activation_and_command_knowledge_comes_from_one_registry(self):
-        self.assertEqual(environment_adapters.managed(), ('dotnet-sdk', 'rust-toolchain'))
+        self.assertEqual(environment_adapters.managed(), ('python', 'dotnet-sdk', 'rust-toolchain'))
         self.assertEqual(environment_adapters.commands()['npm'], 'node')
         self.assertIsNone(environment_adapters.get('node').resolver)
         self.assertEqual(environment_adapters.get('dotnet-sdk').environment('/sdk/dotnet')['DOTNET_ROOT'], str(Path('/sdk')))

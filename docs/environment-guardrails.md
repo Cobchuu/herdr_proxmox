@@ -13,6 +13,14 @@ preparation record. Missing bindings become blockers, not an empty policy.
 
 Implemented and covered by gateway tests:
 
+- Python freezes a concrete interpreter from a pinned uv/PBS catalog, verifies
+  download checksums and fingerprints the base installation. Locked dependency
+  restoration has a separate permission and durable receipt. Launch and isolated
+  validation materialize distinct virtual environments from one recipe; their
+  paths do not alter the shared approved policy digest. Poetry and uv workspace
+  ownership remain unsupported. See [Python environments](python-environments.md)
+  for the support boundary and real-download release qualification.
+
 - Acquisition, activation and dispatch consume one SDK adapter contract. The
   opt-in Node preparation agent has a separate durable execution; adoption
   snapshots and hashes its allocated SDK, independently probes it and records

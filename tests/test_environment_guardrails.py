@@ -374,10 +374,15 @@ class GatewayPolicyTests(unittest.TestCase):
             'test "$(basename "$PWD")" = Api || exit 42\necho native-check-ran\n')
         self.executable.chmod(0o755)
         self.spec = dict(capability='dotnet-sdk', version='8.0.100', archives=[])
+        def acquire(specification, *arguments, **options):
+            if specification.get('provider', 'archive') != 'archive':
+                import environment_artifacts
+                return environment_artifacts.acquire(specification, *arguments, **options)
+            return dict(artifact_id='fixture', specification=self.spec,
+                        probe={'executable': str(self.executable), 'versions': ['8.0.100']})
         self.service = EnvironmentPreparation(ProjectAnalysis(self.projects), self.root / 'environments.sqlite3',
             self.root / 'sdks', resolve=lambda *args: self.spec,
-            acquire=lambda *args, **kwargs: dict(artifact_id='fixture', specification=self.spec,
-                probe={'executable': str(self.executable), 'versions': ['8.0.100']}))
+            acquire=acquire)
         self.policies = EnvironmentPolicies(self.projects, self.service.store)
         self.binding = patch.object(toolchain_policy, 'PROJECT_RESOLVER', self.policies.resolve)
         self.binding.start()

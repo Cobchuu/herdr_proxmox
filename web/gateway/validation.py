@@ -273,13 +273,19 @@ class ValidationRuns:
             if policy.get('blockers') or policy.get('validation_blockers'):
                 run['blocker'] = 'environment_unavailable' if policy.get('blockers') else 'validation_unapproved'
                 raise ValueError('; '.join([*policy.get('blockers', []), *policy.get('validation_blockers', [])]))
-            probed = toolchain_policy.verify(policy, root=worktree)
+            from environment_execution import materialize_execution_policy
+            execution_policy, restores = materialize_execution_policy(policy, worktree, folder / 'environment',
+                authorized=policy.get('restore_authorized') is True)
+            if restores:
+                run['environment_restores'] = restores
+                self._write(folder, run)
+            probed = toolchain_policy.verify(execution_policy, root=worktree)
             run['toolchain_evidence'] = probed
             mismatch = [item for item in probed if not item['matches']]
             if mismatch:
                 run['blocker'] = 'missing_toolchain'
                 raise ValueError(toolchain_message(mismatch))
-            commands = policy.get('recipes') if policy.get('plan_digest') else self._commands(worktree)
+            commands = execution_policy.get('recipes') if policy.get('plan_digest') else self._commands(worktree)
             command = ' + '.join(item['id'] if isinstance(item, dict) else item for item in commands)
             if not commands:
                 # A plan-based policy selects recipes, so citing Herdr's own
@@ -341,6 +347,7 @@ class ValidationRuns:
                                    required_checks_verified=run.get('required_checks_verified', False),
                                    policy_digest=run.get('policy_digest'), plan_digest=run.get('plan_digest'),
                                    toolchain_evidence=run.get('toolchain_evidence'),
+                                   environment_restores=run.get('environment_restores'),
                                    policy_changes=run.get('policy_changes'),
                                    blocker=run.get('blocker'), note=run.get('note'),
                                    finished_at=run.get('finished_at'),

@@ -52,6 +52,12 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
               switch (operation) {
                 'plan' => {'path': path},
                 'cancel' => {'id': environmentJob!['id']},
+                'authorize-restore' => {
+                  'digest': environmentPlan!['digest'],
+                  'allowed':
+                      environmentPlan!['restore_permission']?['allowed'] !=
+                      true,
+                },
                 'select' => {
                   'digest': environmentPlan!['digest'],
                   'checks': checks,
@@ -63,7 +69,9 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
       );
       if (!current()) return;
       setState(() {
-        if (operation == 'plan' || operation == 'select') {
+        if (operation == 'plan' ||
+            operation == 'select' ||
+            operation == 'authorize-restore') {
           environmentPlan = result;
           environmentJob = null;
         } else {
@@ -550,6 +558,23 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                     const Text(
                       'Approve validation checks before preparing. These commands can execute project code.',
                     ),
+                    if ((environmentPlan!['requirements'] as List? ?? []).any(
+                      (item) => (item['restore_recipes'] as List? ?? []).any(
+                        (recipe) => recipe['requires_restore'] == true,
+                      ),
+                    ))
+                      CheckboxListTile(
+                        title: const Text('Approve dependency restoration'),
+                        subtitle: const Text(
+                          'Separate from SDK installation. May execute project build code.',
+                        ),
+                        value:
+                            environmentPlan!['restore_permission']?['allowed'] ==
+                            true,
+                        onChanged: saving || !admin
+                            ? null
+                            : (_) => environmentAction('authorize-restore'),
+                      ),
                     for (final check
                         in environmentPlan!['check_candidates'] as List? ?? [])
                       CheckboxListTile(

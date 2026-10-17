@@ -126,6 +126,8 @@ class EnvironmentPolicies:
                      or name.lower().endswith(('.props', '.targets'))
                      or Path(name).name.lower() == 'nuget.config'
                      or name.endswith(('.cargo/config', '.cargo/config.toml', '.config/dotnet-tools.json'))]
+        protected = sorted(set(protected) | {name for entry in policy['toolchains']
+            for name in entry.get('protected_inputs', [])})
         policy['declarations'] = {}
         for name in protected:
             entry = entries.get(name)

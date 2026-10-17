@@ -391,6 +391,15 @@ def bindings(plan, receipt=None):
                 adapter = environment_adapters.get(item['capability'])
                 if item.get('artifact', {}).get('provider') == 'agent_adopted':
                     entry['adoption'] = item['artifact']
+                if item.get('restore_recipes'):
+                    recipes = [value for value in item['restore_recipes'] if value['component'] == component]
+                    if len(recipes) != 1 or not adapter.materialize_entry:
+                        raise ValueError('The component has no unambiguous execution recipe; prepare again.')
+                    entry['restore_recipe'] = recipes[0]
+                    entry['protected_inputs'] = sorted(recipes[0].get('inputs', {}))
+                import environment_providers
+                if adapter.materialize_entry or environment_providers.get(adapter.provider).verify_entry:
+                    entry['artifact_receipt'] = matches[0]
                 if adapter.companion:
                     version = matches[0]['probe'].get(adapter.companion + '_version')
                     if version:
@@ -409,7 +418,9 @@ def bindings(plan, receipt=None):
         blockers.append(_unbound(unbound[capability]['item'], unbound[capability]['components']))
     return dict(toolchains=entries, blockers=blockers, validation_blockers=[],
                 plan_digest=plan['digest'], checks=[], declarations={}, lockfiles={},
-                recipes=plan.get('selected_checks') or [])
+                recipes=plan.get('selected_checks') or [],
+                restore_authorized=(plan.get('automatic_policy', {}).get('auto_prepare_restore') is True
+                    or plan.get('restore_permission', {}).get('allowed') is True))
 
 
 def _unbound(item, components):

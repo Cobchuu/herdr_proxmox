@@ -23,6 +23,7 @@ MODULES = (
     'test_dependency_constraints', 'test_dotnet_resolution',
     'test_integration_coordinator', 'test_environment_plan', 'test_environment_preparation',
     'test_environment_guardrails', 'test_environment_admission', 'test_environment_adoption',
+    'test_environment_python', 'test_environment_contracts',
 )
 
 
@@ -32,7 +33,7 @@ def source_fingerprint(root=ROOT):
     This is a scoped source comparison, not an identity for every full-suite
     input or the execution environment (which is reported separately).
     """
-    inputs = {root / 'scripts/test-project-discovery.py',
+    inputs = {root / 'scripts/test-project-discovery.py', root / 'install/python-tools.json',
               *(root / 'web/gateway').rglob('*.py'),
               *(root / 'tests').rglob('*.py'),
               *(root / 'web/gateway/skills').rglob('*.md')}

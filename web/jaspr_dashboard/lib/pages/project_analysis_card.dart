@@ -66,6 +66,12 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
               switch (operation) {
                 'plan' => {'path': component.path},
                 'cancel' => {'id': environmentJob!['id']},
+                'authorize-restore' => {
+                  'digest': environmentPlan!['digest'],
+                  'allowed':
+                      environmentPlan!['restore_permission']?['allowed'] !=
+                      true,
+                },
                 'select' => {
                   'digest': environmentPlan!['digest'],
                   'checks': checks,
@@ -77,7 +83,9 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
       );
       if (!current()) return;
       setState(() {
-        if (operation == 'plan' || operation == 'select') {
+        if (operation == 'plan' ||
+            operation == 'select' ||
+            operation == 'authorize-restore') {
           environmentPlan = result;
           environmentJob = null;
         } else {
@@ -455,6 +463,22 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
         meta(
           'Approve validation checks before preparing. These commands can execute project code.',
         ),
+        if ((environmentPlan!['requirements'] as List? ?? []).any(
+          (item) => (item['restore_recipes'] as List? ?? []).any(
+            (recipe) => recipe['requires_restore'] == true,
+          ),
+        )) ...[
+          meta(
+            'Dependency restoration is separate from SDK installation and may execute project build code.',
+          ),
+          button(
+            environmentPlan!['restore_permission']?['allowed'] == true
+                ? 'Revoke dependency restoration'
+                : 'Approve dependency restoration',
+            () => environmentAction('authorize-restore'),
+            disabled: busy || !admin,
+          ),
+        ],
         for (final check in environmentPlan!['check_candidates'] as List? ?? [])
           button(
             '${(environmentPlan!['selected_checks'] as List? ?? []).any((item) => item['id'] == check['id']) ? 'Deselect' : 'Approve'} ${check['cwd']}: ${(check['arguments'] as List).join(' ')} (${check['source']})',

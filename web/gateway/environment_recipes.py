@@ -3,7 +3,8 @@
 No repository command executes while planning. Native recipes remain proposals
 even when conventional, and their arguments/cwd are frozen before validation.
 """
-from pathlib import PurePosixPath
+import environment_adapters
+from environment_providers import invoke
 
 
 def candidates(report, paths):
@@ -13,14 +14,12 @@ def candidates(report, paths):
         directory = component['path']
         for index, proposal in enumerate(component.get('candidate_commands', [])):
             arguments = list(proposal['command'])
-            if arguments[0] == 'dotnet':
-                projects = sorted(name for name in paths if PurePosixPath(name).parent.as_posix() == directory
-                    and name.endswith(('.sln', '.slnx', '.csproj', '.fsproj', '.vbproj')))
-                solutions = [name for name in projects if name.endswith(('.sln', '.slnx'))]
-                projects = solutions or projects
-                if len(projects) != 1:
-                    continue  # No guessed invocation when a directory has competing entry points.
-                arguments.append(PurePosixPath(projects[0]).name)
+            capability = environment_adapters.commands().get(arguments[0])
+            adapter = environment_adapters.ADAPTERS.get(capability)
+            if adapter and adapter.candidate_arguments:
+                arguments = invoke(adapter.candidate_arguments, arguments, directory, paths)
+                if arguments is None:
+                    continue
             result.append(dict(id=f'{directory}:{index}:{proposal["purpose"]}', cwd=directory,
                 arguments=arguments, source=proposal['source'], purpose=proposal['purpose']))
     return result[:100]
@@ -41,11 +40,8 @@ def automatic(plan):
     """Only named build/test entry points, under separate project-code permission."""
     found = []
     for item in plan.get('check_candidates', []):
-        arguments = item['arguments']
-        conventional = (item['source'] == 'convention' and arguments[0] in ('dotnet', 'cargo')
-                        and len(arguments) in (2, 3) and arguments[1] in ('build', 'test'))
-        node = (item['source'] == 'package.json#scripts' and arguments in (
-            ['npm', 'run', 'build'], ['npm', 'run', 'test']))
-        if conventional or node:
+        capability = environment_adapters.commands().get(item['arguments'][0])
+        adapter = environment_adapters.ADAPTERS.get(capability)
+        if adapter and adapter.automatic_check and invoke(adapter.automatic_check, item):
             found.append(item['id'])
     return found[:20]

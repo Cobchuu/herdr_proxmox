@@ -453,6 +453,10 @@ class OrganizationStore:
         reference = {k: saved[k] for k in ('id', 'version', 'name', 'digest')}
         return team_templates.expand(resolved), reference
 
+    def require_environment_continuation(self, continuation):
+        if self.environment_admission.current(continuation, starting=True) is None:
+            raise ValueError('The task has not recorded this admitted execution.')
+
     def frozen_policy(self, job, profile):
         """The approved toolchain policy as it stood when this session started.
 
@@ -1690,8 +1694,7 @@ class OrganizationStore:
                     continuation = self.environment_admission.store.waiter(job_id)
                     if continuation is None:
                         raise ValueError('The admitted environment continuation record is missing; inspect this execution.')
-                    if self.environment_admission.current(continuation, starting=True) is None:
-                        raise ValueError('The task has not recorded this admitted execution.')
+                    self.require_environment_continuation(continuation)
                 frozen = job.get('toolchain_policy') if admitted else None
                 frozen = frozen or self.frozen_policy(job, profile)
                 if admitted and frozen and frozen.get('plan_digest'):
@@ -1709,6 +1712,10 @@ class OrganizationStore:
                     from environment_launch import configure
                     pane, workspace = configure(self, job, frozen, pane, workspace)
                     job = self.update_job(job_id, pane_id=pane, workspace_id=workspace)
+                    if admitted and self.environment_admission is not None:
+                        # Restoring an environment may take minutes. Recheck
+                        # permission and task ownership before starting the agent.
+                        self.require_environment_continuation(continuation)
                 job = self.update_job(job_id, launch_stage='agent_starting')
                 self.command('agent', 'start', job['alias'], '--kind', profile['runtime'], '--pane', pane, '--timeout', '60000', *(['--', *arguments] if arguments else []), timeout=70)
                 agent = self.identity(job)
@@ -1763,12 +1770,12 @@ class OrganizationStore:
                                'publication authorization. Dashboard task publishing is administrator-controlled.')
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen) + environment_notice, '--wait', '--timeout', '180000', timeout=190)
+                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(job.get('execution_toolchain_policy') or frozen) + environment_notice, '--wait', '--timeout', '180000', timeout=190)
                     self.identity(job)
                 else:
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen) + environment_notice)
+                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(job.get('execution_toolchain_policy') or frozen) + environment_notice)
                     self.update_job(job_id, delivery=dict(stage='sent', at=now(),
                                                           completion=self.completion_baseline(response)))
                 self.update_job(job_id, state='persona_sent')

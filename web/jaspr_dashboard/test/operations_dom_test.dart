@@ -387,6 +387,46 @@ void main() {
     },
   );
 
+  test('Dependency approval is separate from check selection', () async {
+    Map<String, dynamic> fixture(bool allowed) => {
+      'digest': allowed ? 'restore-approved' : 'plan',
+      'restore_permission': {'allowed': allowed},
+      'requirements': [
+        {
+          'capability': 'python',
+          'restore_recipes': [
+            {'manager': 'uv', 'requires_restore': true},
+          ],
+        },
+      ],
+      'check_candidates': [],
+      'selected_checks': [],
+    };
+    await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+      if (request.url.path.endsWith('/environment/plan')) return fixture(false);
+      if (request.url.path.endsWith('/environment/authorize-restore')) {
+        return fixture(true);
+      }
+      return {
+        'components': [],
+        'requirements': [],
+        'workspaces': [],
+        'agents': [],
+      };
+    });
+    await click('Plan environment');
+    await click('Approve dependency restoration');
+    final grant = posts('projects/environment/authorize-restore').single;
+    expect(grant['digest'], 'plan');
+    expect(grant['allowed'], isTrue);
+    expect(grant.containsKey('retry'), isFalse);
+    expect(posts('projects/environment/select'), isEmpty);
+    expect(
+      web.document.getElementById('operations-test')!.textContent,
+      contains('Revoke dependency restoration'),
+    );
+  });
+
   test(
     'discovery distinguishes installed runtimes, deduplicates reasons and exposes unknown paths',
     () async {

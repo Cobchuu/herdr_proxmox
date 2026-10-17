@@ -265,9 +265,8 @@ def verify(policy, run=None, root=None):
                         import environment_adapters
                         if entry.get('adapter_version', 1) != environment_adapters.get(entry['name']).version:
                             raise ValueError('The SDK adapter contract changed; prepare again.')
-                        if entry.get('adoption'):
-                            import environment_adoption
-                            environment_adoption.verify(entry['adoption'])
+                        import environment_providers
+                        environment_providers.verify_entry(entry)
                         runner = subprocess.run if run is None else run
                         result = runner([executable, '--version'], cwd=cwd,
                             env=environment(dict(policy, toolchains=[entry])), capture_output=True,
@@ -309,7 +308,8 @@ def environment(policy, base=None):
                 directories.append(parent)
         if entry.get('executables') and entry.get('component') is not None:
             import environment_adapters
-            value.update(environment_adapters.get(entry['name']).environment(entry['executables'][0]))
+            value.update(environment_adapters.get(entry['name']).environment(
+                entry['executables'][0], entry.get('execution_environment')))
     if directories:
         value['PATH'] = os.pathsep.join([*directories, value.get('PATH', '')]).strip(os.pathsep)
     return value
@@ -330,16 +330,21 @@ def evidence_matches(policy, evidence):
                 or any(not any(check.get('id') == recipe['id'] and check.get('status') == 'passed'
                                and check.get('exit_code') == 0 for check in checks) for recipe in policy['recipes'])):
             return False
-    required = {(entry.get('component', '.'), entry['name']): entry
+    required = {(entry.get('component', '.'), entry['name']): (entry, entry is primary)
                 for primary in policy['toolchains'] for entry in [primary, *primary.get('companions', [])]}
     measured = evidence.get('toolchain_evidence') or []
-    for key, entry in required.items():
+    for key, (entry, primary) in required.items():
         found = [item for item in measured if (item.get('component', '.'), item.get('name')) == key]
         if len(found) != 1 or found[0].get('matches') is not True:
             return False
-        if 'component' in entry and (found[0].get('actual') != entry['required']
-                                     or found[0].get('path') not in entry['executables']):
-            return False
+        if 'component' in entry:
+            path_matches = found[0].get('path') in entry['executables']
+            if primary:
+                import environment_adapters
+                path_matches = environment_adapters.get(entry['name']).matches_evidence_path(
+                    entry, found[0], evidence.get('environment_restores') or [])
+            if found[0].get('actual') != entry['required'] or not path_matches:
+                return False
     return bool(measured) and all(item.get('matches') is True for item in measured)
 
 

@@ -7,7 +7,7 @@ adopted bytes and contextual probes are independently recorded by the gateway.
 """
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import tomllib
@@ -31,18 +31,67 @@ class Adapter:
     variables: tuple = ()
     version: int = 1
     dispatch_variables: tuple = ()
+    provider: str = 'archive'
+    plan_requirement: object = 'environment_requirements:plan_archive'
+    materialize_entry: object = None
+    evidence_path: object = None
+    execution_variables: tuple = ()
+    aliases: tuple = ()
+    operations: tuple = ()
+    automatic_check: object = None
+    cache_variables: tuple = ()
+    cache_directories: tuple = ()
+    candidate_arguments: object = None
+    companion_label: str = ''
 
     def root(self, executable):
         return Path(executable).parents[self.root_parents]
 
-    def environment(self, executable):
-        return {key: value.format(root=self.root(executable), executable=executable)
-                for key, value in self.variables}
+    def environment(self, executable, execution_environment=None):
+        variables = self.variables + (self.execution_variables if execution_environment else ())
+        return {key: value.format(root=self.root(executable), executable=executable,
+                                 environment=execution_environment)
+                for key, value in variables}
 
     def command(self, executable, name):
         if name not in self.commands:
             raise ValueError('No approved command binding for ' + str(name))
+        if name == Path(self.executable).name or name in self.aliases:
+            return str(executable)
         return str(Path(executable).with_name(name))
+
+    def matches_evidence_path(self, entry, observed, receipts):
+        if self.evidence_path:
+            from environment_providers import invoke
+            return invoke(self.evidence_path, entry, observed, receipts) is True
+        return observed.get('path') in entry['executables']
+
+    def cache_environment(self, caches, *, create=False):
+        caches = Path(caches).absolute()
+        if create:
+            for name in self.cache_directories:
+                (caches / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+        return {key: value.format(caches=caches) for key, value in self.cache_variables}
+
+
+def native_check(item):
+    arguments = item['arguments']
+    return (item['source'] == 'convention' and len(arguments) in (2, 3)
+            and arguments[1] in ('build', 'test'))
+
+
+def node_check(item):
+    return item['source'] == 'package.json#scripts' and item['arguments'] in (
+        ['npm', 'run', 'build'], ['npm', 'run', 'test'])
+
+
+def dotnet_candidate(arguments, directory, paths):
+    projects = sorted(name for name in paths if PurePosixPath(name).parent.as_posix() == directory
+                      and name.endswith(('.sln', '.slnx', '.csproj', '.fsproj', '.vbproj')))
+    solutions = [name for name in projects if name.endswith(('.sln', '.slnx'))]
+    projects = solutions or projects
+    # Never guess between competing entry points in the same directory.
+    return [*arguments, PurePosixPath(projects[0]).name] if len(projects) == 1 else None
 
 
 def dotnet(version, target, read, artifact):
@@ -96,17 +145,32 @@ def rust_components(archive, prefix, stage, index, remaining, unpack):
 
 
 ADAPTERS = {
+    'python': Adapter('python', 'bin/python3', ('python', 'python3'), ('--version',), ('--version',),
+        r'^Python ([0-9]+\.[0-9]+\.[0-9]+)\s*$', 1, ('.python-version',),
+        provider='pinned_uv', plan_requirement='environment_python:plan_requirement',
+        materialize_entry='environment_python_execution:materialize_entry',
+        evidence_path='environment_python_execution:evidence_path', aliases=('python', 'python3'),
+        operations=('restore',), automatic_check='environment_python_execution:automatic_check', version=2,
+        execution_variables=(('VIRTUAL_ENV', '{environment}'), ('UV_PROJECT_ENVIRONMENT', '{environment}'),
+                             ('UV_PYTHON', '{executable}'), ('UV_PYTHON_DOWNLOADS', 'never')),
+        variables=(('PYTHONNOUSERSITE', '1'), ('PYTHONDONTWRITEBYTECODE', '1'), ('PYTHONHOME', ''), ('PYTHONPATH', ''), ('PIP_REQUIRE_VIRTUALENV', '1')),
+        dispatch_variables=(('PYTHONNOUSERSITE', '1'), ('PYTHONDONTWRITEBYTECODE', '1'), ('PYTHONHOME', ''), ('PYTHONPATH', ''),
+                            ('PIP_REQUIRE_VIRTUALENV', '1'), ('UV_PYTHON_DOWNLOADS', 'never'))),
     'dotnet-sdk': Adapter('dotnet-sdk', 'dotnet', ('dotnet',), ('--list-sdks',), ('--version',),
         r'^([0-9]+\.[0-9]+\.[0-9]+)\s+\[', 0, ('global.json',), resolver=dotnet, unpacker=flat,
         variables=(('DOTNET_ROOT', '{root}'), ('DOTNET_MULTILEVEL_LOOKUP', '0')),
-        dispatch_variables=(('DOTNET_ROOT', ''), ('DOTNET_MULTILEVEL_LOOKUP', '0'))),
+        dispatch_variables=(('DOTNET_ROOT', ''), ('DOTNET_MULTILEVEL_LOOKUP', '0')), automatic_check=native_check,
+        candidate_arguments=dotnet_candidate, cache_directories=('dotnet',),
+        cache_variables=(('DOTNET_CLI_HOME', '{caches}/dotnet'), ('DOTNET_CLI_TELEMETRY_OPTOUT', '1'),
+                         ('DOTNET_SKIP_FIRST_TIME_EXPERIENCE', '1'))),
     'rust-toolchain': Adapter('rust-toolchain', 'bin/rustc', ('rustc', 'cargo'), ('-Vv',), ('-Vv',),
         r'^release: ([0-9]+\.[0-9]+\.[0-9]+)$', 1, ('rust-toolchain', 'rust-toolchain.toml'),
-        companion='cargo', companion_pattern=r'^cargo ([0-9]+\.[0-9]+\.[0-9]+)\b',
+        companion='cargo', companion_label='Cargo', companion_pattern=r'^cargo ([0-9]+\.[0-9]+\.[0-9]+)\b',
         resolver=rust, unpacker=rust_components, variables=(('RUSTC', '{executable}'),),
-        dispatch_variables=(('RUSTC', ''),)),
+        dispatch_variables=(('RUSTC', ''),), automatic_check=native_check,
+        cache_directories=('cargo',), cache_variables=(('CARGO_HOME', '{caches}/cargo'),)),
     'node': Adapter('node', 'bin/node', ('node', 'npm'), ('--version',), ('--version',),
-        r'^v([0-9]+\.[0-9]+\.[0-9]+)\s*$', 1, companion='npm', assisted=True),
+        r'^v([0-9]+\.[0-9]+\.[0-9]+)\s*$', 1, companion='npm', assisted=True, automatic_check=node_check),
 }
 
 
@@ -121,5 +185,19 @@ def commands():
     return {command: adapter.capability for adapter in ADAPTERS.values() for command in adapter.commands}
 
 
+def execution_caches(entries, caches, *, create=False):
+    """Only selected adapters allocate caches or contribute process variables."""
+    if create:
+        # Shell activation markers also need the execution root when an adapter
+        # has no SDK-specific caches (for example, a single Node binding).
+        Path(caches).mkdir(parents=True, exist_ok=True, mode=0o700)
+    result = {}
+    for name in dict.fromkeys(entry['name'] for entry in entries):
+        result.update(get(name).cache_environment(caches, create=create))
+    return result
+
+
 def managed():
-    return tuple(name for name, adapter in ADAPTERS.items() if adapter.resolver is not None)
+    import environment_providers
+    return tuple(name for name, adapter in ADAPTERS.items()
+                 if adapter.resolver is not None or environment_providers.get(adapter.provider).select)

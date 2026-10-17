@@ -82,7 +82,7 @@ ECOSYSTEMS = (
          managers={'poetry.lock': 'poetry', 'Pipfile.lock': 'pipenv',
                    'uv.lock': 'uv', 'requirements.txt': 'pip'},
          dependency_fields=('project.dependencies',),
-         checks=(('test', ('pytest',)),)),
+         checks=(('test', ('python', '-m', 'pytest')),)),
     dict(id='php', label='PHP', markers=('composer.json',),
          requirements=(
              dict(tool='php', label='PHP', purpose='runtime', executable='php',

@@ -20,9 +20,9 @@ import environment_adapters
 import environment_capabilities
 import environment_plan
 import environment_recipes
+import environment_providers
 from environment_store import EnvironmentPlanStore
 import project_git
-import project_requirements
 
 
 class EnvironmentPreparation:
@@ -59,6 +59,8 @@ class EnvironmentPreparation:
         paths = project_git.git(checkout, 'ls-tree', '-r', '-z', '--name-only', revision).split('\0')
         plan['check_candidates'] = environment_recipes.candidates(report, paths)
         plan['selected_checks'] = []
+        import project_analysis
+        reader = project_analysis.committed_reader(checkout, revision)
         specifications = {}
         for item in plan['requirements']:
             item['adapter_version'] = environment_adapters.ADAPTERS[item['capability']].version if item['capability'] in environment_adapters.ADAPTERS else None
@@ -66,44 +68,12 @@ class EnvironmentPreparation:
                         activation_reason='This capability has no managed activation adapter yet.')
             if item['capability'] not in environment_capabilities.MANAGED:
                 continue
-            # Existing PATH measurements do not prove contextual SDK selection.
-            # Freeze a publisher artifact and verify it in the recorded cwd.
-            selected = {entry.get('selected') for entry in item['evidence'] if entry.get('selected')}
-            version = next(iter(selected)) if len(selected) == 1 else item.get('version')
-            override = item.get('override')
-            if override:
-                version = override['constraint'] if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', override.get('constraint', '')) else item.get('version')
-            if not version and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', item['constraint'] or ''):
-                version = item['constraint']
-            conflicts = [conflict for conflict in item['conflicts'] if not override or conflict.get('kind') != 'override']
-            if conflicts or not version:
-                item.update(state='unresolved', version='', reason='A single exact SDK selection is required for acquisition.')
-                continue
-            if any(entry.get('selection_lookup', {}).get('status') == 'unresolved'
-                   for entry in item['evidence'] if entry.get('selection_lookup')):
-                item.update(state='unresolved', reason='The SDK selection could not be read.')
-                continue
+            adapter = environment_adapters.get(item['capability'])
             try:
-                key = (item['capability'], version)
-                if key not in specifications:
-                    specifications[key] = self.resolve(*key)
-                specification = specifications[key]
-                for entry in item['evidence']:
-                    lookup = entry.get('selection_lookup') or {}
-                    if lookup.get('components') or lookup.get('targets') or lookup.get('path') or lookup.get('profile') not in (None, 'minimal'):
-                        raise ValueError('This Rust component needs targets, profiles or optional components not yet supported by the acquisition adapter.')
-                    declarations = project_requirements.declarations(override or entry, item['notation'])
-                    if any(environment_plan._satisfies(version, constraint, notation or item['notation']) != 'satisfied'
-                           for constraint, notation in declarations):
-                        raise ValueError('The SDK selection does not satisfy its component declarations.')
-                    resolution = entry.get('resolution') or {}
-                    if resolution.get('policies', {}).get('paths'):
-                        raise ValueError('Custom .NET SDK search paths need a managed activation adapter.')
-                item.update(state='acquire', version=version, artifact=specification,
-                            activation='available', activation_reason='',
-                            reason='The exact publisher SDK can be prepared and contextually verified.')
+                environment_providers.invoke(adapter.plan_requirement, item, paths=paths, read=reader,
+                    revision=revision, resolve=self.resolve, specifications=specifications)
             except (ValueError, OSError) as error:
-                item.update(state='unsupported', reason=str(error)[:500])
+                item.update(state='unsupported', activation='unavailable', reason=str(error)[:500], activation_reason=str(error)[:500])
         plan['blockers'] = [environment_plan._blocker(item) for item in plan['requirements'] if item['state'] != 'ready']
         plan['blockers'].extend(dict(capability=item['capability'], state='activation_unavailable',
                                     reason=item['activation_reason'], remedy='Add a managed activation adapter.')
@@ -134,6 +104,16 @@ class EnvironmentPreparation:
         if not plan or plan.get('preparation_version') != 1:
             raise ValueError('Create a committed preparation plan first.')
         plan['selected_checks'] = environment_recipes.select(plan, identifiers, actor)
+        plan['digest'] = environment_plan.digest(plan)
+        self.store.save(plan)
+        return plan
+
+    def authorize_restore(self, digest, allowed, actor):
+        """An explicit administrator grant is distinct from choosing checks."""
+        plan = self.store.get(digest)
+        if not plan or plan.get('preparation_version') != 1 or type(allowed) is not bool:
+            raise ValueError('Select a committed preparation plan and a boolean restore permission.')
+        plan['restore_permission'] = dict(allowed=allowed, actor=actor)
         plan['digest'] = environment_plan.digest(plan)
         self.store.save(plan)
         return plan
@@ -247,11 +227,7 @@ class EnvironmentPreparation:
                     raise ValueError('Environment preparation was cancelled.')
                 key = environment_plan.canonical(item['artifact'])
                 if key not in acquired:
-                    if item['artifact'].get('provider') == 'agent_adopted':
-                        import environment_adoption
-                        acquired[key] = environment_adoption.receipt(item['artifact'], self.root, cancelled=cancelled)
-                    else:
-                        acquired[key] = self.acquire(item['artifact'], self.root, cancelled=cancelled)
+                    acquired[key] = self.acquire(item['artifact'], self.root, cancelled=cancelled)
                 receipt = acquired[key]
                 # Downloads can take minutes. Check again before reading cwd-
                 # dependent SDK configuration, and before certifying the result.
