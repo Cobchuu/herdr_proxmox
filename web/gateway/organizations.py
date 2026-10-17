@@ -90,9 +90,13 @@ def policy_guidance(frozen):
     lines = ['\nToolchain policy for this task, frozen when this session started:']
     for entry in frozen['policy']['toolchains']:
         lines.append(f"- {entry['label']} {entry['required']} (declared by {entry['declared_by']})")
+        if 'component' in entry:
+            lines.append(f"  component {entry['component']}; run checks from {entry['cwd']}")
         for executable in entry['executables']:
             lines.append(f'  use {executable}')
     lines.append(f"Policy digest: {frozen['digest']}")
+    for blocker in frozen['policy'].get('blockers', []):
+        lines.append('Environment blocker: ' + blocker)
     lines.append('Use these tools for every build and check. If a command reports a different '
                  'version, stop and report the mismatch rather than switching or installing an SDK '
                  'yourself. Propose an SDK upgrade as a separate change for review; never fold it '
@@ -123,6 +127,7 @@ class OrganizationStore:
         self.control_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='organization-input')
         self.agent_locks = {}
         self.contributions = None
+        self.environment_admission = None
         self.capacity_guard = None
         self.discussion_cursor = 0
         self.futures = set()
@@ -148,6 +153,9 @@ class OrganizationStore:
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
                 if job['state'] in ('queued', 'running'):
+                    if (job['kind'] == 'launch' and job['state'] == 'queued'
+                            and job.get('launch_stage') == 'environment_ready'):
+                        continue  # Admission committed, but no external runtime call was made.
                     if (job.get('kind') == 'discussion' and not job.get('discussion_submitted_at')
                             and any(isinstance(r, dict) and r.get('resume_applied_at')
                                     for r in (job.get('session_realignments') or {}).values())):
@@ -456,10 +464,12 @@ class OrganizationStore:
         try:
             policy = toolchain_policy.resolve_committed(path)
         except (OSError, ValueError):
+            if toolchain_policy.PROJECT_RESOLVER is not None:
+                raise
             return None
-        if not policy.get('toolchains') and not policy.get('checks'):
+        if not policy.get('toolchains') and not policy.get('checks') and not policy.get('blockers'):
             return None
-        return {'policy': policy, 'digest': toolchain_policy.digest(policy),
+        return {'policy': policy, 'digest': toolchain_policy.digest(policy), 'plan_digest': policy.get('plan_digest'),
                 'frozen_at': now(), 'checkout': path.as_posix()}
 
     def checkout_in_use(self, path):
@@ -865,7 +875,7 @@ class OrganizationStore:
                     submitted = item['id']
                 elif action in ('release', 'report', 'resolve_delegation'):
                     item = self.get(db, 'jobs', text(body, 'job_id', 40), org_id)
-                    if active(item):
+                    if active(item) and not (action == 'release' and item['state'] == 'waiting_environment'):
                         raise ValueError('Wait for the running job to finish.')
                     if action == 'resolve_delegation':
                         if item['kind'] != 'delegate' or item['state'] not in ('delivered', 'reported_complete', 'needs_attention', 'uncertain', 'completed', 'cancelled'):
@@ -1504,6 +1514,18 @@ class OrganizationStore:
                 future.add_done_callback(self._finished)
 
     def execute(self, job_id):
+        if self.environment_admission is not None:
+            with self.lock, closing(self.connect()) as db:
+                pending = self.get(db, 'jobs', job_id)
+            if pending['state'] != 'queued':
+                return
+            try:
+                if not self.environment_admission.admit(pending):
+                    return
+            except (ValueError, OSError, sqlite3.Error) as error:
+                self.environment_admission.update(job_id, ('queued', 'waiting_environment'),
+                    state='needs_attention', error=str(error)[:1000])
+                return
         with self.lock, closing(self.connect()) as db:
             job = self.get(db, 'jobs', job_id)
             if job.get('state') != 'queued':
@@ -1655,15 +1677,37 @@ class OrganizationStore:
                 # Record the exact executable arguments sent to Herdr, separately
                 # from the editable profile and any later in-TUI model changes.
                 job = self.update_job(job_id, launch_arguments=arguments)
-                job = self.update_job(job_id, launch_stage='agent_starting')
                 # Frozen before the agent starts, so the session's policy is the
                 # one that applied when the work began.
-                frozen = self.frozen_policy(job, profile)
+                admitted = (job.get('environment_admission') or {}).get('state') == 'ready'
+                if admitted and self.environment_admission is not None:
+                    continuation = self.environment_admission.store.waiter(job_id)
+                    if self.environment_admission.current(continuation, starting=True) is None:
+                        raise ValueError('The task has not recorded this admitted execution.')
+                frozen = job.get('toolchain_policy') if admitted else None
+                frozen = frozen or self.frozen_policy(job, profile)
+                if admitted and frozen and frozen.get('plan_digest'):
+                    import project_git
+                    checkout = Path(job.get('worktree_path') or job.get('source_project') or project)
+                    if (project_git.git(checkout, 'rev-parse', 'HEAD').strip() != job['start_sha']
+                            or toolchain_policy.digest(frozen['policy']) != frozen['digest']):
+                        raise ValueError('The admitted environment no longer matches this execution.')
+                    measured = toolchain_policy.verify(frozen['policy'], root=checkout)
+                    if not measured or not all(item.get('matches') is True for item in measured):
+                        raise ValueError('The prepared SDK selection changed before agent launch; prepare again.')
+                    frozen = dict(frozen, checkout=str(checkout))
                 if frozen:
-                    job = self.update_job(job_id, toolchain_policy=frozen)
+                    job = self.update_job(job_id, toolchain_policy=frozen, launch_stage='environment_binding')
+                    from environment_launch import configure
+                    pane, workspace = configure(self, job, frozen, pane, workspace)
+                    job = self.update_job(job_id, pane_id=pane, workspace_id=workspace)
+                job = self.update_job(job_id, launch_stage='agent_starting')
                 self.command('agent', 'start', job['alias'], '--kind', profile['runtime'], '--pane', pane, '--timeout', '60000', *(['--', *arguments] if arguments else []), timeout=70)
                 agent = self.identity(job)
                 job = self.update_job(job_id, agent_session=agent.get('agent_session'))
+                if (job.get('environment_binding') or {}).get('state') == 'requested':
+                    from environment_launch import verify_process
+                    verify_process(self, job)
                 if job.get('task_id'):
                     job = self.update_job(job_id, completion_token=uuid.uuid4().hex)
                 org = job['organization']
@@ -1689,6 +1733,9 @@ class OrganizationStore:
                     if job.get('task_id'):
                         task_prompt = task_prompt.replace('{{HERDR_TASK_RECEIPT}}', (receipt_directory / 'receipt.json').as_posix()).replace('{{HERDR_TASK_RUN}}', job['id']).replace('{{HERDR_TASK_TOKEN}}', job['completion_token'])
                     prompt += '\n\nAssigned task (start now in this checkout):\n' + task_prompt
+                environment_binding = job.get('environment_binding') or {}
+                environment_notice = ('\nInteractive SDK activation is unavailable: ' + environment_binding['reason']
+                                      if environment_binding.get('state') == 'unavailable' else '')
                 if profile.get('group_id'):
                     # Do not deliver an imperative group description as the startup task.
                     # Purpose, roster and output paths arrive together in the discussion.
@@ -1708,12 +1755,12 @@ class OrganizationStore:
                                'publication authorization. Dashboard task publishing is administrator-controlled.')
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen), '--wait', '--timeout', '180000', timeout=190)
+                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen) + environment_notice, '--wait', '--timeout', '180000', timeout=190)
                     self.identity(job)
                 else:
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen))
+                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen) + environment_notice)
                     self.update_job(job_id, delivery=dict(stage='sent', at=now(),
                                                           completion=self.completion_baseline(response)))
                 self.update_job(job_id, state='persona_sent')
@@ -1762,6 +1809,8 @@ class OrganizationStore:
                 detail += ' Launch failed during preflight; no workspace or pane was created and no terminal input was sent.'
             elif job['kind'] == 'launch' and job.get('launch_stage') == 'workspace_preparing':
                 detail += ' Launch failed while preparing the workspace; no agent was started and no terminal input was sent.'
+            elif job['kind'] == 'launch' and job.get('launch_stage') == 'environment_binding':
+                detail += ' Launch failed while binding the prepared environment; no agent was started. Inspect the recorded panes before retrying.'
             elif delivery == 'blocked':
                 detail += ' The agent needs a decision; no prompt input was sent. Inspect the session and choose an action.'
             elif delivery == 'unknown' and code:

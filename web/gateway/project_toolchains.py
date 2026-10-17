@@ -35,7 +35,8 @@ DEFAULT_PROBE = ('--version',)
 # The requirement identifies a runtime, not necessarily its command spelling.
 # Debian commonly provides python3 without a python alias; retain both probes
 # rather than declaring the runtime absent or assuming they are the same SDK.
-EXECUTABLES = {'python': ('python3', 'python')}
+EXECUTABLES = {'python': ('python3', 'python'),
+               'rust': ('rustc',), 'rust-toolchain': ('rustc',)}
 
 
 def probe_arguments(name):

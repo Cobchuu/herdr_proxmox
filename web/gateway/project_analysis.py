@@ -31,7 +31,7 @@ WORKING_TREE_TTL = 30.0
 CACHE_LIMIT = 64
 # Bumped whenever a change alters what a report means, so old entries are unused
 # rather than reinterpreted.
-ANALYZER_VERSION = 4
+ANALYZER_VERSION = 5
 
 
 def stamp():
@@ -164,6 +164,25 @@ class ProjectAnalysis:
             self.cache[key] = dict(report=report, stored=time.monotonic())
         return report
 
+    def plan(self, value, revision=None, which=None, run=None, force=False, release=None):
+        """The environment plan for a project: what preparing it would involve.
+
+        Built from the same resolved report every other consumer reads, so the
+        plan cannot describe a different project than the page or the provisioning
+        decision. Analysis can probe installed executables; planning runs no
+        project scripts, downloads or installers. It consults the capability
+        registry and hashes the resolved report.
+        `which`/`run` are the same probe overrides `effective` accepts, so a caller
+        (or a test) can supply measurements without spawning a process.
+        """
+        import environment_plan
+        report = self.effective(value, revision=revision, which=which, run=run, force=force)
+        # The plan reads measurements from the assessment the report already
+        # carries rather than re-probing, so an injected probe is honoured and a
+        # real one is not run twice.
+        # The release's installer definition is not an artifact/version list.
+        return environment_plan.build(report, release_entries=release, measure=environment_plan.measurements(report))
+
     def effective(self, value, revision=None, which=None, run=None, force=False):
         """One resolved requirement view: discovery, overrides, conflicts, assessment.
 
@@ -261,10 +280,17 @@ class ProjectAnalysis:
                     assessment['offer'] = dict(offer, satisfies=False,
                         reason='The release SDK does not satisfy every component declaration and selection.')
                     assessment['provisionable'] = False
-            if not override and (len(selections) > 1 or any(
-                    item.get('selection_lookup', {}).get('status') == 'unresolved'
-                    for item in entry['discovered'] if item.get('selection_lookup'))):
-                entry['assessment']['provisionable'] = False
+            unreadable_pin = any(
+                item.get('selection_lookup', {}).get('status') == 'unresolved'
+                for item in entry['discovered'] if item.get('selection_lookup'))
+            if not override and (len(selections) > 1 or unreadable_pin):
+                # A pin nobody could read leaves the requirement itself unknown,
+                # so no installation may be authorized on its behalf. Disagreeing
+                # pins are a different case: the offer check above already judged
+                # the release's version against every declaration and selection,
+                # and it decides whether installing would resolve them all.
+                if unreadable_pin:
+                    entry['assessment']['provisionable'] = False
                 # Unknown selections cannot erase an already proven failure.
                 if entry['assessment']['verdict'] != 'violated':
                     entry['assessment'].update(verdict='undecidable',

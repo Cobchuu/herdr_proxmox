@@ -1,8 +1,19 @@
 # Development toolchain and missing tools
 
+This page describes the current toolchain/provisioning implementation. The
+[automatic project environment implementation plan](automatic-project-environments.md)
+defines the work required to prepare managed repositories end to end, including
+.NET, Rust, multiple SDK versions, dependency restoration and automatic resume.
+The current changeset implements SDK preparation for exact .NET/Rust versions,
+frozen session guidance and native validation under those bindings, with a shared
+publication gate. Opt-in automatic launch preparation parks work before runtime
+pane creation and resumes only its recorded execution after SDK verification.
+Interactive shells inherit the environment; conflicting component SDKs use one
+cwd-aware dispatcher. Discovery reads alone do not prepare an environment.
+
 ## Who provides which tool
 
-There are two separate toolchains, and the product only owns one of them.
+There are separate provisioning scopes:
 
 1. **The project's own pinned build toolchain** — Flutter 3.44.8 and its bundled Dart SDK, installed
    by the root-run `install/dev-tools-install.sh`. The Flutter files are owned
@@ -11,7 +22,13 @@ There are two separate toolchains, and the product only owns one of them.
    `scripts/build-web.sh` cannot produce the dashboard without it. The dashboard
    detects the configured executable file; that establishes presence, not its
    actual version or usability. Installation and builds verify the required pin.
-2. **A tool one task happens to need** — a linter, a code generator, a
+2. **Managed project SDKs** — exact .NET/Rust SDKs can be planned and queued by
+   an administrator from either project explorer. Trusted publisher archives are
+   hashed, unpacked and probed without root in a versioned store. This does not
+   enforce the interactive agent's process environment. Frozen launch guidance
+   names the prepared tools; independent validation probes and runs explicitly
+   approved native checks under those component bindings.
+3. **A tool one task happens to need** — a linter, a code generator, a
    language-specific checker. The worker obtains it within task permissions,
    in a task-specific cache or environment. Pin the repository-required version
    and verify release checksums or package-manager integrity, then report it.
@@ -20,8 +37,8 @@ Adding a task-specific tool to the root SDK service is not a small change. If it
 also becomes a required check in `scripts/build-web.sh`, a provisioned toolchain
 turns into a precondition for every integration event and every dashboard build,
 because `validation.py` runs the repository's own scripts to verify each worker
-merge. Task tools therefore stay out of the catalog and are installed by the
-agent itself.
+merge. Project SDKs use their own preparation adapters; other task tools stay
+out of the root catalog and are obtained within task permissions.
 
 ## The catalog
 
@@ -146,6 +163,77 @@ and periodically while idle. **Refresh toolchain status** requests an immediate
 update. Failed requests remain visible after refreshing; completed installations
 offer their bounded output for inspection.
 
+## Environment plans
+
+An environment plan describes what preparing one project would involve: one
+exact version per requirement, where each came from, and what Herdr can actually
+do about it. The pure plan builder transforms the resolved report without
+executing commands. Analysis can probe installed executables. The explicit
+preparation-plan POST also resolves trusted publisher metadata; it does not
+download SDK archives or run project scripts. Polling never enqueues provisioning.
+
+Four requirement states, used by both dashboards and the preparation worker:
+
+| State | Meaning |
+| --- | --- |
+| `ready` | An installed version satisfies the declared constraint |
+| `acquire` | A version exists to install and would satisfy it |
+| `unsupported` | Herdr cannot obtain a satisfying version on this host |
+| `unresolved` | No exact version could be chosen from the evidence |
+
+The distinction between `unsupported` and `unresolved` is deliberate. A project
+that declares `.NET 8.0.100` and a host with no .NET installer is `unsupported`:
+the version is known and nothing is queued, so the next step is a manual install
+or a new adapter. A project that declares nothing usable is `unresolved`, and the
+next step is to declare something. Collapsing them would either hide a real gap or
+queue an installation on no evidence.
+
+`environment_capabilities.py` advertises support per capability and per operation
+(`detect`, `resolve`, `acquire`, `activate`, `verify`, `restore`, `check`) rather
+than with one universal flag. A recognised language is not a prepared capability:
+discovery can read a requirement without having its installer. Exact .NET SDK
+and Rust compiler/Cargo/host-standard-library acquisition and activation are
+implemented for Linux glibc x64/arm64. Real installation qualification is a
+separate CI release prerequisite, also available through manual dispatch, and
+is pending its first run. Every registry entry states
+which operations exist; native checks require explicit selection in an approved
+plan. A successful SDK preparation job does not claim those checks ran.
+
+`environment_plan.py` selects a version by fixed precedence: an operator override,
+then a repository constraint, then a single unambiguous selection. Installed
+versions and installable artifacts are separate sets and are never merged, so an
+already-installed version that misses the project's range is refused rather than
+reused. The plan's digest covers every execution-affecting field and excludes only
+the build timestamp, so the same inputs always yield the same environment and a
+different digest means a different one. `environment_store.py` persists plans
+addressed by that digest: re-planning after a commit is a new row, not an
+overwrite of a running environment.
+
+A plan built from a working-tree report is marked `preview` and must not authorise
+installation. Administrator preparation instead freezes committed declarations
+and trusted artifact metadata, persists a job and verifies SDK selection from
+each component directory of the unchanged checkout. Tracked edits and new or
+ignored SDK-selection files block verification; unrelated untracked files do
+not. Host readiness and managed activation capability remain separate fields,
+so an installed tool is not called absent merely because its adapter is missing.
+The service stores
+plans/jobs in `environments.sqlite3` beside the gateway database and SDKs in
+`environments/`, overridable through `HERDR_ENVIRONMENT_ROOT`. It refuses to
+acquire as root. Cancelled/failed work can be retried; repeated active submissions
+share a job. Explicit re-preparation after completion re-probes reusable SDKs.
+
+**SDKs prepared** means only that the SDK probes succeeded. The SDK job retains
+`dependencies=not_run` and `checks=not_run`. Project checks are recorded separately
+by validation, using the approved plan/policy identities, component cwd and SDK
+environment. Automatic launch continuation is durable, while uncertain external
+runtime acceptance is never automatically replayed. Enable **Prepare supported
+project SDKs before agent launch** in organization automation. Native build/test
+approval is a separate switch because those commands can execute project code.
+The SDK store currently shares the gateway user, so it is not a protection
+boundary against same-user agents. See
+[the implementation plan](automatic-project-environments.md) for the remaining
+work and the real installation qualification command.
+
 ## Project requirements are a separate scope
 
 Herdr's build stack is not evidence about a managed project. A project states
@@ -220,6 +308,13 @@ project explorer. They share discovery requests and override-failure handling.
 Re-analyse bypasses the working-tree cache; source scope, revision, assessment
 time and partial coverage remain visible. A rejected override save retains its
 draft in the editor.
+
+The cards distinguish an installed executable from a satisfied version rule:
+without a declared range or selection they show **Installed — required version
+unknown**. Flutter dependencies yield conventional `flutter test` and
+`flutter analyze` suggestions; pure Dart packages keep Dart commands. Repeated
+requirement explanations are shown once. **Unrecognised files** expands a bounded
+sample of up to 50 paths, with the displayed and total counts shown explicitly.
 
 Working-tree census and manifest reads share descriptor-anchored access with the
 file explorer. Every directory is opened relative to a pinned parent, symlinks

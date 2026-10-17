@@ -27,6 +27,7 @@
 ## Development and execution architecture
 
 - [Development toolchain](development-toolchain.md) — local development tools.
+- [Automatic project environments](automatic-project-environments.md) — proposed discovery, provisioning, verification and task-resume architecture for .NET, Rust and other ecosystems.
 - [CI](ci.md) — checks and installation validation.
 - [LXC autonomous builds](lxc-autonomous-builds.md) — durable build execution.
 - [Event-driven execution](event-driven-execution.md) — events and reconciliation.

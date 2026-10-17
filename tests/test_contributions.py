@@ -27,6 +27,10 @@ import server
 
 
 class TaskBaseTests(unittest.TestCase):
+    def test_existing_sdk_recovery_permission_does_not_grant_automatic_preparation(self):
+        policy = contributions.resolved_automation_policy({'auto_sdk': True})
+        self.assertIs(policy['auto_prepare'], False)
+        self.assertIs(policy['auto_prepare_checks'], False)
     @patch('project_git.configured_base', return_value=None)
     @patch('project_git.git')
     def test_origin_default_is_resolved_to_explicit_branch(self, git, configured):
@@ -1131,7 +1135,8 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(moved['delivery_blocker']['kind'], 'policy_changed')
         self.assertIn('Verify again', moved['delivery_blocker']['message'])
         # Matching evidence under the same policy is not blocked.
-        task['builds'][head].update(policy_digest=approved, toolchain_evidence=[dict(matches=True)])
+        task['builds'][head].update(policy_digest=approved,
+            toolchain_evidence=[dict(name='flutter', required='3.44.8', actual='3.44.8', matches=True)])
         self.assertTrue(self.service.policy_matches(task, task['builds'][head]))
 
     def test_automatic_delivery_blocks_stale_policy_before_pushing(self):

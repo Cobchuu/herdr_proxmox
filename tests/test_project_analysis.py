@@ -232,6 +232,48 @@ class EffectiveReportTests(unittest.TestCase):
         self.assertEqual(flutter['assessment']['verdict'], 'undecidable')
         self.assertFalse(flutter['assessment']['provisionable'])
 
+    def test_disagreeing_pins_one_release_version_satisfies_stay_installable(self):
+        # Disagreement is not itself a refusal: the offer check decides, so two
+        # components pinning selections that a single release version answers are
+        # still resolvable by installing it.
+        write(self.projects, {
+            'flutter-app/one/.fvmrc': '{"flutter":"3.44.8"}',
+            'flutter-app/two/.fvmrc': '{"flutter":">=3.0.0"}',
+            'flutter-app/one/pubspec.yaml': 'name: one\ndependencies:\n  flutter:\n    sdk: flutter\n',
+            'flutter-app/two/pubspec.yaml': 'name: two\ndependencies:\n  flutter:\n    sdk: flutter\n',
+        })
+        analysis = ProjectAnalysis(self.projects, overrides=lambda: {},
+            toolchains=lambda: {'flutter': {'required': '3.44.8', 'executable': ''}},
+            catalog=lambda: {'flutter': {}})
+        report = analysis.effective('flutter-app', which=lambda name: '/usr/bin/' + name,
+                                    run=fake_run('3.40.0'))
+        flutter = next(item for item in report['requirements'] if item['tool'] == 'flutter')
+        # The installed SDK answers only one of the pins, so the project fails...
+        self.assertEqual(flutter['assessment']['verdict'], 'violated')
+        # ...but the release pins a version that answers both, so installing it
+        # would resolve every declaration and is authorized.
+        self.assertTrue(flutter['assessment']['provisionable'])
+
+    def test_an_unreadable_pin_refuses_an_installation_the_release_could_make(self):
+        # One component's pin reads fine and the release satisfies it; the other
+        # component's pin cannot be read at all. Nothing may be installed on
+        # behalf of a requirement nobody could establish.
+        write(self.projects, {
+            'flutter-app/one/.fvmrc': '{"flutter":"3.44.8"}',
+            'flutter-app/two/.fvmrc': '{"flavors":{}}',
+            'flutter-app/one/pubspec.yaml': 'name: one\ndependencies:\n  flutter:\n    sdk: flutter\n',
+            'flutter-app/two/pubspec.yaml': 'name: two\ndependencies:\n  flutter:\n    sdk: flutter\n',
+        })
+        analysis = ProjectAnalysis(self.projects, overrides=lambda: {},
+            toolchains=lambda: {'flutter': {'required': '3.44.8', 'executable': ''}},
+            catalog=lambda: {'flutter': {}})
+        report = analysis.effective('flutter-app', which=lambda name: '/usr/bin/' + name,
+                                    run=fake_run('3.44.8'))
+        flutter = next(item for item in report['requirements'] if item['tool'] == 'flutter')
+        self.assertEqual(flutter['assessment']['verdict'], 'undecidable')
+        self.assertFalse(flutter['assessment']['provisionable'])
+        self.assertEqual(report['provisionable'], [])
+
     def test_an_override_supplements_and_is_reported_when_it_disagrees(self):
         self.overrides['app'] = dict(repository='app', origin='operator_override',
                                      toolchain='node', constraint='>=22', notation='semver',

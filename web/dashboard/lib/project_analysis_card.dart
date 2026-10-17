@@ -17,6 +17,95 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
   bool refreshing = false;
   bool saving = false;
   int requestId = 0;
+  Map<String, dynamic>? environmentPlan;
+  Map<String, dynamic>? environmentJob;
+  Timer? environmentTimer;
+  int environmentGeneration = 0;
+
+  @override
+  void dispose() {
+    environmentTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> environmentAction(
+    String operation, {
+    List<String>? checks,
+  }) async {
+    if (!admin || saving) return;
+    final epoch = connection.generation;
+    final path = widget.path;
+    final generation = ++environmentGeneration;
+    bool current() =>
+        mounted &&
+        connection.generation == epoch &&
+        widget.path == path &&
+        generation == environmentGeneration;
+    setState(() {
+      saving = true;
+      failure = null;
+    });
+    try {
+      final result = Map<String, dynamic>.from(
+        await connection.request(
+              'projects/environment/$operation',
+              switch (operation) {
+                'plan' => {'path': path},
+                'cancel' => {'id': environmentJob!['id']},
+                'select' => {
+                  'digest': environmentPlan!['digest'],
+                  'checks': checks,
+                },
+                _ => {'digest': environmentPlan!['digest'], 'retry': true},
+              },
+            )
+            as Map,
+      );
+      if (!current()) return;
+      setState(() {
+        if (operation == 'plan' || operation == 'select') {
+          environmentPlan = result;
+          environmentJob = null;
+        } else {
+          environmentJob = result;
+        }
+      });
+      environmentTimer?.cancel();
+      if (['queued', 'running'].contains(environmentJob?['state'])) {
+        var polling = false;
+        environmentTimer = Timer.periodic(const Duration(seconds: 2), (
+          timer,
+        ) async {
+          if (!current()) {
+            timer.cancel();
+            return;
+          }
+          if (polling) return;
+          polling = true;
+          try {
+            final job = Map<String, dynamic>.from(
+              await connection.request(
+                    'projects/environment?job=${environmentJob!['id']}',
+                  )
+                  as Map,
+            );
+            if (!current()) return;
+            setState(() => environmentJob = job);
+            if (!['queued', 'running'].contains(job['state'])) timer.cancel();
+          } catch (error) {
+            timer.cancel();
+            if (current()) setState(() => failure = '$error');
+          } finally {
+            polling = false;
+          }
+        });
+      }
+    } catch (error) {
+      if (current()) setState(() => failure = '$error');
+    } finally {
+      if (current()) setState(() => saving = false);
+    }
+  }
 
   @override
   void initState() {
@@ -29,6 +118,10 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
   void didUpdateWidget(covariant ProjectAnalysisCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.path != widget.path) {
+      environmentTimer?.cancel();
+      environmentGeneration++;
+      environmentPlan = environmentJob = null;
+      saving = false;
       requestId++;
       loaded = null;
       failure = null;
@@ -248,7 +341,7 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
           ],
           if (item['selection_lookup'] is Map)
             Text(
-              'FVM lookup: ${(item['selection_lookup'] as Map)['directory']} · '
+              '${(item['selection_lookup'] as Map)['kind'] == 'rustup' ? 'Rust toolchain' : 'FVM'} lookup: ${(item['selection_lookup'] as Map)['directory']} · '
               '${(item['selection_lookup'] as Map)['evidence']} · boundary: repository root',
             ),
         ],
@@ -264,6 +357,7 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
   Widget readiness(Map item) {
     final assessment = loaded?.assessmentOf(item as Map<String, dynamic>) ?? {};
     final verdict = '${assessment['verdict'] ?? 'unknown'}';
+    final label = loaded!.readinessLabel(item.cast<String, dynamic>());
     final components = (item['components'] as List? ?? []).join(', ');
     final measured = '${assessment['measured'] ?? ''}';
     return Padding(
@@ -272,7 +366,7 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '${item['label'] ?? item['tool']}: ${item['constraint'] ?? ''} · $verdict'
+            '${item['label'] ?? item['tool']}: ${item['constraint'] ?? ''} · $label'
             '${item['override'] is Map ? ' · override' : ''}'
             '${assessment['provisionable'] == true ? ' · installable' : ''}',
             style: TextStyle(
@@ -387,8 +481,9 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                         Text(
                           'Candidate command: ${(command['command'] as List).join(' ')} (${command['source']})',
                         ),
-                      for (final finding
-                          in component['unresolved'] as List? ?? [])
+                      for (final finding in additionalComponentFindings(
+                        component as Map,
+                      ))
                         Text('${finding['what']}: ${finding['reason']}'),
                     ],
                     for (final finding in report['unresolved'] as List? ?? [])
@@ -397,6 +492,18 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                       'Scanned ${coverage['files']} files in ${coverage['directories']} directories · '
                       '${coverage['unknown'] ?? 0} unrecognised${coverage['truncated'] == true ? ' · scan incomplete' : ''}',
                     ),
+                    if ((coverage['unknown'] ?? 0) > 0)
+                      ExpansionTile(
+                        title: const Text('Unrecognised files'),
+                        subtitle: Text(
+                          'Showing ${(coverage['unknown_evidence'] as List? ?? []).length} of ${coverage['unknown']} paths.',
+                        ),
+                        children: [
+                          for (final path
+                              in coverage['unknown_evidence'] as List? ?? [])
+                            ListTile(title: SelectableText('$path')),
+                        ],
+                      ),
                     if (loaded?.override != null)
                       Text(
                         'Operator override: ${loaded!.override!['toolchain']} '
@@ -406,6 +513,13 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                   Wrap(
                     spacing: 8,
                     children: [
+                      if (admin)
+                        TextButton(
+                          onPressed: saving || refreshing
+                              ? null
+                              : () => environmentAction('plan'),
+                          child: const Text('Plan environment'),
+                        ),
                       TextButton.icon(
                         onPressed: refreshing
                             ? null
@@ -430,6 +544,68 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                         ),
                     ],
                   ),
+                  if (environmentPlan != null) ...[
+                    const Text('Committed SDK preparation'),
+                    const Text(
+                      'Approve validation checks before preparing. These commands can execute project code.',
+                    ),
+                    for (final check
+                        in environmentPlan!['check_candidates'] as List? ?? [])
+                      CheckboxListTile(
+                        title: Text(
+                          '${check['cwd']}: ${(check['arguments'] as List).join(' ')} (${check['source']})',
+                        ),
+                        value:
+                            (environmentPlan!['selected_checks'] as List? ?? [])
+                                .any((item) => item['id'] == check['id']),
+                        onChanged: saving || !admin
+                            ? null
+                            : (selected) {
+                                final ids = [
+                                  for (final item
+                                      in environmentPlan!['selected_checks']
+                                              as List? ??
+                                          [])
+                                    '${item['id']}',
+                                ];
+                                if (selected == true) {
+                                  ids.add('${check['id']}');
+                                } else {
+                                  ids.remove('${check['id']}');
+                                }
+                                environmentAction('select', checks: ids);
+                              },
+                      ),
+                    for (final item
+                        in environmentPlan!['requirements'] as List? ?? [])
+                      Text(
+                        '${item['components']}: ${item['capability']} ${item['version']} · ${item['state']} · ${item['reason']} · Activation: ${item['activation'] ?? 'unavailable'} ${item['activation_reason'] ?? ''}',
+                      ),
+                    if (environmentJob != null)
+                      Text(environmentJobLabel(environmentJob!)),
+                    if (environmentPlanCanPrepare(environmentPlan) &&
+                        ![
+                          'queued',
+                          'running',
+                          'ready',
+                        ].contains(environmentJob?['state']))
+                      TextButton(
+                        onPressed: saving || !admin
+                            ? null
+                            : () => environmentAction('prepare'),
+                        child: const Text('Prepare SDKs'),
+                      ),
+                    if ([
+                      'queued',
+                      'running',
+                    ].contains(environmentJob?['state']))
+                      TextButton(
+                        onPressed: saving || !admin
+                            ? null
+                            : () => environmentAction('cancel'),
+                        child: const Text('Cancel SDK preparation'),
+                      ),
+                  ],
                 ],
               ),
             ),

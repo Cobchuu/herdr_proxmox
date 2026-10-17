@@ -22,6 +22,100 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
   Map<String, dynamic> analysis = const {};
   String? failure;
   bool refreshing = false;
+  Map<String, dynamic>? environmentPlan;
+  Map<String, dynamic>? environmentJob;
+  Timer? environmentTimer;
+  int environmentGeneration = 0;
+
+  @override
+  void didUpdateComponent(ProjectAnalysisCard old) {
+    super.didUpdateComponent(old);
+    if (old.path != component.path) {
+      environmentGeneration++;
+      environmentTimer?.cancel();
+      environmentPlan = environmentJob = null;
+      busy = refreshing = false;
+      loaded = null;
+      analysis = const {};
+      failure = error = null;
+      refresh();
+    }
+  }
+
+  @override
+  void dispose() {
+    environmentTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> environmentAction(
+    String operation, {
+    List<String>? checks,
+  }) async {
+    if (!admin || busy) return;
+    final generation = ++environmentGeneration;
+    final path = component.path;
+    await perform((epoch) async {
+      bool current() =>
+          valid(epoch) &&
+          generation == environmentGeneration &&
+          component.path == path;
+      final result = Map<String, dynamic>.from(
+        await connection.request(
+              'projects/environment/$operation',
+              switch (operation) {
+                'plan' => {'path': component.path},
+                'cancel' => {'id': environmentJob!['id']},
+                'select' => {
+                  'digest': environmentPlan!['digest'],
+                  'checks': checks,
+                },
+                _ => {'digest': environmentPlan!['digest'], 'retry': true},
+              },
+            )
+            as Map,
+      );
+      if (!current()) return;
+      setState(() {
+        if (operation == 'plan' || operation == 'select') {
+          environmentPlan = result;
+          environmentJob = null;
+        } else {
+          environmentJob = result;
+        }
+      });
+      environmentTimer?.cancel();
+      if (['queued', 'running'].contains(environmentJob?['state'])) {
+        var polling = false;
+        environmentTimer = Timer.periodic(const Duration(seconds: 2), (
+          timer,
+        ) async {
+          if (!current()) {
+            timer.cancel();
+            return;
+          }
+          if (polling) return;
+          polling = true;
+          try {
+            final job = Map<String, dynamic>.from(
+              await connection.request(
+                    'projects/environment?job=${environmentJob!['id']}',
+                  )
+                  as Map,
+            );
+            if (!current()) return;
+            setState(() => environmentJob = job);
+            if (!['queued', 'running'].contains(job['state'])) timer.cancel();
+          } catch (failure) {
+            timer.cancel();
+            if (current()) setState(() => error = '$failure');
+          } finally {
+            polling = false;
+          }
+        });
+      }
+    });
+  }
 
   List<Map<String, dynamic>> get components =>
       (analysis['components'] as List? ?? []).cast<Map<String, dynamic>>();
@@ -44,13 +138,14 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
     if (refreshing || !connection.state.connected) return;
     refreshing = true;
     final epoch = connection.generation;
+    final path = component.path;
     try {
       final result = await loadProjectAnalysis(
         connection.request,
         component.path,
         force: force,
       );
-      if (valid(epoch))
+      if (valid(epoch) && component.path == path)
         setState(() {
           loaded = result;
           analysis = result.report;
@@ -58,12 +153,13 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
         });
     } catch (e) {
       // A failed lookup is not an absent requirement, and must not read as one.
-      if (valid(epoch))
+      if (valid(epoch) && component.path == path)
         setState(() {
           failure = '$e';
         });
     } finally {
-      if (valid(epoch)) setState(() => refreshing = false);
+      if (valid(epoch) && component.path == path)
+        setState(() => refreshing = false);
     }
   }
 
@@ -120,7 +216,7 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
       ],
       if (requirement['selection_lookup'] is Map)
         meta(
-          'FVM lookup: ${(requirement['selection_lookup'] as Map)['directory']} · '
+          '${(requirement['selection_lookup'] as Map)['kind'] == 'rustup' ? 'Rust toolchain' : 'FVM'} lookup: ${(requirement['selection_lookup'] as Map)['directory']} · '
           '${(requirement['selection_lookup'] as Map)['evidence']} · boundary: repository root',
         ),
       for (final conflict in (requirement['conflicts'] as List? ?? []))
@@ -144,13 +240,17 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
   Component readinessRow(Map<String, dynamic> requirement) {
     final assessment = loaded!.assessmentOf(requirement);
     final verdict = '${assessment['verdict'] ?? 'unknown'}';
+    final label = loaded!.readinessLabel(requirement);
     final component = (requirement['components'] as List? ?? []).join(', ');
     return el('div', [
       el('div', [
         el('strong', [text('${requirement['label'] ?? requirement['tool']}')]),
         if ('${requirement['constraint'] ?? ''}'.isNotEmpty)
           mono('${requirement['constraint']}'),
-        pill(verdict, tone: readinessTone(verdict)),
+        pill(
+          label,
+          tone: label == verdict ? readinessTone(verdict) : 'neutral',
+        ),
         if (requirement['override'] is Map) pill('Override', tone: 'info'),
         if (assessment['provisionable'] == true)
           pill('Installable', tone: 'info'),
@@ -206,8 +306,8 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
           ' (${command['source'] ?? 'convention'})',
           classes: 'org-note',
         ),
-      for (final finding in (item['unresolved'] as List? ?? []))
-        meta('Unresolved: ${(finding as Map)['reason']}', classes: 'org-note'),
+      for (final finding in additionalComponentFindings(item))
+        meta('Unresolved: ${finding['reason']}', classes: 'org-note'),
     ], classes: 'org-policy__group');
   }
 
@@ -329,6 +429,15 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
           '${coverage['truncated'] == true ? ' (partial: a limit stopped the scan)' : ''}'
           '${(coverage['unknown'] ?? 0) == 0 ? '' : ' · ${coverage['unknown']} unrecognised'}',
         ),
+        if ((coverage['unknown'] ?? 0) > 0)
+          el('details', [
+            el('summary', [text('Unrecognised files')]),
+            meta(
+              'Showing ${(coverage['unknown_evidence'] as List? ?? []).length} of ${coverage['unknown']} paths.',
+            ),
+            for (final path in coverage['unknown_evidence'] as List? ?? [])
+              meta(path, classes: 'mono'),
+          ]),
         if (operatorOverride != null)
           meta(
             'Operator override: ${operatorOverride!['toolchain']} '
@@ -340,6 +449,48 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
       ],
       if (!admin)
         meta('Only an administrator can add an override.', iconName: 'lock'),
+      if (environmentPlan != null) ...[
+        el('h3', [text('Committed SDK preparation')], classes: 'overline'),
+        meta(
+          'Approve validation checks before preparing. These commands can execute project code.',
+        ),
+        for (final check in environmentPlan!['check_candidates'] as List? ?? [])
+          button(
+            '${(environmentPlan!['selected_checks'] as List? ?? []).any((item) => item['id'] == check['id']) ? 'Deselect' : 'Approve'} ${check['cwd']}: ${(check['arguments'] as List).join(' ')} (${check['source']})',
+            () {
+              final ids = [
+                for (final item
+                    in environmentPlan!['selected_checks'] as List? ?? [])
+                  '${item['id']}',
+              ];
+              if (ids.contains('${check['id']}')) {
+                ids.remove('${check['id']}');
+              } else {
+                ids.add('${check['id']}');
+              }
+              environmentAction('select', checks: ids);
+            },
+            disabled: busy || !admin,
+          ),
+        for (final item in environmentPlan!['requirements'] as List? ?? [])
+          meta(
+            '${item['components']}: ${item['capability']} ${item['version']} · ${item['state']} · ${item['reason']} · Activation: ${item['activation'] ?? 'unavailable'} ${item['activation_reason'] ?? ''}',
+          ),
+        if (environmentJob != null) meta(environmentJobLabel(environmentJob!)),
+        if (environmentPlanCanPrepare(environmentPlan) &&
+            !['queued', 'running', 'ready'].contains(environmentJob?['state']))
+          button(
+            'Prepare SDKs',
+            () => environmentAction('prepare'),
+            disabled: busy || !admin,
+          ),
+        if (['queued', 'running'].contains(environmentJob?['state']))
+          button(
+            'Cancel SDK preparation',
+            () => environmentAction('cancel'),
+            disabled: busy || !admin,
+          ),
+      ],
       feedback(),
     ],
     iconName: 'search',
@@ -347,6 +498,13 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
         'Derived from this repository\'s own files. Requirements show their evidence; anything '
         'that could not be settled is listed rather than omitted.',
     actions: [
+      if (admin)
+        button(
+          'Plan environment',
+          () => environmentAction('plan'),
+          disabled: busy || refreshing,
+          small: true,
+        ),
       button(
         'Re-analyse',
         () => refresh(force: true),

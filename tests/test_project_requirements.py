@@ -573,6 +573,8 @@ class DependencyEvidenceTests(unittest.TestCase):
                           '  http: ^1.2.0\n'})
         item = component(analyse(self.root))
         self.assertEqual([entry['id'] for entry in item['frameworks']], ['flutter'])
+        self.assertEqual([entry['command'] for entry in item['candidate_commands']],
+                         [['flutter', 'test'], ['flutter', 'analyze']])
 
     def test_a_pure_dart_package_is_not_claimed_as_flutter(self):
         # The framework list and the requirement list must agree: neither
@@ -581,6 +583,24 @@ class DependencyEvidenceTests(unittest.TestCase):
         item = component(analyse(self.root))
         self.assertEqual(item['frameworks'], [])
         self.assertEqual([entry['tool'] for entry in item['requirements']], ['dart'])
+        self.assertEqual([entry['command'] for entry in item['candidate_commands']],
+                         [['dart', 'test'], ['dart', 'analyze']])
+
+    def test_unknown_paths_are_exposed_with_an_explicit_sample_bound(self):
+        files = {f'data/{index:03}.unrecognised': ''
+                 for index in range(project_inventory.UNKNOWN_EVIDENCE_LIMIT + 3)}
+        write(self.root, files)
+        report = analyse(self.root)
+        coverage = report['coverage']
+        self.assertEqual(coverage['unknown'], len(files))
+        self.assertEqual(len(coverage['unknown_evidence']), project_inventory.UNKNOWN_EVIDENCE_LIMIT)
+        self.assertTrue(set(coverage['unknown_evidence']).issubset(files))
+        # The sample is disclosed once, in coverage. The finding keeps the total
+        # as its answer and only an illustrative few paths on its line.
+        finding = next(entry for entry in report['unresolved'] if entry['what'] == 'languages')
+        self.assertIn(f"{len(files)} files were found", finding['reason'])
+        self.assertLessEqual(len(finding['evidence'].split(', ')),
+                             project_inventory.EVIDENCE_LIMIT)
 
     def test_a_flutter_environment_constraint_requires_flutter(self):
         write(self.root, {'pubspec.yaml': 'name: app\nenvironment:\n  sdk: ^3.5.0\n'

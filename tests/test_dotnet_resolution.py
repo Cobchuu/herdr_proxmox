@@ -63,3 +63,28 @@ class DotnetResolutionTests(unittest.TestCase):
         for context in ('..', '/outside', 'C:/outside', 'Api\\outside'):
             with self.subTest(context=context), self.assertRaises(ValueError):
                 report({'Api/App.csproj': ''}, context)
+
+
+class RustToolchainResolutionTests(unittest.TestCase):
+    def test_legacy_file_wins_when_both_formats_exist_in_one_directory(self):
+        # rustup preserves legacy precedence for backwards compatibility.
+        for directory in ('', 'lib/'):
+            with self.subTest(directory=directory):
+                value = report({directory + 'rust-toolchain': '1.80.0',
+                    directory + 'rust-toolchain.toml': '[toolchain]\nchannel="1.85.1"',
+                    'lib/Cargo.toml': '[package]\nname="lib"\nrust-version="1.70"'})
+                component = next(item for item in value['components'] if item['path'] == 'lib')
+                selected = next(item for item in component['requirements'] if item['tool'] == 'rust-toolchain')
+                self.assertEqual(selected['selected'], '1.80.0')
+                self.assertEqual(selected['selection_lookup']['evidence'], directory + 'rust-toolchain')
+                self.assertIn(directory + 'rust-toolchain.toml', selected['selection_lookup']['shadowed'])
+
+    def test_nearest_legacy_file_shadows_toml_and_preserves_components(self):
+        value = report({'rust-toolchain.toml': '[toolchain]\nchannel="1.85.1"',
+                        'lib/rust-toolchain': '[toolchain]\nchannel="1.80.0"\ncomponents=["clippy"]',
+                        'lib/Cargo.toml': '[package]\nname="lib"\nrust-version="1.70"'})
+        component = next(item for item in value['components'] if item['path'] == 'lib')
+        selected = next(item for item in component['requirements'] if item['tool'] == 'rust-toolchain')
+        self.assertEqual(selected['selected'], '1.80.0')
+        self.assertEqual(selected['selection_lookup']['components'], ['clippy'])
+        self.assertEqual(selected['selection_lookup']['shadowed'], ['rust-toolchain.toml'])

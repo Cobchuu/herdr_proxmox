@@ -39,6 +39,7 @@ from request_validation import FieldValidationError
 import project_analysis
 import project_toolchains
 import toolchain_policy
+from environment_preparation import EnvironmentPreparation
 from updates import Updates
 from validation import ValidationRuns
 from github_api import GitHub, GitHubError
@@ -78,6 +79,10 @@ def command(*args, timeout=10):
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
+            if args[:2] in (('pane', 'run'), ('pane', 'close')):
+                # Native write helpers can acknowledge with plain text. This
+                # proves acceptance only; shell activation has its own barrier.
+                return {'admitted': True}
             raise ValueError('Unexpected Herdr response; check the installed CLI version.') from exc
         if isinstance(data, dict) and 'error' in data:
             raise parse_error(result.stdout, operation)
@@ -377,6 +382,17 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as error:
                     self.reply(400, {'error': str(error)[:500]})
                 return
+            if self.path.startswith('/api/projects/environment?'):
+                query = parse_qs(urlsplit(self.path).query)
+                preparation = getattr(self.server, 'environments', None)
+                if preparation is None:
+                    self.reply(503, {'error': 'Environment preparation is unavailable.'})
+                    return
+                identifier = (query.get('job') or [''])[0]
+                result = preparation.store.job(identifier) if identifier else preparation.store.get(
+                    (query.get('plan') or [''])[0])
+                self.reply(200 if result else 404, result or {'error': 'No environment record has that identity.'})
+                return
             if self.path == '/api/build':
                 from build_identity import snapshot as build_snapshot
                 self.reply(200, build_snapshot())
@@ -559,6 +575,8 @@ class Handler(BaseHTTPRequestHandler):
         actions = {f'/api/workspaces/{name}': name for name in ('create', 'focus', 'rename')}
         actions['/api/organizations/templates'] = 'templates'
         actions['/api/organizations/templates/library'] = 'template_library'
+        environment_actions = {f'/api/projects/environment/{name}': name for name in ('plan', 'select', 'prepare', 'cancel')}
+        actions.update(environment_actions)
         organization_actions = {f'/api/organizations/{name}': name for name in ('save', 'hire', 'launch', 'delegate', 'release', 'report', 'resolve_delegation', 'group', 'discuss', 'chat', 'inspect', 'input', 'recover', 'transcript', 'retry_discussion', 'cancel_discussion', 'remove_agent', 'remove_group', 'session', 'realign_discussion_session')}
         setup_actions = {f'/api/cli-setup/{name}': name for name in ('start', 'poll', 'input', 'resize', 'close', 'verify', 'install_integration')}
         log_actions = {f'/api/logs/{name}': name for name in ('save', 'preview', 'ticket', 'delete')}
@@ -581,6 +599,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     raise ValueError('Expected a JSON object.')
                 self.reply(200, self.server.organizations.team_plan(body))
+            elif self.path in environment_actions:
+                if role != 'admin':
+                    raise ValueError('Only an administrator can prepare project environments.')
+                if not isinstance(body, dict):
+                    raise ValueError('Expected an environment request object.')
+                preparation = getattr(self.server, 'environments', None)
+                if preparation is None:
+                    raise ValueError('Environment preparation is unavailable.')
+                operation = environment_actions[self.path]
+                allowed = {'plan': {'path', 'revision'}, 'select': {'digest', 'checks'}, 'prepare': {'digest', 'retry'}, 'cancel': {'id'}}[operation]
+                if set(body) - allowed or ('retry' in body and type(body['retry']) is not bool):
+                    raise ValueError('Invalid environment request options.')
+                if operation == 'plan':
+                    result = preparation.plan(body.get('path'), body.get('revision'))
+                elif operation == 'select':
+                    result = preparation.select(body.get('digest'), body.get('checks'), actor)
+                elif operation == 'prepare':
+                    result = preparation.prepare(body.get('digest'), body.get('retry', False))
+                else:
+                    result = preparation.store.cancel(body.get('id'))
+                self.reply(200, result)
             elif self.path == '/api/github/configure':
                 if role != 'admin':
                     raise ValueError('Only an administrator can configure GitHub publishing.')
@@ -813,6 +852,16 @@ def main():
     # Approval, readiness and provisioning all read the same resolved report;
     # two views of one project's requirement is how they drift apart.
     coordinator.effective_requirements = lambda repository: analysis.effective(repository)
+    environments = EnvironmentPreparation(analysis, DATABASE.parent / 'environments.sqlite3',
+        Path(os.environ.get('HERDR_ENVIRONMENT_ROOT', str(DATABASE.parent / 'environments'))))
+    from environment_admission import EnvironmentAdmission
+    admission = EnvironmentAdmission(organizations, environments)
+    organizations.environment_admission = admission
+    environments.admission = admission
+    environments.start()
+    from environment_policy import EnvironmentPolicies
+    previous_project_resolver = toolchain_policy.PROJECT_RESOLVER
+    toolchain_policy.PROJECT_RESOLVER = EnvironmentPolicies(PROJECTS, environments.store).resolve
     validation = ValidationRuns(PROJECTS, build_event, record=record_build, queue=build_queue, minimum_free_bytes=minimum_build_space)
     validation.install_lock = build_service_install.lock
     validation.install_guard = build_service_install.require_idle
@@ -830,16 +879,20 @@ def main():
     RUNTIME_EVENTS.start()
     contributions.start()
     try:
-        serve_gateway(bind, 8787, policy, token, {'github': github, 'contributions': contributions, 'projects': projects, 'organizations': organizations, 'cli_setup': cli_setup, 'run_logs': run_logs, 'ssh_access': ssh_access, 'herdr_server': HerdrServer(command), 'integration': integration, 'coordinator': coordinator, 'operators': operators, 'sdk_install': sdk_install, 'build_service_install': build_service_install, 'validation': validation, 'analysis': analysis}, cookie_secure=secure_setting == '1')
+        serve_gateway(bind, 8787, policy, token, {'github': github, 'contributions': contributions, 'projects': projects, 'organizations': organizations, 'cli_setup': cli_setup, 'run_logs': run_logs, 'ssh_access': ssh_access, 'herdr_server': HerdrServer(command), 'integration': integration, 'coordinator': coordinator, 'operators': operators, 'sdk_install': sdk_install, 'build_service_install': build_service_install, 'validation': validation, 'analysis': analysis, 'environments': environments}, cookie_secure=secure_setting == '1')
     finally:
-        RUNTIME_EVENTS.close()
-        outbox.close()
-        contributions.close()
-        coordinator.close()
-        integration.close()
-        projects.close()
-        organizations.close()
-        cli_setup.close()
+        try:
+            environments.close()
+            RUNTIME_EVENTS.close()
+            outbox.close()
+            contributions.close()
+            coordinator.close()
+            integration.close()
+            projects.close()
+            organizations.close()
+            cli_setup.close()
+        finally:
+            toolchain_policy.PROJECT_RESOLVER = previous_project_resolver
 
 
 if __name__ == '__main__':

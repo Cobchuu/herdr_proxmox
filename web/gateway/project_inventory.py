@@ -44,6 +44,10 @@ MAX_SECONDS = 5.0
 MAX_PER_DIRECTORY = 5_000
 MAX_DEPTH = 64
 EVIDENCE_LIMIT = 5
+# Unknown paths are an inspectable coverage sample, bounded independently of
+# per-language examples so small groups can be shown in full without sending
+# tens of thousands of filenames in every analysis response.
+UNKNOWN_EVIDENCE_LIMIT = 50
 
 # Language recognition. A maintained database (GitHub Linguist's `languages.yml`)
 # is the intended replacement: this table is the shape that data takes, kept
@@ -375,7 +379,7 @@ def _result(state, include_paths=False):
             generated += 1
         elif kind == 'unknown':
             unknown += 1
-            if len(unknown_evidence) < EVIDENCE_LIMIT:
+            if len(unknown_evidence) < UNKNOWN_EVIDENCE_LIMIT:
                 unknown_evidence.append(path.as_posix())
     labels = {name: label for name, (label, _) in LANGUAGES.items()}
     for entry in by_language.values():

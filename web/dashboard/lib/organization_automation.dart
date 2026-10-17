@@ -188,6 +188,8 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
   var paused = policy['paused'] == true;
   var reap = policy['reap_finished_sessions'] == true;
   var reapOrphaned = policy['reap_orphaned_panes'] == true;
+  var autoPrepare = policy['auto_prepare'] == true;
+  var autoPrepareChecks = policy['auto_prepare_checks'] == true;
   final perMeeting = TextEditingController(
     text: '${policy['max_per_meeting'] ?? 1}',
   );
@@ -246,6 +248,28 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                       ),
                     ),
                     _limitField(perMeeting, 'Max per meeting', 10),
+                    SwitchListTile(
+                      value: autoPrepare,
+                      onChanged: (value) =>
+                          update(() => autoPrepare = value == true),
+                      title: const Text(
+                        'Prepare supported project SDKs before agent launch',
+                      ),
+                      subtitle: const Text(
+                        'Wait for verified SDKs before starting. Unsupported requirements stop the launch.',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: autoPrepareChecks,
+                      onChanged: (value) =>
+                          update(() => autoPrepareChecks = value == true),
+                      title: const Text(
+                        'Approve native .NET and Rust build/test recipes automatically',
+                      ),
+                      subtitle: const Text(
+                        'Separate from SDK installation: these commands can restore dependencies and execute project code.',
+                      ),
+                    ),
                     _limitField(
                       perAgent,
                       'Max open per agent (queued + active)',
@@ -308,6 +332,8 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                   'paused': paused,
                   'reap_finished_sessions': reap,
                   'reap_orphaned_panes': reapOrphaned,
+                  'auto_prepare': autoPrepare,
+                  'auto_prepare_checks': autoPrepareChecks,
                   'max_per_meeting': int.tryParse(perMeeting.text.trim()),
                   'max_open_per_agent': int.tryParse(perAgent.text.trim()),
                   'max_follow_up_depth': int.tryParse(depth.text.trim()),

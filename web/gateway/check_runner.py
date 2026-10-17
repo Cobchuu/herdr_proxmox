@@ -72,7 +72,21 @@ def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=Non
             pass  # Always drain stdout, even when log storage fails.
     log.published = 0
     for index, script in enumerate(commands):
-        check = dict(id=script, name=script, command=bash + ' ' + script, required=True,
+        recipe = script if isinstance(script, dict) else None
+        identifier = recipe['id'] if recipe else script
+        arguments = recipe['arguments'] if recipe else [bash, script]
+        cwd = tree / recipe.get('cwd', '.') if recipe else tree
+        if not cwd.resolve().is_relative_to(tree.resolve()):
+            raise ValueError('Check working directory escapes the candidate checkout.')
+        if recipe:
+            import toolchain_policy
+            bound = recipe.get('bindings') or []
+            environment_for_check = toolchain_policy.environment(dict(toolchains=bound))
+            environment_for_check.update(CARGO_HOME=str(folder / 'cargo'), DOTNET_CLI_HOME=str(folder / 'dotnet'),
+                                         DOTNET_CLI_TELEMETRY_OPTOUT='1')
+        else:
+            environment_for_check = environment
+        check = dict(id=identifier, name=identifier, command=' '.join(arguments), required=True,
                      source='runner', status='not_run', exit_code=None, duration_ms=0, summary='')
         checks.append(check)
         remaining = deadline - time.monotonic()
@@ -83,9 +97,9 @@ def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=Non
             report = folder / f'checks-{index}.jsonl'
             started = time.monotonic()
             try:
-                process = subprocess.Popen([bash, script], cwd=tree, stdout=subprocess.PIPE,
+                process = subprocess.Popen(arguments, cwd=cwd, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, start_new_session=os.name != 'nt',
-                    env=dict(os.environ if environment is None else environment,
+                    env=dict(os.environ if environment_for_check is None else environment_for_check,
                              CI='1', GIT_TERMINAL_PROMPT='0', HERDR_CHECK_REPORT=str(report.resolve())))
                 def collect(proc=process):
                     while chunk := proc.stdout.read(4096):
@@ -115,9 +129,9 @@ def run_scripts(tree, commands, folder, timeout, bash, output_limit, changed=Non
             finally:
                 check['duration_ms'] = max(0, int((time.monotonic() - started) * 1000))
             try:
-                checks.extend(read_report(report, script))
+                checks.extend(read_report(report, identifier))
             except (ValueError, OSError, UnicodeError) as error:
-                checks.append(dict(id=script + ':report', name='Check evidence', status='failed',
+                checks.append(dict(id=identifier + ':report', name='Check evidence', status='failed',
                     command='', exit_code=None, duration_ms=0, summary=str(error)[:500], required=True, source='runner'))
         if changed:
             changed(list(checks))

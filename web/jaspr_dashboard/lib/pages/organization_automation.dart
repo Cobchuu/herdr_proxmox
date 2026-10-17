@@ -270,6 +270,9 @@ const automationLabels = <String, String>{
   'auto_capture': 'Capture completed candidates automatically',
   'auto_validate': 'Validate captured candidates automatically',
   'auto_publish': 'Publish validated tasks automatically',
+  'auto_prepare': 'Prepare supported project SDKs before agent launch',
+  'auto_prepare_checks':
+      'Approve native .NET and Rust build/test recipes automatically',
   'max_per_meeting': 'Max automatic tasks per meeting',
   'max_open_per_agent': 'Max open tasks per agent',
   'max_follow_up_depth': 'Max follow-up depth',
@@ -289,6 +292,8 @@ Future<Json?> editOrganizationAutomation(
     'auto_validate': false,
     'auto_capture': policy['auto_capture'] ?? policy['auto_validate'] ?? false,
     'auto_publish': false,
+    'auto_prepare': false,
+    'auto_prepare_checks': false,
     'reap_finished_sessions': false,
     'reap_orphaned_panes': false,
     'max_per_meeting': 1,
@@ -330,8 +335,13 @@ Future<Json?> editOrganizationAutomation(
       'auto_validate',
       'auto_capture',
       'auto_publish',
+      'auto_prepare',
+      'auto_prepare_checks',
     },
     extra: (v) => [
+      note(
+        'SDK preparation uses trusted providers and waits without starting an agent. Native check approval is separate: build and test commands can restore dependencies and execute project code. Unsupported requirements stop the launch; disabling preparation does not silently resume a waiting launch.',
+      ),
       note(
         'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Capture checks the agent receipt and committed candidate without a build service. Automatic validation uses the current build executor. Gateway builds stop on restart; install the durable build service under Builds & deployments for restart resilience. Automatic publication requires that service and automatic validation.',
       ),

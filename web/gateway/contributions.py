@@ -80,7 +80,8 @@ AUTOMATION_DEFAULTS = dict(auto_queue_proposals=False, max_per_meeting=1, max_op
                            # including every proposal-created one — started
                            # manual, so capture, validation and publication were
                            # clicked through one task at a time.
-                           auto_capture=False, auto_validate=False, auto_publish=False)
+                           auto_capture=False, auto_validate=False, auto_publish=False,
+                           auto_prepare=False, auto_prepare_checks=False)
 AUTOMATION_LIMITS = (('max_per_meeting', 0, 10), ('max_open_per_agent', 0, 50),
                      ('max_follow_up_depth', 0, 10), ('daily_cap', 0, 100),
                      ('max_active_sessions', 0, 50), ('max_active_meetings', 0, 10),
@@ -548,7 +549,8 @@ class Contributions:
                                     outcome='no_changes', candidate=head, upstream=head, validation='not_applicable',
                                     reason=str(receipt.get('reason') or 'The assigned agent verified that no code changes are required.')[:2000],
                                     actor='automatic_task_policy', at=stamp()),
-                                    completion_receipt=dict(commit=head, tests=receipt['tests'], verified_at=stamp()))
+                                    completion_receipt=dict(commit=head, tests=receipt['tests'], verified_at=stamp(),
+                                                            tool_findings=receipt.get('tool_findings', [])))
                                 self.save(task, 'complete', 'automatic_task_policy')
                                 no_changes = True
                             else:
@@ -557,6 +559,7 @@ class Contributions:
                                 if task.get('head_sha') != head:
                                     raise ValueError('Task advanced during capture; awaiting its new completion receipt.')
                                 task['completion_receipt'] = dict(commit=head, tests=receipt['tests'], verified_at=stamp(),
+                                                                  tool_findings=receipt.get('tool_findings', []),
                                                                   handover=receipt.get('handover'))
                                 self.save(task, 'completion_verified', 'automatic_task_policy')
                                 if run.get('id') and receipt.get('handover'):
@@ -1027,14 +1030,22 @@ class Contributions:
             approved = toolchain_policy.resolve_committed(self.path_for(task))
         except (OSError, ValueError):
             return False
-        # A repository that declares no toolchain has no policy to gate on;
-        # blocking it would refuse work for a rule that does not exist.
-        if not approved['toolchains']:
-            return True
-        return (not evidence.get('policy_changes')
-                and evidence.get('policy_digest') == toolchain_policy.digest(approved)
-                and bool(evidence.get('toolchain_evidence'))
-                and all(item.get('matches') is True for item in evidence['toolchain_evidence']))
+        if approved.get('plan_digest') and task.get('run_id'):
+            try:
+                frozen = self.frozen_environment(task)
+            except (OSError, ValueError, sqlite3.Error):
+                return False
+            if (not frozen or frozen.get('plan_digest') != evidence.get('plan_digest')
+                    or frozen.get('digest') != evidence.get('policy_digest')):
+                return False
+        return toolchain_policy.evidence_matches(approved, evidence)
+
+    def frozen_environment(self, task):
+        if not task.get('run_id'):
+            return None
+        with closing(self.store.connect()) as db:
+            job = self.store.get(db, 'jobs', task['run_id'], task.get('organization_id'))
+        return job.get('toolchain_policy') if isinstance(job, dict) else None
 
     def toolchain_block(self, task, evidence, moved=False):
         """Keep the delivery pending and say why, in terms the agent can act on.
@@ -1099,6 +1110,8 @@ class Contributions:
         if receipt['outcome'] == 'no_changes' and head != task.get('base_sha'):
             raise ValueError('A no-changes receipt requires the unchanged recorded base commit.')
         receipt['handover'] = parse_handover(receipt)
+        from environment_plan import reported_discrepancies
+        receipt['tool_findings'] = reported_discrepancies(run.get('toolchain_policy'), receipt)
         self.knowledge.capture_receipt(task, receipt)
         return receipt
 
@@ -1269,11 +1282,13 @@ class Contributions:
             was_enabled = policy['auto_queue_proposals']
             previous = dict(policy)
             for key in ('auto_queue_proposals', 'paused', 'reap_finished_sessions', 'reap_orphaned_panes',
-                        'auto_capture', 'auto_validate', 'auto_publish'):
+                        'auto_capture', 'auto_validate', 'auto_publish', 'auto_prepare', 'auto_prepare_checks'):
                 if key in body:
                     if not isinstance(body[key], bool):
                         raise FieldValidationError('Invalid automation policy value.', [key])
                     policy[key] = body[key]
+            if any(policy[key] != previous[key] for key in ('auto_prepare', 'auto_prepare_checks')):
+                policy['auto_prepare_revision'] = uuid.uuid4().hex
             if 'auto_validate' in body and 'auto_capture' not in body:
                 policy['auto_capture'] = body['auto_validate']  # Legacy combined control.
             # Enabling delivery needs its dependencies. Pausing, disabling and
@@ -2113,6 +2128,9 @@ class Contributions:
             return dict(state='offline', action='start', run_id=None,
                         detail='No session is running. Starting work opens a new agent session.')
         delivery = active.get('delivery') or {}
+        if active.get('state') == 'waiting_environment':
+            return dict(state='starting', action='wait', run_id=active['id'],
+                        detail='Preparing the recorded project SDKs. No agent has started; this launch will continue after verification.')
         if delivery.get('stage') == 'blocked':
             return dict(state='decision', action='interact', run_id=active['id'], profile_id=profile_id,
                         code=delivery.get('code', 'agent_blocked'),
@@ -2270,6 +2288,8 @@ class Contributions:
                 'Optionally include a "handover": {"state": ..., "decisions": ..., "questions": ..., "next_step": ...} note for another agent; it is recorded as reported guidance for later sessions. '
                 'Optionally include "follow_up": {"title": ..., "description": ...} when you found necessary related work; it is recorded as a draft task for operator review, never started automatically. '
                 'Report commands and actual results; missing checks are not passes. Publishing is a dashboard administrator action.\n\n'
+                'Follow the frozen toolchain policy appended to this prompt. Report missing or mismatching SDKs instead of installing or switching them. '
+                'Optionally report SDK observations in a "tools" array with tool, component and version fields; these remain reported claims until gateway verification.\n\n'
                 'Task-local tool acquisition policy:\n' + task_tool_guidance())
 
     def outcome_packet(self, task, group, policy):
@@ -2539,6 +2559,7 @@ class Contributions:
                         if blocking_task['state'] != 'completed' and (blocking_task.get('completion_receipt') or {}).get('commit') != blocking_task['head_sha']:
                             receipt = self.read_receipt(blocking_task, blocking, blocking_task['head_sha'], self.tree_for(blocking_task))
                             blocking_task['completion_receipt'] = dict(commit=blocking_task['head_sha'], tests=receipt['tests'],
+                                                                       tool_findings=receipt.get('tool_findings', []),
                                                                        verified_at=stamp(), handover=receipt.get('handover'))
                             self.save(blocking_task, 'completion_verified', actor)
                             if receipt.get('handover'):
@@ -3192,6 +3213,13 @@ class Contributions:
                 raise ValueError('Fetch this repository in Project explorer before building the merged result.') from None
             event_id = hashlib.sha256(('task:' + task['id'] + ':' + target).encode()).hexdigest()
             event = dict(id=event_id, task_id=task['id'], repository=task['repository'], path=task['repository'], target=target)
+            approved = toolchain_policy.resolve_committed(repository)
+            if approved.get('plan_digest') and task.get('run_id'):
+                frozen = self.frozen_environment(task) or {}
+                event.update(frozen_plan_digest=frozen.get('plan_digest') or 'unavailable',
+                             frozen_policy_digest=frozen.get('digest') or 'unavailable')
+                event_id = hashlib.sha256((event_id + ':' + task['run_id'] + ':' + event['frozen_plan_digest']).encode()).hexdigest()
+                event['id'] = event_id
             with closing(self.connect()) as db, db:
                 db.execute('INSERT OR IGNORE INTO build_events VALUES (?,?)', (event_id, json.dumps(event)))
             previous = task.get('builds', {}).get(target)

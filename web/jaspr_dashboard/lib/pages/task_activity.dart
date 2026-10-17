@@ -350,6 +350,12 @@ class TaskActivity extends StatelessComponent {
                   for (final check
                       in task['completion_receipt']['tests'] as List? ?? [])
                     SelectableText('$check'),
+                  for (final finding
+                      in task['completion_receipt']['tool_findings'] as List? ??
+                          [])
+                    Text(
+                      'Reported SDK mismatch in ${finding['component']}: ${finding['tool']} requires ${finding['required']}; worker reported ${finding['reported']}. This claim has not been independently verified.',
+                    ),
                 ],
               ),
           ],

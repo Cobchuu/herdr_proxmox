@@ -45,9 +45,10 @@ def toolchain_message(mismatch):
     outcome is a retry under the configured SDK rather than a silent failure.
     """
     first = mismatch[0]
-    return (f"Required {first['name'].capitalize()} {first['required']}; "
+    return (f"{first.get('component', '.')}: required {first['name'].capitalize()} {first['required']}; "
             f"detected {first['actual'] or 'no installed SDK'}. "
-            'Verification did not run. Use the configured SDK and retry.')
+            'Verification did not run. Use the configured SDK and retry. '
+            + 'Affected components: ' + ', '.join(sorted({item.get('component', '.') for item in mismatch}))[:500])
 
 
 class ValidationRuns:
@@ -213,6 +214,8 @@ class ValidationRuns:
                        target=target, path=event.get('path'), actor=actor, state='running',
                        started_at=stamp(), finished_at=None, exit_code=None, command=None, note='')
             run['task_id'] = event.get('task_id') or event.get('job_id')
+            run['frozen_plan_digest'] = event.get('frozen_plan_digest')
+            run['frozen_policy_digest'] = event.get('frozen_policy_digest')
             # Preserve provenance without turning an event waiver into a pass.
             if event.get('state') == 'validation_waived':
                 run['validation_waiver'] = dict(event_id=event['id'], approval=event.get('operator_approval'),
@@ -226,6 +229,7 @@ class ValidationRuns:
                 toolchain = ','.join(f"{entry['name']}-{entry['required']}"
                                      for entry in approved['toolchains']) or 'none'
                 run['policy_digest'] = toolchain_policy.digest(approved)
+                run['plan_digest'] = approved.get('plan_digest')
                 run, created = self.queue.enqueue(run, toolchain=toolchain, retry=body.get('retry', False))
                 if not created:
                     return run
@@ -249,11 +253,16 @@ class ValidationRuns:
             # The policy is resolved from the approved checkout, never from the
             # candidate: a candidate must not redefine the rules that judge it.
             policy = toolchain_policy.resolve_committed(checkout)
+            if (run.get('frozen_plan_digest') and (run['frozen_plan_digest'] != policy.get('plan_digest')
+                    or run.get('frozen_policy_digest') != toolchain_policy.digest(policy))):
+                run['blocker'] = 'policy_changed'
+                raise ValueError('The approved environment differs from the session policy; inspect and relaunch under the approved plan.')
             if run.get('policy_digest') and run['policy_digest'] != toolchain_policy.digest(policy):
                 run['blocker'] = 'policy_changed'
                 raise ValueError('Approved policy changed while this build was queued. Submit verification again.')
             run['policy'] = policy
             run['policy_digest'] = toolchain_policy.digest(policy)
+            run['plan_digest'] = policy.get('plan_digest')
             run['policy_changes'] = toolchain_policy.changes(policy, toolchain_policy.resolve_committed(worktree))
             if run['policy_changes']:
                 run['blocker'] = 'policy_changed'
@@ -261,16 +270,23 @@ class ValidationRuns:
                                  + ', '.join(run['policy_changes']))
             # Probe the real executables before running anything. A declared pin
             # cannot prove which SDK runs, so verification measures it.
-            probed = toolchain_policy.verify(policy)
+            if policy.get('blockers'):
+                run['blocker'] = 'environment_unavailable'
+                raise ValueError('; '.join(policy['blockers']))
+            probed = toolchain_policy.verify(policy, root=worktree)
             run['toolchain_evidence'] = probed
             mismatch = [item for item in probed if not item['matches']]
             if mismatch:
                 run['blocker'] = 'missing_toolchain'
                 raise ValueError(toolchain_message(mismatch))
-            commands = self._commands(worktree)
-            command = ' + '.join(commands)
+            commands = policy.get('recipes') if policy.get('plan_digest') else self._commands(worktree)
+            command = ' + '.join(item['id'] if isinstance(item, dict) else item for item in commands)
             if not commands:
-                raise ValueError('No validation script found (looked for ' + ', '.join(COMMANDS) + ').')
+                # A plan-based policy selects recipes, so citing Herdr's own
+                # script names here would describe a rule that did not apply.
+                raise ValueError('No approved validation recipe is selected for this environment.'
+                                 if policy.get('plan_digest') else
+                                 'No validation script found (looked for ' + ', '.join(COMMANDS) + ').')
             run['command'] = command
             lines.append(f"Validating {run['target']} in an isolated worktree with {command}.\n\n")
             from check_runner import run_scripts, required_passed
@@ -279,7 +295,7 @@ class ValidationRuns:
                 self._write(folder, run)
             checks, exit_code, timed_out = run_scripts(worktree, commands, folder,
                 self.timeout, BASH, OUTPUT_LIMIT, changed=evidence,
-                environment=toolchain_policy.environment(policy))
+                environment=(None if policy.get('plan_digest') else toolchain_policy.environment(policy)))
             # Repository scripts can report subchecks, but cannot certify that
             # they left the requested commit and tracked source unchanged.
             checks.extend(self._integrity_checks(worktree, run['target']))
@@ -323,7 +339,7 @@ class ValidationRuns:
         self.record(event_id, dict(run_id=run['id'], state=run['state'], target=run['target'],
                                    command=run.get('command'), exit_code=run.get('exit_code'), checks=run.get('checks', []),
                                    required_checks_verified=run.get('required_checks_verified', False),
-                                   policy_digest=run.get('policy_digest'),
+                                   policy_digest=run.get('policy_digest'), plan_digest=run.get('plan_digest'),
                                    toolchain_evidence=run.get('toolchain_evidence'),
                                    policy_changes=run.get('policy_changes'),
                                    blocker=run.get('blocker'), note=run.get('note'),
@@ -396,7 +412,7 @@ class ValidationRuns:
                         file_count=len(files), validation_exit_code=0,
                         checks=run.get('checks', []), required_checks_verified=run.get('required_checks_verified', False),
                         toolchain_pin=run.get('toolchain_pin'),
-                        policy_digest=run.get('policy_digest'),
+                        policy_digest=run.get('policy_digest'), plan_digest=run.get('plan_digest'),
                         toolchain_evidence=run.get('toolchain_evidence'),
                         policy_changes=run.get('policy_changes'),
                         task_id=run.get('task_id'), validation_waiver=run.get('validation_waiver'),

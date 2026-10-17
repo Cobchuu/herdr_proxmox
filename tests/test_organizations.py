@@ -656,6 +656,52 @@ class OrganizationTests(unittest.TestCase):
         self.assertEqual(job['state'], 'needs_attention')
         self.assertFalse(any(args[:2] in (('agent', 'start'), ('agent', 'prompt')) for args, _ in self.calls))
 
+    def test_prepared_environment_reaches_the_actual_agent_start_pane(self):
+        original = self.store.command
+        def command(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ('tab', 'create'):
+                workspace = args[args.index('--workspace') + 1]
+                return dict(root_pane=dict(pane_id=workspace + ':pB'), tab=dict(workspace_id=workspace))
+            return result
+        self.store.command = command
+        org = self.organization()
+        profile = self.hire(org, use_worktree=False)
+        executable = str(self.root / 'sdk' / 'dotnet')
+        frozen = dict(digest='policy', plan_digest='plan', checkout=str(self.projects), policy=dict(
+            plan_digest='plan', blockers=[], toolchains=[dict(name='dotnet-sdk', label='.NET SDK',
+                required='8.0.100', component='.', cwd='.', declared_by='global.json#sdk.version',
+                executables=[executable])]))
+        with patch.object(self.store, 'frozen_policy', return_value=frozen), \
+                patch('environment_launch.activate_shell'), \
+                patch('environment_launch.verify_process') as verify:
+            run = self.action('launch', organization_id=org, profile_id=profile)
+            self.drain()
+        verify.assert_called_once()
+        job = next(item for item in self.store.job_records() if item['id'] == run)
+        self.assertEqual(job['state'], 'persona_sent', job.get('error'))
+        self.assertTrue(job['pane_id'].endswith(':pB'))
+        start = next(args for args, _ in self.calls if args[:2] == ('agent', 'start'))
+        self.assertEqual(start[6], job['pane_id'])
+        self.assertEqual(job['environment_binding']['plan_digest'], 'plan')
+        self.assertEqual(job['environment_binding']['environment']['DOTNET_ROOT'], str(self.root / 'sdk'))
+        creates = [args for args, _ in self.calls if args[:2] == ('tab', 'create')]
+        self.assertEqual(len(creates), 1)
+        self.assertIn('DOTNET_ROOT=' + str(self.root / 'sdk'), creates[0])
+        other = self.hire(org, name='Other', use_worktree=False)
+        before = len(self.calls)
+        with patch.object(self.store, 'frozen_policy', return_value=frozen), \
+                patch('environment_launch.activate_shell', side_effect=ValueError('activation not confirmed')), \
+                patch('environment_launch.verify_process') as verify:
+            failed_id = self.action('launch', organization_id=org, profile_id=other)
+            self.drain()
+        failed = next(item for item in self.store.job_records() if item['id'] == failed_id)
+        self.assertEqual(failed['state'], 'needs_attention')
+        self.assertIn('while binding the prepared environment', failed['error'])
+        self.assertNotIn('no terminal input was sent', failed['error'])
+        self.assertFalse(any(args[:2] in (('agent', 'start'), ('agent', 'prompt')) for args, _ in self.calls[before:]))
+        verify.assert_not_called()
+
     def action(self, action, **body):
         return self.store.action(action, {'request_id': uuid.uuid4().hex, **body})['id']
 

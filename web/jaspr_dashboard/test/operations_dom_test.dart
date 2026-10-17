@@ -316,6 +316,139 @@ void main() {
   );
 
   test(
+    'committed environment preparation queues and cancels without claiming test success',
+    () async {
+      final check = {
+        'id': 'Api:build',
+        'cwd': 'Api',
+        'arguments': ['dotnet', 'build', 'App.csproj'],
+        'source': 'convention',
+      };
+      Map<String, dynamic> fixture(bool approved) => {
+        'digest': approved ? 'approved-plan' : 'plan',
+        'preparation_version': 1,
+        'check_candidates': [check],
+        'selected_checks': approved ? [check] : [],
+        'requirements': [
+          {
+            'state': 'acquire',
+            'capability': 'dotnet-sdk',
+            'version': '8.0.100',
+            'components': ['Api'],
+            'artifact': {},
+            'activation': 'available',
+          },
+        ],
+      };
+      await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+        if (request.url.path.endsWith('/environment/plan'))
+          return fixture(false);
+        if (request.url.path.endsWith('/environment/select'))
+          return fixture(true);
+        if (request.url.path.endsWith('/environment/prepare'))
+          return {'id': 'job', 'state': 'queued'};
+        if (request.url.path.endsWith('/environment/cancel'))
+          return {'id': 'job', 'state': 'cancelled'};
+        return {
+          'components': [],
+          'requirements': [],
+          'workspaces': [],
+          'agents': [],
+        };
+      });
+      await click('Plan environment');
+      expect(posts('projects/environment/plan').single['path'], 'repo');
+      await click('Approve Api: dotnet build App.csproj (convention)');
+      expect(posts('projects/environment/select').single['checks'], [
+        'Api:build',
+      ]);
+      await click('Prepare SDKs');
+      expect(
+        posts('projects/environment/prepare').single['digest'],
+        'approved-plan',
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('SDK preparation queued'),
+      );
+      await click('Cancel SDK preparation');
+      expect(posts('projects/environment/cancel').single['id'], 'job');
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('SDK preparation cancelled'),
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        isNot(contains('checks passed')),
+      );
+      await click('Prepare SDKs');
+      expect(posts('projects/environment/prepare').last['retry'], isTrue);
+      await click('Cancel SDK preparation');
+    },
+  );
+
+  test(
+    'discovery distinguishes installed runtimes, deduplicates reasons and exposes unknown paths',
+    () async {
+      const reason = 'Python source was found but no version is declared.';
+      await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+        if (request.url.path.endsWith('/analysis'))
+          return {
+            'coverage': {
+              'files': 7,
+              'unknown': 6,
+              'unknown_evidence': [
+                for (var i = 0; i < 6; i++) 'data/$i.unknown',
+              ],
+            },
+            'requirements': [
+              {
+                'tool': 'python',
+                'label': 'Python',
+                'constraint': '',
+                'assessment': {'verdict': 'satisfied', 'measured': '3.13.5'},
+              },
+            ],
+            'components': [
+              {
+                'path': 'scripts',
+                'basis': 'inferred',
+                'requirements': [
+                  {
+                    'tool': 'python',
+                    'label': 'Python',
+                    'established': false,
+                    'reason': reason,
+                  },
+                ],
+                'unresolved': [
+                  {'reason': reason},
+                  {'reason': 'A separate issue remains.'},
+                ],
+              },
+            ],
+          };
+        return {'workspaces': [], 'agents': []};
+      });
+      final root = web.document.getElementById('operations-test')!;
+      expect(
+        root.textContent,
+        contains('Installed — required version unknown'),
+      );
+      expect(root.textContent!.split(reason), hasLength(2));
+      expect(root.textContent, contains('A separate issue remains.'));
+      final details = root.querySelector('details') as web.HTMLDetailsElement;
+      expect(details.open, isFalse);
+      (details.querySelector('summary') as web.HTMLElement).click();
+      await settle();
+      expect(details.open, isTrue);
+      expect(details.textContent, contains('Showing 6 of 6 paths.'));
+      for (var i = 0; i < 6; i++)
+        expect(details.textContent, contains('data/$i.unknown'));
+    },
+  );
+
+  test(
     'build service install queues once, shows failures and supports retry',
     () async {
       var state = 'idle';

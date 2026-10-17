@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      run_project_environments:
+        description: Download and verify real .NET and Rust SDKs and build disposable fixture projects
+        type: boolean
+        default: false
       run_lxc:
         description: Create and delete a real test LXC on the dedicated Proxmox lab runner
         type: boolean
@@ -37,6 +41,25 @@ jobs:
           python3 scripts/test-project-discovery.py --all
       - name: Lint GitHub workflow definitions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= .github/workflows/ci.yml
+
+  project-environments:
+    name: Real project SDK preparation
+    # The exact release commit must pass clean-host SDK qualification before publication.
+    if: (github.event_name == 'workflow_dispatch' && inputs.run_project_environments) || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || (startsWith(github.ref, 'refs/heads/alpha/') && startsWith(github.event.head_commit.message, 'alpha:'))))
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify publisher archives, contextual SDK selection and real builds
+        run: python3 tests/ci/project_environments.py
+      - name: Qualify automatic admission and binding against the pinned real Herdr daemon
+        run: python3 tests/ci/live_environment.py
 
   web:
     name: Jaspr release and preserved bloc checks
@@ -83,7 +106,7 @@ jobs:
 
   release:
     name: Publish installable dashboard release
-    needs: [checks, web]
+    needs: [checks, web, project-environments]
     if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || (startsWith(github.ref, 'refs/heads/alpha/') && startsWith(github.event.head_commit.message, 'alpha:')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5

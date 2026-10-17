@@ -15,7 +15,7 @@ from project_files import project_directory
 from repository_lock import common_directory, repository_lock
 
 
-def git(path, *arguments, timeout=15, index_file=None):
+def git(path, *arguments, timeout=15, index_file=None, output_limit=1_000_000):
     # Compound callers (snapshots and base updates) hold this reentrant lock
     # throughout their checks and mutations; individual Git mutations also join.
     # Read-only queries such as `worktree list` never take the lock.
@@ -24,11 +24,11 @@ def git(path, *arguments, timeout=15, index_file=None):
         mutates = any(arg in ('add', 'remove', 'prune', 'move', 'repair') for arg in arguments)
     if mutates:
         with repository_lock(path):
-            return _git(path, *arguments, timeout=timeout, index_file=index_file)
-    return _git(path, *arguments, timeout=timeout, index_file=index_file)
+            return _git(path, *arguments, timeout=timeout, index_file=index_file, output_limit=output_limit)
+    return _git(path, *arguments, timeout=timeout, index_file=index_file, output_limit=output_limit)
 
 
-def _git(path, *arguments, timeout=15, index_file=None):
+def _git(path, *arguments, timeout=15, index_file=None, output_limit=1_000_000):
     environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0')
     for key in list(environment):
         if key.startswith('GIT_') and key not in ('GIT_TERMINAL_PROMPT', 'GIT_OPTIONAL_LOCKS'):
@@ -44,7 +44,7 @@ def _git(path, *arguments, timeout=15, index_file=None):
         raise ValueError('Git is unavailable or the checkout inspection timed out.') from error
     if result.returncode:
         raise ValueError('Git information is unavailable for this checkout.')
-    if len(result.stdout) > 1_000_000:
+    if len(result.stdout) > output_limit:
         raise ValueError('Git output is too large. Narrow the selected changes.')
     return result.stdout.decode('utf-8', errors='replace')
 

@@ -105,7 +105,8 @@ ECOSYSTEMS = (
              dict(tool='rust-toolchain', label='Rust toolchain', purpose='toolchain selection',
                   executable='rustup', notation='', sources=(
                       _source('rust-toolchain.toml', 'toolchain.channel', kind='toml',
-                              role='selection'),)),
+                              role='selection'),
+                      _source('rust-toolchain', kind='rust-toolchain', role='selection'))),
          ),
          managers={'Cargo.lock': 'cargo'},
          dependency_fields=('dependencies',),
@@ -386,7 +387,15 @@ def yaml_keys(text, field):
     return keys or None
 
 
+def rust_toolchain_value(text, field):
+    if text.lstrip().startswith('['):
+        return toml_value(text, 'toolchain.channel')
+    value = text.strip()
+    return value if re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', value) else None
+
+
 READERS = {'json': json_value, 'toml': toml_value, 'yaml': yaml_scalar,
+           'rust-toolchain': rust_toolchain_value,
            'gomod': gomod_value, 'text': lambda text, field: text.strip()}
 SECTIONS = {'json': json_section, 'toml': toml_section, 'yaml': yaml_keys}
 DEPENDENCY_SOURCES = (('package.json', 'json'), ('composer.json', 'json'),
@@ -478,34 +487,51 @@ def requirements_for(ecosystem, present, read, component='.', paths=()):
     for requirement in ecosystem.get('requirements', ()):
         sources = present
         lookup = None
-        if requirement['tool'] == 'flutter':
-            # FVM searches the invocation directory and its ancestors. Assume
+        if requirement['tool'] in ('flutter', 'rust-toolchain'):
+            # FVM and rustup search the invocation directory and its ancestors. Assume
             # the component directory and stop at the repository boundary;
             # neither a gateway cwd nor a host-global pin describes this repo.
             location = PurePosixPath(component)
             search = []
+            # rustup prefers the legacy filename when both exist in one directory.
+            filenames = ('.fvmrc',) if requirement['tool'] == 'flutter' else ('rust-toolchain', 'rust-toolchain.toml')
             while True:
-                search.append((location / '.fvmrc').as_posix())
+                search.extend((location / filename).as_posix() for filename in filenames)
                 if location == PurePosixPath('.'):
                     break
                 location = location.parent
             candidates = [name for name in search if name in paths]
-            if '.fvmrc' in present and present['.fvmrc'] not in candidates:
-                candidates.insert(0, present['.fvmrc'])
+            for filename in reversed(filenames):
+                if filename in present and present[filename] not in candidates:
+                    candidates.insert(0, present[filename])
             sources = dict(present)
             if candidates:
-                sources['.fvmrc'] = candidates[0]
+                for filename in filenames:
+                    sources.pop(filename, None)
+                sources[PurePosixPath(candidates[0]).name] = candidates[0]
                 lookup = dict(directory=component, evidence=candidates[0],
                               shadowed=candidates[1:], boundary='repository root',
-                              status='resolved')
+                              kind='fvm' if requirement['tool'] == 'flutter' else 'rustup', status='resolved')
+                if requirement['tool'] == 'rust-toolchain':
+                    text = _bounded(read, candidates[0])
+                    try:
+                        config = tomllib.loads(text or '').get('toolchain', {})
+                        for field in ('components', 'targets', 'profile', 'path'):
+                            if field in config:
+                                lookup[field] = config[field]
+                    except (ValueError, TypeError):
+                        pass
         observations = _observations(requirement, sources, read)
         if lookup and not any(item['file'] == lookup['evidence'] and not item['unreadable']
                               for item in observations):
             lookup['status'] = 'unresolved'
-            observations.append(dict(file=lookup['evidence'], field='flutter', value=None,
+            observations.append(dict(file=lookup['evidence'],
+                                     field='flutter' if requirement['tool'] == 'flutter' else 'toolchain.channel', value=None,
                                      role='selection', unreadable=True,
-                                     reason='The nearest .fvmrc has no readable Flutter selection; '
-                                            'ancestor pins are not substituted.'))
+                                     reason=('The nearest .fvmrc has no readable Flutter selection; '
+                                             if requirement['tool'] == 'flutter' else
+                                             'The nearest Rust toolchain file has no readable selection; ')
+                                            + 'ancestor pins are not substituted.'))
         readable = [item for item in observations if not item['unreadable']]
         constraint = next((item['value'] for item in readable if item['role'] == 'constraint'), '')
         selection = next((item['value'] for item in readable if item['role'] == 'selection'), '')
@@ -906,7 +932,11 @@ def analyse(root, inventory=None, read=None, lookup_context=None):
             provided = _scripts(ecosystem, present, read)
             declared = {entry['purpose'] for entry in provided}
             component['candidate_commands'].extend(provided)
-            for purpose, command in ecosystem.get('checks', ()):
+            checks = ecosystem.get('checks', ())
+            if ecosystem['id'] == 'dart' and any(
+                    framework['id'] == 'flutter' for framework in frameworks.values()):
+                checks = (('test', ('flutter', 'test')), ('analyze', ('flutter', 'analyze')))
+            for purpose, command in checks:
                 # A candidate command: proposed from convention when the project
                 # does not provide one, and labelled as a suggestion.
                 if purpose in declared:
@@ -964,7 +994,11 @@ def analyse(root, inventory=None, read=None, lookup_context=None):
             what='languages',
             reason=f"{inventory['unknown']} files were found and none matched a known language "
                    'or manifest, so no requirement could be derived.',
-            evidence=', '.join(inventory.get('unknown_evidence') or [])))
+            # The reason states the total and coverage carries the inspectable
+            # sample. Joining that sample here would put fifty paths on one line
+            # of a finding, so the illustrative evidence stays at the common
+            # bound and the count remains the answer.
+            evidence=', '.join((inventory.get('unknown_evidence') or [])[:EVIDENCE_LIMIT])))
     if inventory.get('capped_directories'):
         unresolved.append(dict(
             what='directory listing',
@@ -984,5 +1018,6 @@ def analyse(root, inventory=None, read=None, lookup_context=None):
                               truncated=inventory['truncated'], skipped=inventory['skipped'],
                               generated=inventory.get('generated', 0),
                               unknown=inventory.get('unknown', 0),
+                              unknown_evidence=inventory.get('unknown_evidence', []),
                               languages=inventory['languages'],
                               manifests=inventory['manifests']))

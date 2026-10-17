@@ -21,7 +21,8 @@ MODULES = (
     'test_project_access', 'test_project_explorer', 'test_project_inventory',
     'test_project_requirements', 'test_project_analysis', 'test_project_toolchains',
     'test_dependency_constraints', 'test_dotnet_resolution',
-    'test_integration_coordinator',
+    'test_integration_coordinator', 'test_environment_plan', 'test_environment_preparation',
+    'test_environment_guardrails', 'test_environment_admission',
 )
 
 

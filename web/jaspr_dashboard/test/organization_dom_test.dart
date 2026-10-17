@@ -287,6 +287,42 @@ void main() {
           as web.HTMLInputElement;
 
   test(
+    'SDK preparation and native checks require separate permission',
+    () async {
+      var policy = <String, dynamic>{};
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/automation')) {
+            return {'policy': policy};
+          }
+          if (request.url.path.endsWith('/tasks/automation')) {
+            policy = Map<String, dynamic>.from(jsonDecode(request.body));
+            return {'policy': policy};
+          }
+          return null;
+        },
+      );
+      await click('Edit policy');
+      expect(policyInput('auto_prepare').checked, isFalse);
+      expect(policyInput('auto_prepare_checks').checked, isFalse);
+      policyInput('auto_prepare').click();
+      await settle();
+      await click('Save');
+      expect(policy['auto_prepare'], isTrue);
+      expect(policy['auto_prepare_checks'], isFalse);
+      await click('Edit policy');
+      expect(policyInput('auto_prepare').checked, isTrue);
+      expect(policyInput('auto_prepare_checks').checked, isFalse);
+      policyInput('auto_prepare_checks').click();
+      await settle();
+      await click('Save');
+      expect(policy['auto_prepare'], isTrue);
+      expect(policy['auto_prepare_checks'], isTrue);
+    },
+  );
+
+  test(
     'policy rejection stays in the modal, highlights its rule and preserves edits',
     () async {
       var policy = <String, dynamic>{

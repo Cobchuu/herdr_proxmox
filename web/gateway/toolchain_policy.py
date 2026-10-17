@@ -30,6 +30,7 @@ CHECKS = ('scripts/validate.sh', 'scripts/build-web.sh')
 
 VERSION = re.compile(r'\d+(?:\.\d+)+')
 PROBE_TIMEOUT = 60
+PROJECT_RESOLVER = None
 
 
 def canonical(value):
@@ -153,6 +154,12 @@ def resolve(root, path=None, read=None):
 
 
 def resolve_committed(root, path=None):
+    if PROJECT_RESOLVER is not None and path is None:
+        return PROJECT_RESOLVER(root)
+    return resolve_legacy_committed(root, path)
+
+
+def resolve_legacy_committed(root, path=None):
     """Read HEAD's blobs, so uncommitted files cannot change approval rules."""
     import project_git
     revision = project_git.git(root, 'rev-parse', '--verify', 'HEAD^{commit}').strip()
@@ -177,9 +184,11 @@ def changes(approved, candidate):
         for name in sorted(set(approved[field]) | set(candidate[field])):
             if candidate[field].get(name) != approved[field].get(name):
                 changed.append(name)
-    before = {entry['name']: entry['required'] for entry in approved['toolchains']}
-    after = {entry['name']: entry['required'] for entry in candidate['toolchains']}
-    changed.extend('toolchain:' + name for name in before.keys() | after.keys()
+    def rules(policy):
+        return {(entry.get('component', '.'), entry['name']): (entry['rule']['evidence'] if 'rule' in entry else entry['required'])
+                for entry in policy['toolchains']}
+    before, after = rules(approved), rules(candidate)
+    changed.extend('toolchain:' + (name[1] if name[0] == '.' else '/'.join(name)) for name in before.keys() | after.keys()
                    if before.get(name) != after.get(name))
     return sorted(set(changed))
 
@@ -199,7 +208,7 @@ def parse_dart(text):
 PARSERS = {'flutter': parse_flutter, 'dart': parse_dart}
 
 
-def probe(name, executable, required, run=None):
+def probe(name, executable, required, run=None, cwd=None, environment=None):
     """Run the real binary and report what it actually is.
 
     A declared version is a claim; this is the measurement. It is deliberately
@@ -217,7 +226,12 @@ def probe(name, executable, required, run=None):
     arguments = [str(path), '--version', '--machine'] if name == 'flutter' else [str(path), '--version']
     runner = subprocess.run if run is None else run
     try:
-        result = runner(arguments, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+        context = {}
+        if cwd is not None:
+            context['cwd'] = cwd
+        if environment is not None:
+            context['env'] = environment
+        result = runner(arguments, capture_output=True, text=True, timeout=PROBE_TIMEOUT, **context)
         output = (result.stdout or '') + (result.stderr or '')
         actual = parser(output) if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError) as error:
@@ -236,10 +250,35 @@ def probe(name, executable, required, run=None):
     return measured
 
 
-def verify(policy, run=None):
+def verify(policy, run=None, root=None):
     """Probe every toolchain the policy requires, first on PATH order."""
     results = []
     for entry in policy['toolchains']:
+        if 'component' in entry:
+            executable = next(iter(entry['executables']), None)
+            measured = dict(name=entry['name'], component=entry['component'], required=entry['required'],
+                            actual=None, matches=False, path=executable, detail='No prepared SDK binding is available.')
+            if executable and root is not None:
+                cwd = Path(root) / entry['cwd']
+                if cwd.resolve().is_relative_to(Path(root).resolve()) and Path(executable).is_file():
+                    try:
+                        runner = subprocess.run if run is None else run
+                        result = runner([executable, '--version'], cwd=cwd,
+                            env=environment(dict(policy, toolchains=[entry])), capture_output=True,
+                            text=True, timeout=PROBE_TIMEOUT)
+                        actual = parse_dart((result.stdout or '') + (result.stderr or '')) if result.returncode == 0 else None
+                        measured.update(actual=actual, matches=actual == entry['required'],
+                                        detail=f"{entry['component']}: required {entry['required']}; measured {actual or 'unavailable'}.")
+                    except (ValueError, OSError, subprocess.SubprocessError) as error:
+                        measured['detail'] = str(error)[:500]
+            results.append(measured)
+            for companion in entry.get('companions', []):
+                observed = probe(companion['name'], companion['executables'][0], companion['required'], run=run,
+                    cwd=Path(root) / entry['cwd'] if root else None,
+                    environment=environment(dict(policy, toolchains=[entry])))
+                observed['component'] = entry['component']
+                results.append(observed)
+            continue
         executable = entry['executables'][0] if entry['executables'] else None
         measured = probe(entry['name'], executable, entry['required'], run=run)
         results.append(measured)
@@ -262,9 +301,41 @@ def environment(policy, base=None):
             parent = str(Path(executable).parent)
             if parent not in directories:
                 directories.append(parent)
+        if entry.get('executables') and entry.get('name') == 'dotnet-sdk':
+            value.update(DOTNET_ROOT=str(Path(entry['executables'][0]).parent), DOTNET_MULTILEVEL_LOOKUP='0')
+        if entry.get('executables') and entry.get('name') == 'rust-toolchain':
+            value['RUSTC'] = entry['executables'][0]
     if directories:
         value['PATH'] = os.pathsep.join([*directories, value.get('PATH', '')]).strip(os.pathsep)
     return value
+
+
+def evidence_matches(policy, evidence):
+    """Require complete component evidence, not merely an all([]) or one SDK pass."""
+    if policy.get('blockers'):
+        return False
+    if not policy['toolchains']:
+        return True
+    if (evidence.get('policy_changes') or evidence.get('policy_digest') != digest(policy)
+            or policy.get('plan_digest') != evidence.get('plan_digest')):
+        return False
+    if policy.get('plan_digest'):
+        checks = evidence.get('checks') or []
+        if (evidence.get('required_checks_verified') is not True or not policy.get('recipes')
+                or any(not any(check.get('id') == recipe['id'] and check.get('status') == 'passed'
+                               and check.get('exit_code') == 0 for check in checks) for recipe in policy['recipes'])):
+            return False
+    required = {(entry.get('component', '.'), entry['name']): entry
+                for primary in policy['toolchains'] for entry in [primary, *primary.get('companions', [])]}
+    measured = evidence.get('toolchain_evidence') or []
+    for key, entry in required.items():
+        found = [item for item in measured if (item.get('component', '.'), item.get('name')) == key]
+        if len(found) != 1 or found[0].get('matches') is not True:
+            return False
+        if 'component' in entry and (found[0].get('actual') != entry['required']
+                                     or found[0].get('path') not in entry['executables']):
+            return False
+    return bool(measured) and all(item.get('matches') is True for item in measured)
 
 
 def summary(policy):
