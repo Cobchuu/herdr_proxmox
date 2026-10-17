@@ -27,6 +27,11 @@ import server
 
 
 class TaskBaseTests(unittest.TestCase):
+    def test_existing_sdk_recovery_permission_does_not_grant_automatic_preparation(self):
+        policy = contributions.resolved_automation_policy({'auto_sdk': True})
+        self.assertIs(policy['auto_prepare'], False)
+        self.assertIs(policy['auto_prepare_checks'], False)
+        self.assertIs(policy['auto_prepare_agent'], False)
     @patch('project_git.configured_base', return_value=None)
     @patch('project_git.git')
     def test_origin_default_is_resolved_to_explicit_branch(self, git, configured):
@@ -583,8 +588,10 @@ class ContributionTests(unittest.TestCase):
         self.assertTrue(policy['auto_validate'])
         self.assertEqual(policy['daily_cap'], 3)
         self.service.set_automation_policy(dict(organization_id='org', auto_publish=False, auto_validate=False), 'admin')
+        self.service.set_automation_policy(dict(organization_id='org', auto_validate=True), 'admin')
+        self.assertTrue(self.service.policy('org')['auto_validate'])
         with self.assertRaisesRegex(ValueError, 'durable build service'):
-            self.service.set_automation_policy(dict(organization_id='org', auto_validate=True), 'admin')
+            self.service.set_automation_policy(dict(organization_id='org', auto_publish=True), 'admin')
 
     def test_inherited_publication_requires_publishing_configuration_and_preflight(self):
         self.inherited_task()
@@ -931,12 +938,12 @@ class ContributionTests(unittest.TestCase):
             self.service.action('policy', body, 'admin', 'admin')
         self.api.snapshot.return_value = dict(configured=True)
         body.update(request_id='disable-verify', auto_validate=False)
-        with self.assertRaisesRegex(ValueError, 'requires automatic capture and validation'):
+        with self.assertRaisesRegex(ValueError, 'requires automatic validation'):
             self.service.action('policy', body, 'admin', 'admin')
 
     def test_automatic_receipt_capture_and_build_are_exact_and_deduplicated(self):
         task = self.candidate()
-        task.update(state='implementing', auto_validate=True)
+        task.update(state='implementing', auto_capture=True, auto_validate=True)
         task.pop('head_sha')
         self.service.save(task, 'policy', 'admin')
         run = self.store.snapshot.return_value['jobs'][0]
@@ -968,9 +975,9 @@ class ContributionTests(unittest.TestCase):
             self.service.advance_automatic()
         self.assertEqual(self.service.validation.submit.call_count, 1)
 
-    def test_automatic_receipt_rejects_stale_token_and_missing_service(self):
+    def test_automatic_receipt_rejects_stale_token_and_allows_gateway_validation(self):
         task = self.candidate()
-        task.update(auto_validate=True, state='implementing')
+        task.update(auto_capture=True, auto_validate=True, state='implementing')
         task.pop('head_sha')
         self.service.save(task, 'policy', 'admin')
         run = self.store.snapshot.return_value['jobs'][0]
@@ -1000,8 +1007,10 @@ class ContributionTests(unittest.TestCase):
         self.assertNotIn('head_sha', self.service.get(task['id']))
         self.service.validation.submit.assert_not_called()
         self.service.validation.snapshot.return_value = {'executor': 'gateway'}
-        with self.assertRaisesRegex(ValueError, 'durable build service'):
-            self.service.action('policy', dict(request_id='policy-guard', task_id=task['id'], auto_validate=True), 'admin', 'admin')
+        self.service.action('policy', dict(request_id='disable-validation', task_id=task['id'],
+            auto_capture=True, auto_validate=False, auto_publish=False), 'admin', 'admin')
+        enabled = self.service.action('policy', dict(request_id='policy-guard', task_id=task['id'], auto_validate=True), 'admin', 'admin')
+        self.assertTrue(enabled['auto_validate'])
 
     def test_captured_history_has_git_metadata_even_in_list_fallback(self):
         task = self.candidate()
@@ -1076,6 +1085,8 @@ class ContributionTests(unittest.TestCase):
 
     def test_reviewed_completion_is_explicit_pinned_and_does_not_claim_validation(self):
         task = self.candidate()
+        task['auto_capture'] = True
+        self.service.save(task, 'policy', 'admin')
         body = dict(request_id='complete-1', task_id=task['id'], head_sha=task['head_sha'], upstream_sha=self.base,
                     outcome='incorporated_elsewhere', reason='Reviewed task changes already included by other upstream work.', inspected=True)
         with self.assertRaisesRegex(ValueError, 'Review the exact'):
@@ -1086,6 +1097,7 @@ class ContributionTests(unittest.TestCase):
             self.service.action('complete', body, 'viewer', 'operator')
         completed = self.service.action('complete', body, 'admin', 'admin')
         self.assertEqual(completed['state'], 'completed')
+        self.assertFalse(completed['auto_capture'])
         self.assertEqual(completed['completion']['validation'], 'not_verified')
         self.assertEqual(completed['completion']['candidate'], task['head_sha'])
         self.assertEqual(self.service.action('complete', body, 'admin', 'admin')['state'], 'completed')
@@ -1124,7 +1136,8 @@ class ContributionTests(unittest.TestCase):
         self.assertEqual(moved['delivery_blocker']['kind'], 'policy_changed')
         self.assertIn('Verify again', moved['delivery_blocker']['message'])
         # Matching evidence under the same policy is not blocked.
-        task['builds'][head].update(policy_digest=approved, toolchain_evidence=[dict(matches=True)])
+        task['builds'][head].update(policy_digest=approved,
+            toolchain_evidence=[dict(name='flutter', required='3.44.8', actual='3.44.8', matches=True)])
         self.assertTrue(self.service.policy_matches(task, task['builds'][head]))
 
     def test_automatic_delivery_blocks_stale_policy_before_pushing(self):
@@ -1143,6 +1156,7 @@ class ContributionTests(unittest.TestCase):
 
     def test_automatic_completion_requires_exact_tree_and_verified_checks(self):
         task = self.candidate()
+        task['auto_capture'] = True
         head = task['head_sha']
         task['builds'] = {head: dict(target=head, state='complete', required_checks_verified=False)}
         self.service.save(task, 'build_result', 'runner')
@@ -1158,6 +1172,7 @@ class ContributionTests(unittest.TestCase):
         self.service.reconcile_completed()
         completed = self.service.get(task['id'])
         self.assertEqual(completed['state'], 'completed')
+        self.assertFalse(completed['auto_capture'])
         self.assertEqual(completed['completion']['validation'], 'verified')
         before = completed['audit']
         self.service.reconcile_completed()
@@ -2247,7 +2262,7 @@ class ContributionTests(unittest.TestCase):
     def test_no_changes_receipt_completes_without_capture_or_build(self):
         tree = self.root / 'tree'
         self.git('worktree', 'add', '-b', self.task['branch'], str(tree), self.base)
-        self.task.update(worktree=str(tree), run_id='run', state='implementing', auto_validate=True)
+        self.task.update(worktree=str(tree), run_id='run', state='implementing', auto_capture=True, auto_validate=True)
         self.service.save(self.task, 'launch', 'admin')
         self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent', profile_id='worker', completion_token='token')]
         self._receipt(self.task, outcome='no_changes', commit=self.base, token='token',
@@ -2531,7 +2546,7 @@ class ContributionTests(unittest.TestCase):
     def test_no_changes_receipt_does_not_complete_a_dirty_checkout(self):
         tree = self.root / 'tree'
         self.git('worktree', 'add', '-b', self.task['branch'], str(tree), self.base)
-        self.task.update(worktree=str(tree), run_id='run', state='implementing', auto_validate=True)
+        self.task.update(worktree=str(tree), run_id='run', state='implementing', auto_capture=True, auto_validate=True)
         self.service.save(self.task, 'launch', 'admin')
         self.store.snapshot.return_value['jobs'] = [dict(id='run', state='persona_sent', completion_token='token')]
         self._receipt(self.task, outcome='no_changes', commit=self.base, token='token', reason='Already implemented.')
@@ -2547,7 +2562,7 @@ class ContributionTests(unittest.TestCase):
 
     def test_finished_execution_still_allows_automatic_candidate_validation(self):
         task = self.candidate()
-        task.update(auto_validate=True, completion_receipt={'commit': task['head_sha']})
+        task.update(auto_capture=True, auto_validate=True, completion_receipt={'commit': task['head_sha']})
         self.service.save(task, 'policy', 'admin')
         self.store.snapshot.return_value['jobs'][0]['state'] = 'finished'
         self.service.validation = MagicMock()
@@ -3350,7 +3365,7 @@ class ContributionTests(unittest.TestCase):
 
     def test_worker_reported_follow_up_creates_one_draft_task(self):
         task = self.candidate()
-        task.update(state='implementing', auto_validate=True)
+        task.update(state='implementing', auto_capture=True, auto_validate=True)
         task.pop('head_sha')
         self.service.save(task, 'policy', 'admin')
         run = self.store.snapshot.return_value['jobs'][0]

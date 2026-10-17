@@ -210,6 +210,13 @@
 .org-form > .org-note { margin-bottom: var(--space-4); }
 .org-form > .form-error { margin: 0 0 var(--space-3); }
 .org-form__item--switch { margin-bottom: var(--space-3); }
+.org-form > fieldset.org-form__item { min-inline-size: 0; padding: 0; border: 0; margin: 0; }
+.org-form > fieldset.org-form__item--switch { margin-bottom: var(--space-3); }
+.org-form__item--invalid { outline: 2px solid var(--color-danger-fg); outline-offset: 4px; border-radius: var(--radius-sm); background: var(--color-danger-bg); }
+.org-form__field-error { margin: var(--space-1) 0 var(--space-3); font-size: var(--text-sm-size); }
+.org-form__summary { padding: var(--space-3); border: 1px solid var(--color-danger-fg); border-radius: var(--radius-sm); background: var(--color-danger-bg); color: var(--color-danger-fg); }
+.org-form__summary p { margin: 0; }
+.org-form__summary ul { margin: var(--space-2) 0 0; padding-inline-start: var(--space-4); }
 .org-form .switch { align-items: flex-start; white-space: normal; color: var(--color-text); }
 .org-form .switch__input, .org-form input[type="checkbox"].switch__input { width: 32px; height: 18px; margin-top: 1px; }
 .org-form__fieldset { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; margin: 0 0 var(--space-4); padding: 0; border: 0; }

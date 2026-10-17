@@ -33,10 +33,10 @@ void main() {
         taskNextStep(working, executor: 'service'),
         'Implementation in progress; awaiting a committed candidate.',
       );
-      // Capture is on but its executor is gone, so nothing will ever arrive.
+      // Capture runs independently of the validation executor.
       expect(
         taskNextStep(working, executor: 'gateway'),
-        contains('waiting for the durable build service'),
+        'Implementation in progress; awaiting a committed candidate.',
       );
     },
   );
@@ -44,12 +44,34 @@ void main() {
   test('a task with capture off never claims the agent is still working', () {
     final idle = {'state': 'implementing', 'auto_validate': false};
     final noService = taskNextStep(idle, executor: 'unavailable');
-    expect(noService, contains('the durable build service is not installed'));
+    expect(noService, contains('Automatic capture is off for this task'));
     expect(noService, contains('Changes'));
     final withService = taskNextStep(idle, executor: 'service');
     expect(withService, contains('Automatic capture is off for this task'));
     expect(withService, isNot(contains('awaiting a committed candidate')));
   });
+
+  test(
+    'capture and validation flags independently describe implementation',
+    () {
+      expect(
+        taskNextStep({
+          'state': 'implementing',
+          'auto_capture': true,
+          'auto_validate': false,
+        }, executor: 'gateway'),
+        'Implementation in progress; awaiting a committed candidate.',
+      );
+      expect(
+        taskNextStep({
+          'state': 'implementing',
+          'auto_capture': false,
+          'auto_validate': true,
+        }, executor: 'service'),
+        contains('Automatic capture is off'),
+      );
+    },
+  );
 
   test('other states are unaffected by the executor', () {
     final completed = {

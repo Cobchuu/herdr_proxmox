@@ -318,6 +318,19 @@ def repository_review_context(store, job):
     dirty = bool(project_git.git(repository, 'status', '--porcelain=v1', '--untracked-files=normal').strip())
     context = dict(repository=str(repository), commit=commit, dirty=dirty, captured_at=now(),
                    source='configured_project_HEAD')
+    import toolchain_policy
+    try:
+        if toolchain_policy.PROJECT_RESOLVER is not None:
+            approved = toolchain_policy.resolve_committed(repository)
+        else:
+            approved = ((job.get('group_run', {}).get('toolchain_policy') or {}).get('policy'))
+            if approved is None:
+                raise ValueError('Project environment discovery is not configured for this review.')
+        context['environment'] = dict(plan_digest=approved.get('plan_digest'),
+            policy_digest=toolchain_policy.digest(approved), requirements=toolchain_policy.summary(approved)[:12],
+            blockers=[str(item)[:300] for item in approved.get('blockers', [])[:12]])
+    except (ValueError, OSError) as error:
+        context['environment'] = dict(unavailable=str(error)[:300])
     store.update_job(job['id'], review_context=context)
     return context
 
@@ -334,6 +347,7 @@ def repository_review_instructions(context):
         "before reviewing; report unavailable evidence instead of substituting another revision. "
         "Do not checkout, reset, merge, fetch or modify projects to prepare the review. Uncommitted changes "
         "are outside this baseline; report the supplied dirty flag. "
+        "Use the recorded environment for any checks; do not install or switch SDKs for this read-only review. "
         "First inventory all tracked top-level areas, read repository guidance, and divide subsystem coverage "
         "among members. Include runtime code, UI, tests, tooling and configuration where present; exclude "
         "generated/vendor content from detailed analysis and explain exclusions. Trace cross-cutting rules, "

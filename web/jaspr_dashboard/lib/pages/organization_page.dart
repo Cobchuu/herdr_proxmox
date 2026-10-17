@@ -666,6 +666,7 @@ class _OrganizationPageState extends State<OrganizationPage> {
   Component run(Json job, bool busy) {
     final admin = connection.operator.value['role'] == 'admin';
     final launch = job['kind'] == 'launch';
+    final preparation = job['kind'] == 'environment_preparation';
     final profile = bloc.state.profiles
         .where((p) => p['id'] == job['profile_id'])
         .firstOrNull;
@@ -718,7 +719,8 @@ class _OrganizationPageState extends State<OrganizationPage> {
             iconName: 'rotate-ccw',
           ),
       ],
-      if (launch && !['queued', 'running', 'released'].contains(job['state']))
+      if ((launch || preparation) &&
+          !['queued', 'running', 'released', 'finished'].contains(job['state']))
         button(
           'Release run binding',
           () => release(job),
@@ -752,7 +754,13 @@ class _OrganizationPageState extends State<OrganizationPage> {
       el('div', [
         el('div', [
           el('h3', [
-            text(launch ? 'Launch' : 'Delegation'),
+            text(
+              preparation
+                  ? 'Environment preparation'
+                  : launch
+                  ? 'Launch'
+                  : 'Delegation',
+            ),
             el('span', [text(' · $name')], classes: 'org-run__agent'),
           ], classes: 'org-run__title'),
           statePill(job['state']),
@@ -777,6 +785,11 @@ class _OrganizationPageState extends State<OrganizationPage> {
           if (job['alias'] != null) ('Herdr name', mono(job['alias'])),
           if (job['alias'] != null)
             ('Pane', mono(job['pane_id'] ?? 'not allocated')),
+          if (job['progress'] != null) ('Progress', textBlock(job['progress'])),
+          if (job['preparation_execution_id'] != null)
+            ('Preparation execution', mono(job['preparation_execution_id'])),
+          if (job['parent_execution_id'] != null)
+            ('Waiting launch', mono(job['parent_execution_id'])),
           if (job['task'] != null)
             ('From ${job['sender_name']}', textBlock(job['task'])),
           if (job['workspace_mode'] == 'worktree')

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:herdr_dashboard_state/installation_status.dart';
 import 'package:juice/juice.dart';
 import 'dashboard_bloc.dart';
 import 'artifact_download.dart';
@@ -15,6 +16,7 @@ class _BuildsPageState extends State<BuildsPage> {
   List<Map<String, dynamic>> runs = [];
   Map<String, dynamic>? identity;
   Map<String, dynamic>? deployment;
+  Map<String, dynamic>? buildService;
   String executor = 'gateway';
   int queued = 0;
   String? error;
@@ -43,6 +45,12 @@ class _BuildsPageState extends State<BuildsPage> {
     try {
       final result = await connection.request('validation');
       final deployed = await connection.request('build');
+      Map<String, dynamic>? installer;
+      try {
+        installer = Map<String, dynamic>.from(
+          await connection.request('build-service'),
+        );
+      } catch (_) {} // Older gateways retain the root-command fallback.
       Map<String, dynamic>? status;
       try {
         status = Map<String, dynamic>.from(await connection.request('updates'));
@@ -56,6 +64,7 @@ class _BuildsPageState extends State<BuildsPage> {
           queued = result['queued'] as int? ?? 0;
           identity = Map<String, dynamic>.from(deployed);
           deployment = status;
+          buildService = installer;
           error = null;
         });
     } catch (e) {
@@ -63,6 +72,39 @@ class _BuildsPageState extends State<BuildsPage> {
         setState(() => error = '$e');
     } finally {
       busy = false;
+    }
+  }
+
+  bool get installingBuildService =>
+      ['queued', 'running'].contains(buildService?['state']);
+
+  Future<void> installBuildService() async {
+    if (acting ||
+        installingBuildService ||
+        connection.operator.value['role'] != 'admin' ||
+        buildService?['supported'] != true)
+      return;
+    final epoch = connection.generation;
+    setState(() {
+      acting = true;
+      actionError = null;
+    });
+    try {
+      final result = await connection.request(
+        'build-service/install',
+        const {},
+      );
+      if (mounted && epoch == connection.generation) {
+        setState(() => buildService = {'supported': true, ...result});
+        notify(
+          'Build-service installation queued. The gateway will restart; automation settings remain unchanged.',
+        );
+      }
+    } catch (e) {
+      if (mounted && epoch == connection.generation)
+        setState(() => actionError = '$e');
+    } finally {
+      if (mounted) setState(() => acting = false);
     }
   }
 
@@ -279,15 +321,51 @@ class _BuildsPageState extends State<BuildsPage> {
       const SizedBox(height: 12),
       Text('Build executor: $executor · $queued queued'),
       if (executor != 'service')
-        const ListTile(
+        ListTile(
           contentPadding: EdgeInsets.zero,
-          leading: Icon(Icons.warning_amber_outlined),
-          title: Text('Durable build service not installed'),
-          subtitle: Text(
-            'Builds run inside the gateway and stop with it; automatic builds stay off. '
-            'Install it as root inside the container: bash /opt/herdr-web/install/build-install.sh',
+          leading: const Icon(Icons.warning_amber_outlined),
+          title: const Text('Durable build service not installed'),
+          subtitle: const Text(
+            'Automatic capture and validation are available with the gateway executor. Gateway builds stop on restart; install this service for restart resilience. Installing it restarts the gateway; automation stays opt-in.',
           ),
         ),
+      if (executor != 'service' &&
+          buildService?['supported'] == true &&
+          connection.operator.value['role'] == 'admin')
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton(
+            onPressed: acting || installingBuildService
+                ? null
+                : installBuildService,
+            child: Text(
+              installingBuildService
+                  ? 'Installing build service…'
+                  : 'Install build service',
+            ),
+          ),
+        ),
+      if (executor != 'service' && buildService?['supported'] != true)
+        const ExpansionTile(
+          title: Text('Build service setup'),
+          children: [
+            SelectableText(
+              'Enable dashboard installation once as root:\nbash /opt/herdr-web/install/build-service-setup.sh\nOr install directly:\nbash /opt/herdr-web/install/build-install.sh',
+            ),
+          ],
+        ),
+      if (buildService?['state'] != null) ...[
+        Text(
+          'Build-service installation: ${installationStatusLabel(buildService!['state'])}',
+        ),
+        if (buildService!['error'] != null)
+          SelectableText('${buildService!['error']}'),
+        if (buildService!['output'] != null)
+          ExpansionTile(
+            title: const Text('Build-service installation output'),
+            children: [SelectableText('${buildService!['output']}')],
+          ),
+      ],
       const Text(
         'Build exact integration commits from Git changes. Static artifacts and full gateway/UI packages are separate. Downloading a package does not authorize deployment.',
       ),

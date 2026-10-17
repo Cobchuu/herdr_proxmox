@@ -78,7 +78,7 @@ class _ToolchainState extends OperationsState<ToolchainCard> {
 
   @override
   Component build(BuildContext context) => card(
-    'Development toolchains',
+    'Herdr build tools',
     [
       if (sdk['state'] == 'unavailable')
         callout([
@@ -165,7 +165,8 @@ class _ToolchainState extends OperationsState<ToolchainCard> {
     ],
     iconName: 'wrench',
     subtitle:
-        'Versions are pinned by the deployed release. A root service installs the declared toolchain on request.',
+        'Used to build Herdr itself from source. These versions are pinned by the deployed release and '
+        'are not a requirement of any project you host. Project requirements live in the project explorer.',
     actions: [
       button(
         'Refresh toolchain status',

@@ -107,7 +107,7 @@ class _ToolchainCardState extends State<ToolchainCard> {
               children: [
                 Expanded(
                   child: Text(
-                    'Development toolchains',
+                    'Herdr build tools',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),
@@ -122,9 +122,9 @@ class _ToolchainCardState extends State<ToolchainCard> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Toolchains this release can provision. The versions are pinned by '
-              'the release, and a root service installs them on request. This is '
-              'separate from the tools an agent installs for one task.',
+              'Used to build Herdr itself from source. These versions are pinned by the '
+              'deployed release and are not a requirement of any project you host. '
+              'Project requirements live in the project explorer.',
             ),
             if (sdk['state'] == 'unavailable') ...[
               const SizedBox(height: 12),

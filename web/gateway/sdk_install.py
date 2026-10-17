@@ -121,24 +121,23 @@ class SdkInstall:
             name = body.get('toolchain')
             if not self.declared():
                 raise ValueError('This release does not provision any toolchain.')
-            if 'toolchain' in body and (not isinstance(name, str) or not name or name not in info['toolchains']):
+            # A request must name its toolchain. Inferring it from "whatever is
+            # absent" let a build blocked on one ecosystem queue an unrelated SDK
+            # whenever the release happened to provision exactly one, so the
+            # caller must now state the identity it verified.
+            if not isinstance(name, str) or not name:
+                raise ValueError('Name the toolchain to install. This release provisions: '
+                                 + (', '.join(sorted(info['toolchains'])) or 'none')
+                                 + '.')
+            if name not in info['toolchains']:
                 raise ValueError('This release does not provision that toolchain.')
             # Checked before "already installed": a toolchain with no declared
             # version is not absent, it is unprovisionable, and saying otherwise
             # sends the operator looking for the wrong problem.
-            if name is not None and not info['toolchains'][name]['required']:
+            if not info['toolchains'][name]['required']:
                 raise ValueError('This release declares no version for that toolchain; '
                                  'state it in the file the catalog reads before installing.')
-            if name is None:
-                # An omitted name means "whatever is absent", which is only
-                # unambiguous while exactly one declared toolchain is missing.
-                if len(info['toolchains']) != 1:
-                    raise ValueError('Several toolchains are declared; choose which to install: '
-                                     + ', '.join(sorted(info['toolchains'])))
-                if not info['missing']:
-                    raise ValueError('The toolchains this release provisions are already installed.')
-                name = info['missing'][0]
-            elif name not in info['missing']:
+            if name not in info['missing']:
                 raise ValueError('That toolchain is already installed.')
             request = self.queue / 'request.json'
             temporary = self.queue / 'request.tmp'

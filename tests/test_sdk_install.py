@@ -60,14 +60,14 @@ class SdkClientTests(unittest.TestCase):
         self.assertEqual(status['toolchains']['flutter'],
                          {'label': 'Flutter', 'required': '1.0.0', 'declared_by': 'flutter.json#version',
                           'executable': str(self.root / 'flutter-1.0.0/bin/flutter'), 'installed': False})
-        self.assertEqual(self.service.install({})['state'], 'queued')
+        self.assertEqual(self.service.install({'toolchain': 'flutter'})['state'], 'queued')
         self.assertEqual(self.service.snapshot()['state'], 'queued')
         # The queued toolchain is readable before the root service claims it.
         self.assertEqual(self.service.snapshot()['toolchain'], 'flutter')
         request = json.loads((self.queue / 'request.json').read_text())
         self.assertEqual(request, {'action': 'install', 'toolchain': 'flutter'})
         with self.assertRaisesRegex(ValueError, 'already running'):
-            self.service.install({})
+            self.service.install({'toolchain': 'flutter'})
 
     def test_options_are_rejected_and_an_installed_toolchain_is_not_reinstalled(self):
         with self.assertRaises(ValueError):
@@ -76,14 +76,14 @@ class SdkClientTests(unittest.TestCase):
         executable.parent.mkdir(parents=True)
         executable.write_text('SDK fixture')
         with self.assertRaisesRegex(ValueError, 'already installed'):
-            self.service.install({})
+            self.service.install({'toolchain': 'flutter'})
 
     def test_missing_service_and_failed_state_are_explicit(self):
         unsupported = SdkInstall(self.root / 'missing', self.root / 'status.json', self.catalog)
         with self.assertRaisesRegex(ValueError, 'root first'):
-            unsupported.install({})
+            unsupported.install({'toolchain': 'flutter'})
         (self.root / 'status.json').write_text(json.dumps({'state': 'failed', 'error': 'network'}))
-        self.assertEqual(self.service.install({})['state'], 'queued')
+        self.assertEqual(self.service.install({'toolchain': 'flutter'})['state'], 'queued')
 
     def test_installer_progress_is_reported_and_optional(self):
         # The installer writes this file and the gateway only reads it, so a
@@ -119,7 +119,7 @@ class SdkClientTests(unittest.TestCase):
             self.service.state.write_text(json.dumps({'state': state, 'started_at': started}))
             self.assertIsNone(self.service.snapshot()['progress'], state)
         self.service.state.write_text(json.dumps({'state': 'failed'}))
-        self.service.install({})
+        self.service.install({'toolchain': 'flutter'})
         self.assertIsNone(self.service.snapshot()['progress'])
 
     def test_malformed_status_is_reported_without_breaking_polling(self):
@@ -149,23 +149,28 @@ class SdkClientTests(unittest.TestCase):
         request = json.loads((self.queue / 'request.json').read_text())
         self.assertEqual(request['toolchain'], 'go')
 
-    def test_an_unnamed_request_refuses_to_choose_between_several(self):
+    def test_an_unnamed_request_is_always_refused(self):
+        # The old contract inferred "the only toolchain" for a bare request. That
+        # is what let a build blocked on one ecosystem queue an unrelated SDK, so
+        # identity is now required even when a single entry makes it guessable.
         catalog = release_tree(self.root, {'flutter': '1.0.0', 'go': '1.23.0'})
         service = SdkInstall(self.queue, self.root / 'status.json', catalog)
-        with self.assertRaisesRegex(ValueError, 'flutter, go'):
+        with self.assertRaisesRegex(ValueError, 'Name the toolchain'):
             service.install({})
+        self.assertFalse((self.queue / 'request.json').exists())
 
     def test_an_undeclared_toolchain_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'does not provision'):
             self.service.install({'toolchain': 'go'})
         self.assertFalse((self.queue / 'request.json').exists())
 
-    def test_one_missing_toolchain_does_not_make_a_multiple_catalog_unambiguous(self):
+    def test_exactly_one_missing_toolchain_is_still_not_an_identity(self):
         catalog = release_tree(self.root, {'flutter': '1.0.0', 'go': '1.23.0'}, installed=('flutter',))
         service = SdkInstall(self.queue, self.root / 'status.json', catalog)
         self.assertEqual(service.snapshot()['missing'], ['go'])
-        with self.assertRaisesRegex(ValueError, 'Several toolchains are declared'):
+        with self.assertRaisesRegex(ValueError, 'Name the toolchain'):
             service.install({})
+        self.assertFalse((self.queue / 'request.json').exists())
         for name in (None, [], '', {}):
             with self.assertRaises(ValueError):
                 service.install({'toolchain': name})
@@ -200,7 +205,7 @@ class SdkClientTests(unittest.TestCase):
             self.assertEqual(status['toolchains'], {})
             self.assertEqual(status['missing'], [])
             with self.assertRaisesRegex(ValueError, 'does not provision'):
-                self.service.install({})
+                self.service.install({'toolchain': 'flutter'})
         self.catalog.unlink()
         self.assertEqual(self.service.snapshot()['toolchains'], {})
 

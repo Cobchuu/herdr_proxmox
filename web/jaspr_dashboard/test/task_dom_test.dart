@@ -187,6 +187,61 @@ void main() {
       ? task
       : {'workspaces': [], 'agents': []};
 
+  test(
+    'capture and validation can be enabled independently with the gateway executor',
+    () async {
+      final task = <String, dynamic>{
+        'id': 'task',
+        'title': 'Implementation',
+        'description': 'Implement',
+        'repository': 'repo',
+        'organization_id': 'org',
+        'state': 'draft',
+        'base_ref': 'refs/remotes/origin/main',
+        'base_sha': 'a' * 40,
+        'auto_capture': false,
+        'auto_validate': false,
+        'auto_publish': false,
+      };
+      await mount(const TasksPage(taskId: 'task'), (request) {
+        if (request.url.path.endsWith('/tasks/policy')) {
+          task.addAll(
+            Map<String, dynamic>.from(jsonDecode(request.body))
+              ..remove('request_id'),
+          );
+          return task;
+        }
+        final result = taskResponse(request, task);
+        if (request.url.path.endsWith('/tasks')) result['executor'] = 'gateway';
+        return result;
+      });
+      await click('Automation settings');
+      web.HTMLInputElement toggle(String title) =>
+          elements('label.checkbox-field')
+                  .firstWhere((e) => e.textContent!.startsWith(title))
+                  .querySelector('input')
+              as web.HTMLInputElement;
+      expect(
+        toggle('Automatically validate captured candidates').disabled,
+        isFalse,
+      );
+      final capture = toggle('Automatically capture completed candidates');
+      expect(capture.disabled, isFalse);
+      capture.click();
+      await settle();
+      expect(posts.single['path'], '/api/tasks/policy');
+      expect(posts.single['auto_capture'], true);
+      expect(posts.single['auto_validate'], false);
+      expect(posts.single['auto_publish'], false);
+      toggle('Automatically validate captured candidates').click();
+      await settle();
+      expect(posts.last['path'], '/api/tasks/policy');
+      expect(posts.last['auto_capture'], true);
+      expect(posts.last['auto_validate'], true);
+      expect(task['auto_publish'], false);
+    },
+  );
+
   Map<String, dynamic> publishingResponse(http.Request request) {
     final github = {
       'configured': true,

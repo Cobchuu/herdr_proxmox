@@ -17,6 +17,14 @@ const taskStates = <String, String>{
 bool candidateWaiting(Map task) =>
     task['state'] == 'implementing' && task['awaiting_candidate'] == true;
 
+/// Whether the gateway captures this task's committed candidate on its own.
+///
+/// Capture and validation are separate switches, and both are independent of
+/// the build executor. A task written before that split carries only
+/// `auto_validate`, where it opted into both, so the older flag still answers.
+bool taskAutoCapture(Map task) =>
+    (task['auto_capture'] ?? task['auto_validate']) == true;
+
 String taskStateKey(Map task) =>
     (task['assignment'] as Map?)?['state'] == 'queued'
     ? 'queued'

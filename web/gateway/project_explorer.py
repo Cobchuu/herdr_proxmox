@@ -3,39 +3,13 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import stat
-from contextlib import contextmanager
 
-ANCHORED_ACCESS = (os.open in os.supports_dir_fd and os.scandir in os.supports_fd
-                   and hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'O_DIRECTORY'))
-
-
-@contextmanager
-def open_project(root, relative):
-    """Walk from a pinned root handle; never reopen a validated pathname."""
-    if not ANCHORED_ACCESS:
-        raise ValueError('Secure project browsing requires a Linux gateway.')
-    descriptors = []
-    try:
-        descriptor = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        descriptors.append(descriptor)
-        for part in root.parts[1:]:
-            descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-            descriptors.append(descriptor)
-        for index, part in enumerate(relative.parts):
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-            if index < len(relative.parts) - 1:
-                flags |= os.O_DIRECTORY
-            descriptor = os.open(part, flags, dir_fd=descriptor)
-            descriptors.append(descriptor)
-        yield descriptor
-    except OSError as error:
-        raise ValueError('Project path is unavailable or contains a symbolic link.') from error
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
+from project_access import ANCHORED_ACCESS, open_project
 
 
 def browse(root, body):
+    if not ANCHORED_ACCESS:
+        raise ValueError('Secure project browsing requires a Linux gateway.')
     value = body.get('path', '') if isinstance(body, dict) else None
     if not isinstance(value, str) or len(value) > 2000 or '\\' in value or '\x00' in value:
         raise ValueError('Invalid project path.')

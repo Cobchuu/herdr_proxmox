@@ -1,5 +1,6 @@
 import 'operations_support.dart';
 import 'project_git_panel.dart';
+import 'project_analysis_card.dart';
 import 'ops_ui.dart';
 
 class ProjectExplorerPage extends StatefulComponent {
@@ -93,6 +94,13 @@ class _ExplorerState extends OperationsState<ProjectExplorerPage> {
               '${e['name']}'.toLowerCase().contains(filter.toLowerCase()),
         )
         .toList();
+    // The listing carries hidden entries even when they are filtered out of the
+    // table, so a repository root is recognisable without a second request.
+    final repositoryRoot =
+        path.isNotEmpty &&
+        (directory?['entries'] as List? ?? []).any(
+          (e) => e is Map && '${e['name']}' == '.git',
+        );
     final segments = path
         .split('/')
         .where((p) => p.isNotEmpty && p != '.')
@@ -154,6 +162,10 @@ class _ExplorerState extends OperationsState<ProjectExplorerPage> {
           ], classes: 'mono-chip explorer-root'),
       ], classes: 'explorer-location'),
       feedback(),
+      // A repository root, not every folder: the declaration is per project, so
+      // offering it while browsing a subdirectory would claim the wrong scope.
+      if (repositoryRoot)
+        ProjectAnalysisCard(key: ValueKey('analysis-$path'), path: path),
       el(
         'div',
         [

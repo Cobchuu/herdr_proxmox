@@ -449,6 +449,37 @@ class IntegrationCoordinator:
             return False, 'verification_failed', 'Git verification no longer confirms the exact commit.', verification
         return True, None, '', verification
 
+    def required_toolchain(self, event):
+        """The tool a blocked build is missing, or a refusal that says why not.
+
+        A worker reports a blocker *category*, never a tool, and free text from a
+        worker must not choose which privileged installer runs. The identity comes
+        from the project's resolved requirement report — discovery combined with
+        any operator override — and it counts only when an installer this release
+        ships would actually satisfy it. Identity, existence and satisfaction are
+        three different questions and only the third resolves a blocker.
+        """
+        reader = getattr(self, 'effective_requirements', None)
+        if not callable(reader):
+            raise ValueError('Requirement resolution is unavailable; inspect the gateway configuration.')
+        report = reader(event.get('repository'))
+        installable = report.get('provisionable') or []
+        if len(installable) > 1:
+            # The category does not name the tool, but the build recorded which
+            # tools it measured and which failed to match. A failed tool that is
+            # also installable is the one the blocker is about; evidence that
+            # identifies nothing, or several, stays a refusal.
+            recorded = event.get('validation_run')
+            evidence = recorded.get('toolchain_evidence') if isinstance(recorded, dict) else None
+            failed = {item.get('name') for item in evidence or []
+                      if isinstance(item, dict) and item.get('matches') is False}
+            identified = [name for name in installable if name in failed]
+            if len(identified) == 1:
+                return identified[0]
+        if len(installable) != 1:
+            raise ValueError(report['project_requirement']['reason'])
+        return installable[0]
+
     def missing_toolchain(self, config, event):
         """Queue the scoped SDK install once, when the operator opted in."""
         if not config.get('auto_sdk') or not event.get('blocker') == TOOLCHAIN or self.sdk_request is None:
@@ -456,11 +487,11 @@ class IntegrationCoordinator:
         if event.get('sdk_requested'):
             return
         try:
-            self.sdk_request()
+            self.sdk_request(self.required_toolchain(event))
         except (ValueError, OSError) as exc:
-            # Auto-install cannot choose between several absent toolchains, so a
-            # blocked build would otherwise stall with no explanation. Record the
-            # refusal once; later polls must not repeat it into the reason.
+            # An unidentified or unprovisionable requirement is a real answer:
+            # a blocked build would otherwise stall with no explanation. Record
+            # the refusal once; later polls must not repeat it into the reason.
             if not event.get('sdk_note'):
                 event['sdk_note'] = (str(exc) or type(exc).__name__)[:400]
                 # Keep the refusal visible even when the original build reason

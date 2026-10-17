@@ -71,7 +71,7 @@ def retain(tree, folder, run):
                     file_count=len(files) + 2, validation_exit_code=run['exit_code'] if 'exit_code' in run else 0,
                     deployment_authorized=False, checks=run.get('checks', []),
                     toolchain_pin=run.get('toolchain_pin'),
-                    policy_digest=run.get('policy_digest'),
+                    policy_digest=run.get('policy_digest'), plan_digest=run.get('plan_digest'),
                     toolchain_evidence=run.get('toolchain_evidence'),
                     policy_changes=run.get('policy_changes'),
                     task_id=run.get('task_id'), validation_waiver=run.get('validation_waiver'),

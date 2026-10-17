@@ -1,6 +1,7 @@
 import 'org_form_values.dart';
+import 'dart:async';
 import 'dart:convert';
-import '../services.dart' show requestId;
+import '../services.dart' show requestId, DashboardRequestException;
 import 'package:herdr_dashboard_state/team_template_draft.dart';
 import 'package:herdr_dashboard_state/template_library_state.dart';
 import 'package:web/web.dart' as web;
@@ -35,6 +36,8 @@ Future<Json?> editRecord(
   Map<String, int> limits = const {},
   List<Component> Function(Json)? extra,
   String? Function(Json)? validate,
+  Map<String, String> Function(Json)? validateFields,
+  Future<void> Function(Json)? submit,
   Set<String> flags = const {},
   void Function(String key, dynamic value, Json values)? changed,
   bool Function(String key, Json values)? visible,
@@ -43,6 +46,35 @@ Future<Json?> editRecord(
 }) {
   final values = Json.from(initial);
   String? error;
+  var fieldErrors = <String, String>{};
+  var saving = false;
+  final formId = 'org-record-${requestId()}';
+  void fail(String message, [Map<String, String> fields = const {}]) {
+    error = message;
+    fieldErrors = {
+      for (final entry in fields.entries)
+        if (labels.containsKey(entry.key)) entry.key: entry.value,
+    };
+    refreshDialogs();
+    Timer.run(() {
+      final summary =
+          web.document.getElementById('$formId-error') as web.HTMLElement?;
+      summary?.focus();
+      summary?.scrollIntoView();
+    });
+  }
+
+  void update(String key, dynamic value) {
+    if (saving) return;
+    values[key] = value;
+    changed?.call(key, value, values);
+    if (fieldErrors.remove(key) != null ||
+        key == 'project' ||
+        flags.contains(key) ||
+        choices.containsKey(key))
+      refreshDialogs();
+  }
+
   // Short inputs and selects pair up two per row; text areas, switches,
   // [wide] keys (paths) and a short field without a partner take the full
   // width of the form. Pairs are recomputed from the visible fields.
@@ -65,20 +97,59 @@ Future<Json?> editRecord(
     return result;
   }
 
+  // Each control retains its own label. This fieldset disables it during a save;
+  // a duplicate legend could repeat that name in assistive technology.
   Component item(Set<String> half, String key, Component child) => el(
-    'div',
-    [child],
+    'fieldset',
+    [
+      child,
+      if (fieldErrors[key] != null)
+        el(
+          'p',
+          [text(fieldErrors[key])],
+          classes: 'error org-form__field-error',
+          attributes: {'id': '$formId-$key-error'},
+        ),
+    ],
     classes: [
       'org-form__item',
       if (half.contains(key)) 'org-form__item--half',
       if (flags.contains(key)) 'org-form__item--switch',
+      if (fieldErrors.containsKey(key)) 'org-form__item--invalid',
     ].join(' '),
+    attributes: {
+      'data-field': key,
+      'id': '$formId-$key',
+      if (saving || (enabled != null && !enabled(key, values))) 'disabled': '',
+      if (fieldErrors.containsKey(key)) ...{
+        'aria-invalid': 'true',
+        'aria-describedby': '$formId-$key-error',
+      },
+    },
   );
   return showDialog<Json>(title, (close) {
     final half = halves();
     return el(
       'form',
       [
+        if (error != null)
+          el(
+            'div',
+            [
+              el('p', [text(error)]),
+              if (fieldErrors.isNotEmpty)
+                el('ul', [
+                  for (final key in fieldErrors.keys)
+                    el('li', [text(labels[key])]),
+                ]),
+            ],
+            classes: 'form-error org-form__summary',
+            attributes: {
+              'id': '$formId-error',
+              'role': 'alert',
+              'tabindex': '-1',
+            },
+          ),
         for (final entry in labels.entries)
           if (visible != null && !visible(entry.key, values))
             const Component.empty()
@@ -95,13 +166,17 @@ Future<Json?> editRecord(
                     'type': 'checkbox',
                     'role': 'switch',
                     'checked': '${values[entry.key] == true}',
+                    if (fieldErrors.containsKey(entry.key)) ...{
+                      'aria-invalid': 'true',
+                      'aria-describedby': '$formId-${entry.key}-error',
+                    },
                   },
                   events: {
                     'change': (e) {
-                      values[entry.key] =
-                          (e.target as web.HTMLInputElement).checked;
-                      changed?.call(entry.key, values[entry.key], values);
-                      refreshDialogs();
+                      update(
+                        entry.key,
+                        (e.target as web.HTMLInputElement).checked,
+                      );
                     },
                   },
                 ),
@@ -117,9 +192,7 @@ Future<Json?> editRecord(
                 '${values[entry.key] ?? ''}',
                 choices[entry.key]!,
                 (v) {
-                  values[entry.key] = v;
-                  changed?.call(entry.key, v, values);
-                  refreshDialogs();
+                  update(entry.key, v);
                 },
                 disabled: enabled != null && !enabled(entry.key, values),
               ),
@@ -129,9 +202,7 @@ Future<Json?> editRecord(
               half,
               entry.key,
               textarea(entry.value, '${values[entry.key] ?? ''}', (v) {
-                values[entry.key] = v;
-                changed?.call(entry.key, v, values);
-                if (entry.key == 'project') refreshDialogs();
+                update(entry.key, v);
               }),
             )
           else
@@ -142,50 +213,82 @@ Future<Json?> editRecord(
                 entry.value,
                 '${values[entry.key] ?? ''}',
                 (v) {
-                  values[entry.key] = v;
-                  changed?.call(entry.key, v, values);
-                  if (entry.key == 'project') refreshDialogs();
+                  update(entry.key, v);
                 },
                 required: required.contains(entry.key),
               ),
             ),
         ...?extra?.call(values),
-        if (error != null) errorLine(error),
         el('div', [
-          button('Cancel', () => close(null)),
-          button('Save', () {
-            for (final key in required) {
-              if ('${values[key] ?? ''}'.trim().isEmpty) {
-                error = 'Enter ${labels[key] ?? key}.';
-                refreshDialogs();
+          button('Cancel', () => close(null), disabled: saving),
+          button(
+            saving ? 'Saving…' : 'Save',
+            () async {
+              if (saving) return;
+              error = null;
+              fieldErrors = {};
+              for (final key in required) {
+                if ('${values[key] ?? ''}'.trim().isEmpty) {
+                  final message = 'Enter ${labels[key] ?? key}.';
+                  fail(message, {key: message});
+                  return;
+                }
+              }
+              for (final entry in limits.entries) {
+                if ('${values[entry.key] ?? ''}'.length > entry.value) {
+                  final message =
+                      '${labels[entry.key]} must be at most ${entry.value} characters.';
+                  fail(message, {entry.key: message});
+                  return;
+                }
+              }
+              final invalid =
+                  validateFields?.call(values) ?? <String, String>{};
+              if (invalid.isNotEmpty) {
+                fail('Correct the highlighted rules and limits.', invalid);
                 return;
               }
-            }
-            for (final entry in limits.entries) {
-              if ('${values[entry.key] ?? ''}'.length > entry.value) {
-                error =
-                    '${labels[entry.key]} must be at most ${entry.value} characters.';
-                refreshDialogs();
+              final message = validate?.call(values);
+              if (message != null) {
+                fail(message);
                 return;
               }
-            }
-            error = validate?.call(values);
-            if (error != null) {
+              for (final key in labels.keys) {
+                if (values[key] is String)
+                  values[key] = (values[key] as String).trim();
+              }
+              if (submit == null) {
+                close(values);
+                return;
+              }
+              saving = true;
               refreshDialogs();
-              return;
-            }
-            for (final key in labels.keys) {
-              if (values[key] is String)
-                values[key] = (values[key] as String).trim();
-            }
-            close(values);
-          }, primary: true),
+              try {
+                await submit(Json.from(values));
+                close(values);
+              } catch (failure) {
+                fail(
+                  failure is DashboardRequestException
+                      ? failure.message
+                      : failure.toString().replaceFirst('Exception: ', ''),
+                  failure is DashboardRequestException
+                      ? failure.fieldErrors
+                      : const {},
+                );
+              } finally {
+                saving = false;
+                refreshDialogs();
+              }
+            },
+            primary: true,
+            disabled: saving,
+          ),
         ], classes: 'actions org-dialog-actions'),
       ],
       classes: 'org-form',
       events: {'submit': (event) => event.preventDefault()},
     );
-  });
+  }, canDismiss: () => !saving);
 }
 
 Future<Json?> organizationForm([

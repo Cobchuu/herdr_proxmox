@@ -51,6 +51,7 @@ Unit=herdr-sdk.service
 [Install]
 WantedBy=multi-user.target
 EOF
+bash install/build-service-setup.sh
 install -d -o root -g root -m 0755 /etc/herdr
 install -o root -g root -m 0755 install/operator-admin.py /usr/local/sbin/herdr-operator
 apt-get -o Acquire::Retries=5 install -y python3 dbus-user-session

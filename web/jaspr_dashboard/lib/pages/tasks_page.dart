@@ -2599,11 +2599,37 @@ class _TasksPageState extends State<TasksPage> {
                 title: const Text('Automation settings'),
                 children: [
                   SwitchListTile(
-                    title: const Text('Automatically capture and validate'),
+                    title: const Text(
+                      'Automatically capture completed candidates',
+                    ),
+                    subtitle: const Text(
+                      'Check the completion receipt and capture the committed candidate. No build service is required; validation is a separate setting.',
+                    ),
+                    value: taskAutoCapture(task),
+                    onChanged:
+                        admin &&
+                            !busy &&
+                            ![
+                              'merged',
+                              'closed',
+                              'completed',
+                            ].contains(task['state'])
+                        ? (value) => act('policy', {
+                            'task_id': task['id'],
+                            'auto_capture': value,
+                            'auto_validate': task['auto_validate'] == true,
+                            'auto_publish': task['auto_publish'] == true,
+                          })
+                        : null,
+                  ),
+                  SwitchListTile(
+                    title: const Text(
+                      'Automatically validate captured candidates',
+                    ),
                     subtitle: Text(
                       executor == 'service'
                           ? 'Verify the exact receipt commit, then send results back to the agent before releasing its session.'
-                          : 'Install the durable build service to enable automation.',
+                          : 'Uses the gateway build executor. Builds stop if the gateway restarts; install the durable build service for restart resilience.',
                     ),
                     value: task['auto_validate'] == true,
                     onChanged:
@@ -2613,11 +2639,10 @@ class _TasksPageState extends State<TasksPage> {
                               'merged',
                               'closed',
                               'completed',
-                            ].contains(task['state']) &&
-                            (task['auto_validate'] == true ||
-                                executor == 'service')
+                            ].contains(task['state'])
                         ? (value) => act('policy', {
                             'task_id': task['id'],
+                            'auto_capture': taskAutoCapture(task),
                             'auto_validate': value,
                             if (!value) 'auto_publish': false,
                           })
@@ -2644,6 +2669,7 @@ class _TasksPageState extends State<TasksPage> {
                             ].contains(task['state'])
                         ? (value) => act('policy', {
                             'task_id': task['id'],
+                            'auto_capture': taskAutoCapture(task),
                             'auto_validate':
                                 value || task['auto_validate'] == true,
                             'auto_publish': value,
@@ -2665,6 +2691,7 @@ class _TasksPageState extends State<TasksPage> {
                         onPressed: admin && !busy
                             ? () => act('policy', {
                                 'task_id': task['id'],
+                                'auto_capture': taskAutoCapture(task),
                                 'auto_validate': false,
                                 'auto_publish': false,
                               })
@@ -2677,6 +2704,7 @@ class _TasksPageState extends State<TasksPage> {
                             admin && !busy && task['auto_validate'] == true
                             ? () => act('policy', {
                                 'task_id': task['id'],
+                                'auto_capture': taskAutoCapture(task),
                                 'auto_validate': true,
                                 'auto_publish': task['auto_publish'] == true,
                                 'retry_delivery': true,
