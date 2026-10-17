@@ -1,0 +1,8 @@
+# Herdr is not a distributable Python package. This file exists so discovery can
+# read the runtime its gateway, install scripts and test suites are written
+# against, instead of reporting an undeclared Python requirement that no host
+# verdict can be stated for. tomllib in the gateway sets the floor.
+[project]
+name = "herdr-proxmox"
+version = "0.0.0"
+requires-python = ">=3.11"

@@ -331,6 +331,7 @@ class _ProjectAnalysisState extends OperationsState<ProjectAnalysisCard> {
         'notation': {
           'semver': 'semver (npm, Cargo: ^1.2.3, >=20 <23)',
           'pep440': 'PEP 440 (Python: ~=3.8.1, >=3.10)',
+          'poetry': 'Poetry (Python: ^3.11, ~3.11)',
           'composer': 'Composer (PHP: ^8.2)',
           'pub': 'pub (Dart: ^3.5.0)',
           'dotnet': '.NET (>=8.0.0)',

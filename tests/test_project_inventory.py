@@ -96,6 +96,31 @@ class RecognitionTests(unittest.TestCase):
         for ignored in ('node_modules', 'dist', 'vendor', 'build', '.git'):
             self.assertEqual(result['skipped'].get(ignored), 1, ignored)
 
+    def test_a_committed_tree_skips_the_same_ignored_directories_as_the_walk(self):
+        # A committed vendored or built tree is still somebody else's project:
+        # the same names must not become this project's manifests or languages.
+        result = project_inventory.from_paths(['package.json', 'src/App.tsx',
+            'node_modules/react/index.js', 'node_modules/left-pad/index.js',
+            'vendor/lib.go', 'web/vendor/pubspec.yaml', 'web/package.json'])
+        self.assertEqual(languages(result), ['typescript'])
+        self.assertEqual(result['manifests'], ['package.json', 'web/package.json'])
+        self.assertEqual(result['skipped'], dict(node_modules=1, vendor=2))
+        self.assertEqual(result['files'], 3)
+
+    def test_committed_vendor_files_do_not_spend_the_authored_path_budget(self):
+        with patch.object(project_inventory, 'MAX_PATHS', 2):
+            result = project_inventory.from_paths(iter([
+                'vendor/a.js', 'vendor/b.js', 'vendor/c.js', 'src/main.py']))
+        self.assertFalse(result['truncated'])
+        self.assertEqual(result['paths'], ['src/main.py'])
+        self.assertEqual(result['skipped'], {'vendor': 1})
+
+    def test_committed_enumeration_still_has_a_budget_even_for_ignored_paths(self):
+        with patch.object(project_inventory, 'MAX_PATHS', 2):
+            result = project_inventory.from_paths(f'vendor/file{i}.js' for i in range(100))
+        self.assertTrue(result['truncated'])
+        self.assertEqual(result['files'], 0)
+
     def test_hidden_directories_are_scanned_because_declarations_live_there(self):
         tree(self.root, ['.github/workflows/ci.yml', '.nvmrc'])
         result = project_inventory.scan(self.root)

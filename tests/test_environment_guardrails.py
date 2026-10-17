@@ -234,6 +234,49 @@ class PolicySourceTests(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.repo), *arguments], check=True, input=input,
                               capture_output=True, text=True).stdout.strip()
 
+    def test_a_committed_vendor_tree_does_not_take_a_repository_off_its_legacy_route(self):
+        # Herdr's own self-build compatibility route requires every discovered
+        # requirement to be Flutter, Dart or Python. A committed vendored browser
+        # bundle used to infer a Node requirement and push the repository onto the
+        # generic path, where no adapter could approve it and validation stopped.
+        repo = self.projects / 'self'
+        for relative in ('web/dashboard', 'web/jaspr_dashboard/web/vendor/xterm', 'scripts'):
+            (repo / relative).mkdir(parents=True)
+        (repo / '.fvmrc').write_text('{"flutter":"3.24.0"}', encoding='utf-8')
+        (repo / 'web/dashboard/pubspec.yaml').write_text(
+            'name: dashboard\nenvironment:\n  sdk: ">=3.0.0 <4.0.0"\n'
+            'dependencies:\n  flutter:\n    sdk: flutter\n', encoding='utf-8')
+        (repo / 'web/jaspr_dashboard/web/vendor/xterm/xterm.js').write_text(
+            'window.Terminal = function () {};\n', encoding='utf-8')
+        (repo / 'scripts/validate.sh').write_text('echo ok\n', encoding='utf-8')
+        (repo / 'scripts/build-web.sh').write_text('echo ok\n', encoding='utf-8')
+        for arguments in (('init', '-q'), ('config', 'user.email', 'test@example.invalid'),
+                          ('config', 'user.name', 'Test'), ('add', '-A'), ('commit', '-qm', 'fixture')):
+            subprocess.run(['git', '-C', str(repo), *arguments], check=True, capture_output=True)
+        policy = EnvironmentPolicies(self.projects, Unprepared()).resolve(repo)
+        self.assertIsNone(policy.get('plan_digest'))
+        self.assertFalse(policy.get('blockers'))
+        self.assertNotIn('node', {entry['name'] for entry in policy['toolchains']})
+        self.assertEqual(sorted(policy['checks']), ['scripts/build-web.sh', 'scripts/validate.sh'])
+
+    def test_a_single_present_check_script_is_enough_for_the_legacy_route(self):
+        # The validation runner uses the first candidate check script it finds,
+        # so a fork that ships only scripts/build-web.sh is still Herdr's own
+        # build; demanding every candidate name moved it to the generic path.
+        repo = self.projects / 'fork'
+        for relative in ('web/dashboard', 'scripts'):
+            (repo / relative).mkdir(parents=True)
+        (repo / '.fvmrc').write_text('{"flutter":"3.44.8"}', encoding='utf-8')
+        (repo / 'web/dashboard/pubspec.yaml').write_text('name: dashboard\n', encoding='utf-8')
+        (repo / 'scripts/build-web.sh').write_text('echo ok\n', encoding='utf-8')
+        for arguments in (('init', '-q'), ('config', 'user.email', 'test@example.invalid'),
+                          ('config', 'user.name', 'Test'), ('add', '-A'), ('commit', '-qm', 'fixture')):
+            subprocess.run(['git', '-C', str(repo), *arguments], check=True, capture_output=True)
+        policy = EnvironmentPolicies(self.projects, Unprepared()).resolve(repo)
+        self.assertIsNone(policy.get('plan_digest'))
+        self.assertEqual(policy['checks'], ['scripts/build-web.sh'])
+        self.assertFalse(policy.get('blockers'))
+
     def test_the_approval_listing_carries_gits_own_identity_for_each_blob(self):
         entries = environment_policy.tree(self.repo, self.revision)
         self.assertEqual(entries['global.json']['blob'], self.git('hash-object', 'global.json'))

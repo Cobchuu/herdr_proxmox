@@ -22,6 +22,7 @@ import environment_plan
 import environment_recipes
 from environment_store import EnvironmentPlanStore
 import project_git
+import project_requirements
 
 
 class EnvironmentPreparation:
@@ -91,9 +92,9 @@ class EnvironmentPreparation:
                     lookup = entry.get('selection_lookup') or {}
                     if lookup.get('components') or lookup.get('targets') or lookup.get('path') or lookup.get('profile') not in (None, 'minimal'):
                         raise ValueError('This Rust component needs targets, profiles or optional components not yet supported by the acquisition adapter.')
-                    constraint = (override.get('constraint') if override else entry.get('constraint')) or ''
-                    notation = override.get('notation') if override else entry.get('notation', item['notation'])
-                    if constraint and environment_plan._satisfies(version, constraint, notation or item['notation']) != 'satisfied':
+                    declarations = project_requirements.declarations(override or entry, item['notation'])
+                    if any(environment_plan._satisfies(version, constraint, notation or item['notation']) != 'satisfied'
+                           for constraint, notation in declarations):
                         raise ValueError('The SDK selection does not satisfy its component declarations.')
                     resolution = entry.get('resolution') or {}
                     if resolution.get('policies', {}).get('paths'):

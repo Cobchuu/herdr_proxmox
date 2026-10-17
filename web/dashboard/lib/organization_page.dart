@@ -1009,7 +1009,11 @@ class _OrganizationPageState extends State<OrganizationPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    '${job['kind'] == 'environment_preparation' ? 'Environment preparation' : job['kind'] == 'launch' ? 'Launch' : 'Delegation'} · ${state.profiles.where((p) => p['id'] == job['profile_id']).map((p) => p['name']).firstOrNull ?? 'Agent'}',
+                                    '${job['kind'] == 'environment_preparation'
+                                        ? 'Environment preparation'
+                                        : job['kind'] == 'launch'
+                                        ? 'Launch'
+                                        : 'Delegation'} · ${state.profiles.where((p) => p['id'] == job['profile_id']).map((p) => p['name']).firstOrNull ?? 'Agent'}',
                                   ),
                                   Text(
                                     'State: ${job['state']} · ${job['updated_at']}',
@@ -1027,9 +1031,16 @@ class _OrganizationPageState extends State<OrganizationPage> {
                                     SelectableText(
                                       'Herdr name: ${job['alias']} · Pane: ${job['pane_id'] ?? 'not allocated'}',
                                     ),
-                                  if (job['progress'] != null) Text('${job['progress']}'),
-                                  if (job['preparation_execution_id'] != null) SelectableText('Preparation execution: ${job['preparation_execution_id']}'),
-                                  if (job['parent_execution_id'] != null) SelectableText('Waiting launch: ${job['parent_execution_id']}'),
+                                  if (job['progress'] != null)
+                                    Text('${job['progress']}'),
+                                  if (job['preparation_execution_id'] != null)
+                                    SelectableText(
+                                      'Preparation execution: ${job['preparation_execution_id']}',
+                                    ),
+                                  if (job['parent_execution_id'] != null)
+                                    SelectableText(
+                                      'Waiting launch: ${job['parent_execution_id']}',
+                                    ),
                                   if (job['task'] != null)
                                     Text(
                                       'From ${job['sender_name']}: ${job['task']}',
@@ -1127,7 +1138,10 @@ class _OrganizationPageState extends State<OrganizationPage> {
                                         'released',
                                         'finished',
                                       ].contains(job['state']) &&
-                                      ['launch', 'environment_preparation'].contains(job['kind']))
+                                      [
+                                        'launch',
+                                        'environment_preparation',
+                                      ].contains(job['kind']))
                                     TextButton(
                                       onPressed: state.busy
                                           ? null

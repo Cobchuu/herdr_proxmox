@@ -94,7 +94,10 @@ class EnvironmentPolicies:
                            '); resolve their requirements separately before approval.')
         # This is an explicit compatibility route for Herdr's own approved
         # self-build scripts, not a fallback after generic discovery failed.
-        if (not unknown and legacy['toolchains'] and set(toolchain_policy.CHECKS).issubset(paths)
+        # `checks` holds the candidate scripts that are actually present, and the
+        # validation runner uses the first one it finds: requiring every candidate
+        # name would refuse a fork that ships only scripts/build-web.sh.
+        if (not unknown and legacy['toolchains'] and legacy['checks']
                 and 'web/dashboard/pubspec.yaml' in paths
                 and not any(req['tool'] not in ('flutter', 'dart', 'python')
                             for component in report['components'] for req in component['requirements'])):

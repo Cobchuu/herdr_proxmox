@@ -19,6 +19,11 @@ Desugaring follows the published rules:
   `~=3.8.1` := `>=3.8.1, ==3.8.*`; `~=3.8` := `>=3.8, ==3.*`;
   `==3.8` matches `3.8` and `3.8.0` by zero padding
 * RubyGems — `~> 2.2` := `>=2.2, <3.0`; `~> 2.2.3` := `>=2.2.3, <2.3.0`
+* Poetry — `^` and `~` desugar as npm's do above, and a bare version is the
+  exact requirement Poetry spells without an operator
+  (<https://python-poetry.org/docs/dependency-specification/#version-constraints>).
+  Comparators and compatible release (`~=`) use Python exact-version semantics,
+  not npm partial ranges. Commas conjoin clauses.
 
 Prereleases, build metadata, epochs, hyphen ranges, `workspace:` and `catalog:`
 protocols, git and file references and arbitrary equality are all `undecidable`.
@@ -34,6 +39,7 @@ UNDECIDABLE = 'undecidable'
 OPERATORS = {
     'semver': ('>=', '<=', '>', '<', '=', '==', '^', '~'),
     'pep440': ('>=', '<=', '>', '<', '==', '!=', '~='),
+    'poetry': ('>=', '<=', '>', '<', '=', '==', '!=', '^', '~', '~='),
     'composer': ('>=', '<=', '>', '<', '=', '==', '^', '~'),
     'pub': ('>=', '<=', '>', '<', '^'),
     'dotnet': ('>=', '<=', '>', '<', '='),
@@ -118,8 +124,8 @@ def _bounds(operator, values, given, notation):
             return None  # PEP 440 spells this `~=`
         return _floor(values), _ceiling(values, 1 if given >= 2 else 0)
     if operator in ('~=', '~>'):
-        expected = 'pep440' if operator == '~=' else 'rubygems'
-        if notation != expected or given < 2:
+        expected = ('pep440', 'poetry') if operator == '~=' else ('rubygems',)
+        if notation not in expected or given < 2:
             return None
         # PEP 440 `~=` and RubyGems `~>` both freeze everything but the last
         # stated component: `~=3.8.1` -> `>=3.8.1, <3.9.0`.
@@ -131,15 +137,30 @@ def _clause(operator, bound, measured, notation):
     table = OPERATORS.get(notation)
     if table is None:
         return UNDECIDABLE
+    if operator is None and notation == 'poetry':
+        # Poetry spells an exact requirement as a bare version; npm reads the
+        # same text as a partial range, which is why the notation decides.
+        operator = '='
     if operator is not None and operator not in table:
         return UNDECIDABLE
     values, wildcard = _partial(bound)
     if values is None:
         return UNDECIDABLE
-    if operator == '!=':
-        if notation != 'pep440' or not values:
+    if notation in ('pep440', 'poetry'):
+        # Python comparisons use zero-padded exact versions. npm's partial
+        # comparator bounds (e.g. <=3.11 meaning <3.12) must not leak here.
+        if wildcard is not None and operator not in (None, '=', '==', '!='):
             return UNDECIDABLE
-        return VIOLATED if _compare(measured, _floor(values)) == 0 else SATISFIED
+        if values and wildcard is None and operator in (None, '=', '==', '!=', '>', '>=', '<', '<='):
+            comparison = _compare(measured, values)
+            matched = {None: comparison == 0, '=': comparison == 0, '==': comparison == 0,
+                       '!=': comparison != 0, '>': comparison > 0, '>=': comparison >= 0,
+                       '<': comparison < 0, '<=': comparison <= 0}[operator]
+            return SATISFIED if matched else VIOLATED
+    if operator == '!=':
+        if notation not in ('pep440', 'poetry') or not values:
+            return UNDECIDABLE
+        return VIOLATED if list(measured[:len(values)]) == values else SATISFIED
     bounds = _bounds(operator, values, len(values), notation)
     if bounds is None:
         return UNDECIDABLE

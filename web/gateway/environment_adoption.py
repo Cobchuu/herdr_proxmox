@@ -19,6 +19,7 @@ import dependency_constraints
 import environment_adapters
 import environment_artifacts
 import environment_plan
+import project_requirements
 from project_access import open_project, open_directory
 
 MAX_BYTES = 512 * 1024 * 1024
@@ -147,8 +148,8 @@ def adopt(plan, result, allocation, store, authority, cancelled=lambda: False):
             measured = environment_artifacts.probe(item['capability'], staged)
             version = measured['versions'][0]
             declarations = ([item['override']] if item.get('override') else item['evidence'])
-            constraints = [(entry[key], entry.get('notation') or item['notation'])
-                           for entry in declarations for key in ('constraint', 'selected') if entry.get(key)]
+            constraints = [declaration for entry in declarations
+                           for declaration in project_requirements.declarations({'notation': item['notation'], **entry})]
             if not constraints or any(dependency_constraints.evaluate(value, version, notation) != 'satisfied'
                                       for value, notation in constraints):
                 raise ValueError('The adopted SDK does not satisfy every recorded component declaration.')

@@ -215,6 +215,7 @@ class _ProjectAnalysisCardState extends State<ProjectAnalysisCard> {
                             [
                                   'semver',
                                   'pep440',
+                                  'poetry',
                                   'composer',
                                   'pub',
                                   'dotnet',

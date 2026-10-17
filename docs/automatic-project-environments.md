@@ -11,6 +11,11 @@ Implemented now:
 
 - Immutable, evidence-bearing plans per component, with persisted identities.
   Different components can select different versions of one SDK.
+- Committed discovery applies the same dependency tree, build output and vendor
+  exclusions as the working-tree walk, so a vendored third-party tree cannot
+  become this project's runtime requirement or move a repository off Herdr's own
+  self-build route. Ignored paths have a separate bounded enumeration budget
+  and do not spend the authored-file budget.
 - Opt-in organization **Prepare supported project SDKs before agent launch**
   admits launches before any runtime pane exists. Planning and downloads run on
   the preparation lane, not organization launch workers. The starting commit,

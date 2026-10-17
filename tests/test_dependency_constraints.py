@@ -22,6 +22,10 @@ def pep440(constraint, version):
     return evaluate(constraint, version, 'pep440')
 
 
+def poetry(constraint, version):
+    return evaluate(constraint, version, 'poetry')
+
+
 class ComparisonTests(unittest.TestCase):
     def test_missing_components_are_zero_on_both_sides(self):
         # The padding contract: 1.2 and 1.2.0 are the same version.
@@ -110,6 +114,36 @@ class TildeTests(unittest.TestCase):
         self.assertEqual(semver('~0.2', '0.3.0'), VIOLATED)
 
 
+class PoetryTests(unittest.TestCase):
+    """Poetry's own constraint language, kept apart from PEP 440's."""
+
+    def test_caret_and_tilde_desugar_as_the_published_rules_say(self):
+        self.assertEqual(poetry('^3.11', '3.11.9'), SATISFIED)
+        self.assertEqual(poetry('^3.11', '4.0.0'), VIOLATED)
+        self.assertEqual(poetry('^0.2.3', '0.2.9'), SATISFIED)
+        self.assertEqual(poetry('^0.2.3', '0.3.0'), VIOLATED)
+        self.assertEqual(poetry('~3.11', '3.11.9'), SATISFIED)
+        self.assertEqual(poetry('~3.11', '3.12.0'), VIOLATED)
+
+    def test_a_bare_version_is_exact_and_commas_conjoin(self):
+        self.assertEqual(poetry('3.11', '3.11.0'), SATISFIED)
+        self.assertEqual(poetry('3.11', '3.11.9'), VIOLATED)
+        self.assertEqual(poetry('3.11', '3.12.0'), VIOLATED)
+        self.assertEqual(poetry('<=3.11', '3.11.1'), VIOLATED)
+        self.assertEqual(poetry('>3.11', '3.11.1'), SATISFIED)
+        self.assertEqual(poetry('3.11.*', '3.11.9'), SATISFIED)
+        self.assertEqual(poetry('>=3.11,<4.0', '3.12.1'), SATISFIED)
+        self.assertEqual(poetry('>=3.11,<4.0', '3.10.0'), VIOLATED)
+        self.assertEqual(poetry('*', '3.9.1'), SATISFIED)
+
+    def test_poetry_adds_operators_without_leaking_caret_into_pep440(self):
+        self.assertEqual(pep440('^3.11', '3.11.9'), UNDECIDABLE)
+        self.assertEqual(poetry('~=3.11', '3.11.9'), SATISFIED)
+        self.assertEqual(poetry('~=3.11', '4.0.0'), VIOLATED)
+        self.assertEqual(poetry('!=3.11', '3.11.0'), VIOLATED)
+        self.assertEqual(poetry('!=3.11', '3.11.1'), SATISFIED)
+
+
 class Pep440Tests(unittest.TestCase):
     def test_compatible_release_freezes_all_but_the_last_stated_component(self):
         # PEP 440: `~=3.8.1` := `>=3.8.1, ==3.8.*`; `~=3.8` := `>=3.8, ==3.*`
@@ -125,6 +159,11 @@ class Pep440Tests(unittest.TestCase):
     def test_equality_zero_pads_and_inequality_inverts_it(self):
         self.assertEqual(pep440('==3.8', '3.8.0'), SATISFIED)
         self.assertEqual(pep440('==3.8', '3.9.0'), VIOLATED)
+        self.assertEqual(pep440('==3.8', '3.8.1'), VIOLATED)
+        self.assertEqual(pep440('==3.8.*', '3.8.1'), SATISFIED)
+        self.assertEqual(pep440('!=3.8.*', '3.8.1'), VIOLATED)
+        self.assertEqual(pep440('>3.8', '3.8.1'), SATISFIED)
+        self.assertEqual(pep440('<=3.8', '3.8.1'), VIOLATED)
         # PEP 440 `!=3.8` excludes 3.8 and its zero-padded form, not all of 3.8.x.
         self.assertEqual(pep440('!=3.8', '3.8.0'), VIOLATED)
         self.assertEqual(pep440('!=3.8', '3.8.2'), SATISFIED)

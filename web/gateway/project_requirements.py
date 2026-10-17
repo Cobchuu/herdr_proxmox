@@ -37,16 +37,19 @@ MAX_COMMANDS = 12
 KEY = re.compile(r'[A-Za-z0-9_.\-\[\]]{1,120}')
 
 
-def _source(file, field='', kind='json', role='constraint', minimum=False):
+def _source(file, field='', kind='json', role='constraint', minimum=False, notation=''):
     """One place a requirement can be declared.
 
     `role` separates a compatibility range the project states (`constraint`)
     from the version it selects (`selection`). They are different facts and a
     report that keeps only one of them cannot show a conflict between them.
     `minimum` marks a declaration that states a floor rather than a range, which
-    is what Cargo's `rust-version` does.
+    is what Cargo's `rust-version` does. `notation` names the constraint language
+    of this one source when it differs from the requirement's default: one tool
+    can be declared in two languages at once, as PEP 621 and Poetry both are in
+    a single pyproject.toml.
     """
-    return dict(file=file, field=field, kind=kind, role=role, minimum=minimum)
+    return dict(file=file, field=field, kind=kind, role=role, minimum=minimum, notation=notation)
 
 
 # The registry. A component exists where a marker is present; the rest is data.
@@ -72,6 +75,8 @@ ECOSYSTEMS = (
              dict(tool='python', label='Python', purpose='runtime', executable='python3',
                   notation='pep440', sources=(
                       _source('pyproject.toml', 'project.requires-python', kind='toml'),
+                      _source('pyproject.toml', 'tool.poetry.dependencies.python', kind='toml',
+                              notation='poetry'),
                       _source('.python-version', kind='text', role='selection'))),
          ),
          managers={'poetry.lock': 'poetry', 'Pipfile.lock': 'pipenv',
@@ -418,7 +423,8 @@ def _observations(requirement, present, read):
         text = _bounded(read, path)
         if text is None:
             found.append(dict(file=path, field=source.get('field', ''), value=None,
-                              role=source['role'], unreadable=True,
+                              role=source['role'], notation=source.get('notation') or requirement.get('notation', ''),
+                              unreadable=True,
                               reason=path + ' could not be read or exceeds the size limit.'))
             continue
         value = READERS.get(source.get('kind', 'json'), json_value)(text, source.get('field', ''))
@@ -428,8 +434,28 @@ def _observations(requirement, present, read):
         if source.get('minimum') and re.fullmatch(r'\d+(?:\.\d+)*', value):
             value = '>=' + value
         found.append(dict(file=path, field=source.get('field', ''), value=value,
-                          role=source['role'], unreadable=False, reason=''))
+                          role=source['role'], notation=source.get('notation') or requirement.get('notation', ''),
+                          unreadable=False, reason=''))
     return found
+
+
+def declarations(requirement, notation=''):
+    """Every readable constraint/selection with its own syntax, across consumers.
+
+    A requirement's headline is a display choice. It cannot replace the other
+    observations in host assessment, plan selection or adopted-SDK verification.
+    Older records and contextual resolvers may only provide the headline fields.
+    """
+    syntax = requirement.get('notation') or notation
+    found = [(item['value'], item.get('notation') or syntax)
+             for item in requirement.get('observations', [])
+             if not item.get('unreadable') and item.get('value')
+             and item.get('role') in ('constraint', 'selection')]
+    for key in ('constraint', 'selected'):
+        value = requirement.get(key)
+        if value and not any(existing == value for existing, _ in found):
+            found.append((value, syntax))
+    return list(dict.fromkeys(found))
 
 
 def _conflicts(requirement, observations):
@@ -448,13 +474,14 @@ def _conflicts(requirement, observations):
             conflicts.append(dict(kind='disagreement', role=role, values=values,
                                   reason='Two declarations of the same requirement disagree: '
                                          + ' and '.join(values) + '.'))
-    constraint = next((item['value'] for item in observations if item['role'] == 'constraint'), '')
+    constraints = [(item['value'], item.get('notation') or requirement.get('notation', ''))
+                   for item in observations if item['role'] == 'constraint' and not item['unreadable']]
     selections = sorted({item['value'] for item in observations
                          if item['role'] == 'selection' and not item['unreadable']})
-    if constraint and selections:
+    for constraint, notation in constraints:
         for selected in selections:
             verdict = dependency_constraints.evaluate(constraint, selected,
-                                                      requirement.get('notation', ''))
+                                                      notation)
             if verdict == dependency_constraints.VIOLATED:
                 conflicts.append(dict(kind='unsatisfied', role='selection', values=[selected],
                                       reason=f'The selected {selected} does not satisfy the declared '
@@ -533,9 +560,15 @@ def requirements_for(ecosystem, present, read, component='.', paths=()):
                                              'The nearest Rust toolchain file has no readable selection; ')
                                             + 'ancestor pins are not substituted.'))
         readable = [item for item in observations if not item['unreadable']]
-        constraint = next((item['value'] for item in readable if item['role'] == 'constraint'), '')
+        declared = next((item for item in readable if item['role'] == 'constraint'), None)
+        constraint = declared['value'] if declared is not None else ''
+        # The notation travels with the declaration that was read: a PEP 621
+        # range and a Poetry caret in one file are different languages.
+        notation = requirement.get('notation', '')
+        if declared is not None and declared.get('notation'):
+            notation = declared['notation']
         selection = next((item['value'] for item in readable if item['role'] == 'selection'), '')
-        conflicts = _conflicts(requirement, observations)
+        conflicts = _conflicts(dict(requirement, notation=notation), observations)
         # Where a declaration lives and whether a requirement was extracted from
         # it are separate facts. An unreadable manifest established a location,
         # not a version.
@@ -550,7 +583,7 @@ def requirements_for(ecosystem, present, read, component='.', paths=()):
             reason = 'No version declaration was found in ' + ', '.join(tried) + '.'
         item = dict(tool=requirement['tool'], label=requirement['label'],
                              purpose=requirement.get('purpose', ''),
-                             notation=requirement.get('notation', ''),
+                             notation=notation,
                              executable=requirement.get('executable', ''),
                              constraint=constraint, selected=selection,
                              observations=observations, conflicts=conflicts,

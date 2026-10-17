@@ -348,14 +348,36 @@ def _walk(directory, prefix, state, max_paths, deadline, depth):
 def from_paths(paths):
     """The same census, from a known file list such as a committed tree.
 
-    A committed tree is enumerated by Git rather than walked, so there is no
-    directory capping, nothing skipped and nothing unreadable: the list is the
-    whole answer, up to the path budget.
+    A committed tree is enumerated by Git rather than walked, so no directory is
+    capped and nothing is unreadable: the list is the whole answer, up to the path
+    budget. It still skips the same dependency trees, build output and caches the
+    walk skips, because a committed copy of somebody else's project stays theirs:
+    a vendored JavaScript bundle must not become this project's Node runtime
+    requirement. Ignored directories are reported in `skipped` by name, once per
+    ignored subtree, exactly as the walk reports the directory it never entered.
     """
-    listed = list(paths)
-    state = dict(paths=[Path(*PurePosixPath(item).parts) for item in listed[:MAX_PATHS]],
-                 truncated=len(listed) > MAX_PATHS, skipped={}, directories=0,
-                 capped_directories=0)
+    kept, ignored, truncated = [], set(), False
+    # Git output is already bounded by its reader, but keep an independent
+    # enumeration budget for other callers. Ignored files do not consume the
+    # authored-file budget or hide later first-party manifests in Git order.
+    for count, item in enumerate(paths, 1):
+        if count > MAX_PATHS * 4:
+            truncated = True
+            break
+        parts = PurePosixPath(item).parts
+        index = next((position for position, part in enumerate(parts[:-1]) if part in IGNORED), None)
+        if index is None:
+            if len(kept) == MAX_PATHS:
+                truncated = True
+                break
+            kept.append(Path(*parts))
+        else:
+            ignored.add((parts[index], parts[:index + 1]))
+    skipped = {}
+    for name, _ in sorted(ignored):
+        skipped[name] = skipped.get(name, 0) + 1
+    state = dict(paths=kept, truncated=truncated, skipped=skipped,
+                 directories=0, capped_directories=0)
     return _result(state, True)
 
 

@@ -30,8 +30,10 @@ import project_requirements
 WORKING_TREE_TTL = 30.0
 CACHE_LIMIT = 64
 # Bumped whenever a change alters what a report means, so old entries are unused
-# rather than reinterpreted.
-ANALYZER_VERSION = 5
+# rather than reinterpreted. Version 6 makes committed trees skip ignored
+# dependency/build directories, as the working-tree walk always has, and keeps
+# per-source Python constraint notation through assessment.
+ANALYZER_VERSION = 6
 
 
 def stamp():
@@ -244,10 +246,15 @@ class ProjectAnalysis:
             # A selected SDK is evidence too. Ignoring it would call any
             # installed Flutter satisfactory even when FVM pins another one.
             selections = sorted({item['selected'] for item in entry['discovered'] if item['selected']})
+            stated = next((item for item in entry['discovered'] if item['constraint']), None)
             constraint = (override['constraint'] if override else
-                          next((item['constraint'] for item in entry['discovered'] if item['constraint']),
-                               selections[0] if len(selections) == 1 else ''))
+                          stated['constraint'] if stated is not None else
+                          selections[0] if len(selections) == 1 else '')
+            # The notation belongs to the declaration that stated the constraint,
+            # not to whichever component happened to sort first: one pyproject
+            # can hold a PEP 621 range here and a Poetry caret in another.
             notation = (override['notation'] if override else
+                        stated['notation'] if stated is not None and stated.get('notation') else
                         next((item['notation'] for item in entry['discovered']), 'semver'))
             entry['constraint'] = constraint
             entry['notation'] = notation
@@ -260,8 +267,8 @@ class ProjectAnalysis:
                 # Compatibility ranges and SDK selections both apply, across
                 # every component. The summary must not bless just the first
                 # component's declaration or lose a pin beside a broad range.
-                checks = [(item[key], item['notation']) for item in entry['discovered']
-                          for key in ('constraint', 'selected') if item[key]]
+                checks = [declaration for item in entry['discovered']
+                          for declaration in project_requirements.declarations(item)]
                 assessment = entry['assessment']
                 if assessment['measured'] and checks:
                     verdicts = [dependency_constraints.evaluate(value, assessment['measured'], notation)

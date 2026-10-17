@@ -187,6 +187,27 @@ class EffectiveReportTests(unittest.TestCase):
         self.assertEqual(flutter['constraint'], '3.44.8')
         self.assertEqual(flutter['assessment']['verdict'], 'violated')
 
+    def test_the_notation_follows_the_component_that_stated_the_constraint(self):
+        # A component that declares nothing must not lend its notation to a
+        # constraint another component declared in a different language.
+        write(self.projects, {'mix/a/pyproject.toml': '[project]\nname = "a"\n',
+                              'mix/web/pyproject.toml': '[tool.poetry.dependencies]\npython = "^3.11"\n'})
+        report = self.analysis.effective('mix', which=lambda name: '/usr/bin/' + name,
+                                         run=fake_run('3.11.9'))
+        python = next(item for item in report['requirements'] if item['tool'] == 'python')
+        self.assertEqual((python['constraint'], python['notation']), ('^3.11', 'poetry'))
+        self.assertEqual(python['assessment']['verdict'], 'satisfied')
+
+    def test_host_readiness_evaluates_secondary_constraints_with_their_own_notation(self):
+        write(self.projects, {'mix/pyproject.toml':
+            '[project]\nrequires-python = ">=3.11"\n[tool.poetry.dependencies]\npython = "~3.11"\n'})
+        report = self.analysis.effective('mix', which=lambda name: '/usr/bin/' + name,
+                                         run=fake_run('3.12.1'))
+        python = next(item for item in report['requirements'] if item['tool'] == 'python')
+        self.assertEqual(python['assessment']['verdict'], 'violated')
+        self.assertEqual([(item['value'], item['notation']) for item in python['observations']],
+                         [('>=3.11', 'pep440'), ('~3.11', 'poetry')])
+
     def test_every_component_range_is_checked_in_the_host_summary(self):
         write(self.projects, {'app/nested/package.json': '{"engines":{"node":">=22"}}'})
         node = next(item for item in self.effective()['requirements'] if item['tool'] == 'node')

@@ -270,6 +270,39 @@ class OtherEcosystemTests(unittest.TestCase):
         self.assertEqual(python['observations'][0]['field'], 'project.requires-python')
         self.assertEqual([entry['id'] for entry in item['frameworks']], ['flask', 'pytest'])
 
+    def test_poetrys_python_constraint_is_read_in_its_own_notation(self):
+        files = {'pyproject.toml': b'[tool.poetry.dependencies]\npython = "^3.11"\n'}
+        def read(name, limit=None):
+            return files.get(name)
+        item = component(analyse(self.root, inventory=project_inventory.from_paths(['pyproject.toml']),
+                                 read=read))
+        python = requirement(item, 'python')
+        self.assertEqual(python['constraint'], '^3.11')
+        self.assertEqual(python['notation'], 'poetry')
+
+    def test_pep621_statement_wins_and_poetry_stays_an_observation(self):
+        files = {'pyproject.toml': (b'[project]\nrequires-python = ">=3.11"\n'
+                                    b'[tool.poetry.dependencies]\npython = "^3.10"\n')}
+        def read(name, limit=None):
+            return files.get(name)
+        item = component(analyse(self.root, inventory=project_inventory.from_paths(['pyproject.toml']),
+                                 read=read))
+        python = requirement(item, 'python')
+        self.assertEqual(python['constraint'], '>=3.11')
+        self.assertEqual(python['notation'], 'pep440')
+        conflicts = [entry for entry in python['conflicts'] if entry['kind'] == 'disagreement']
+        self.assertEqual(conflicts[0]['values'], ['>=3.11', '^3.10'])
+
+    def test_every_python_statement_can_refuse_a_selected_interpreter(self):
+        files = {'pyproject.toml': (b'[project]\nrequires-python = ">=3.11"\n'
+                                  b'[tool.poetry.dependencies]\npython = "~3.11"\n'),
+                 '.python-version': b'3.12.1'}
+        result = analyse(self.root, inventory=project_inventory.from_paths(files), read=lambda name, limit=None: files.get(name))
+        python = requirement(component(result), 'python')
+        unsatisfied = [item for item in python['conflicts'] if item['kind'] == 'unsatisfied']
+        self.assertEqual(len(unsatisfied), 1)
+        self.assertIn('~3.11', unsatisfied[0]['reason'])
+
     def test_flutter_and_dart_stay_separate_requirements(self):
         # An FVM pin names Flutter. Reading it into the Dart requirement would
         # substitute one SDK's version for another's, which is the substitution
@@ -464,6 +497,28 @@ class InferredTests(unittest.TestCase):
         write(self.root, {'main.rb': ''})
         report = analyse(self.root)
         self.assertEqual(report['components'], [])
+
+    def test_a_committed_vendor_tree_never_becomes_a_component_or_requirement(self):
+        # A vendored JavaScript bundle is a committed third-party artifact, not
+        # this project's Node requirement. Inferring one would move the whole
+        # repository onto the generic environment path over somebody else's code.
+        readings = {'web/dashboard/pubspec.yaml':
+                    b'name: dashboard\nenvironment:\n  sdk: ">=3.0.0 <4.0.0"\n'}
+        def read(name, limit=None):
+            return readings.get(name)
+        paths = ['web/dashboard/pubspec.yaml', 'web/dashboard/lib/main.dart',
+                 'web/jaspr_dashboard/web/vendor/xterm/xterm.js']
+        inventory = project_inventory.from_paths(paths)
+        self.assertEqual(inventory['skipped'], dict(vendor=1))
+        report = analyse(self.root, inventory=inventory, read=read)
+        self.assertEqual([item['path'] for item in report['components']], ['web/dashboard'])
+        self.assertEqual([entry['tool'] for item in report['components']
+                          for entry in item['requirements']], ['dart'])
+        # First-party sources in the same languages still infer their runtime.
+        first_party = analyse(self.root, inventory=project_inventory.from_paths(
+            [*paths, 'web/toolbar.js']), read=read)
+        self.assertIn('node', [entry['tool'] for item in first_party['components']
+                               for entry in item['requirements']])
 
     def test_a_mixed_project_infers_only_the_uncovered_ecosystem(self):
         write(self.root, {'package.json': json.dumps({'engines': {'node': '20.0.0'}}),

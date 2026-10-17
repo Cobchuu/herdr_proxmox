@@ -35,6 +35,7 @@ from pathlib import Path
 
 import dependency_constraints
 import environment_capabilities
+import project_requirements
 
 PLAN_VERSION = 2
 
@@ -136,9 +137,8 @@ def _select_version(requirement, installed, artifacts):
     if override:
         conflicts = [item for item in conflicts if item.get('kind') != 'override']
     declarations = ([(override['constraint'], override.get('notation') or notation)] if override else
-                    [(item[key], item.get('notation') or notation)
-                     for item in requirement.get('discovered') or []
-                     for key in ('constraint', 'selected') if item.get(key)])
+                    [declaration for item in requirement.get('discovered') or []
+                     for declaration in project_requirements.declarations(item, notation)])
 
     def satisfies(version):
         return all(_satisfies(version, value, syntax) == dependency_constraints.SATISFIED

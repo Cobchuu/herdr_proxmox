@@ -314,7 +314,9 @@ digest, and reviewers are told not to install toolchains.
   `scripts/build-web.sh` and `.fvmrc` continue to be discovered as
   repository-declared evidence, so the plan reproduces today's policy for
   Herdr's own repository. Step 4 is the one that must be proven against the
-  existing self-build path.
+  existing self-build path. The compatibility route asks for at least one of the
+  candidate check scripts, because the validation runner uses the first one it
+  finds; a fork that ships only `scripts/build-web.sh` is still Herdr's build.
 - **`auto_sdk` and the coordinator's blocker recovery stay** until replaced. The
   plan's `acquire` state becomes their input rather than a second decision.
 - **No schema change removes data.** `toolchain_policy=` on a job is superseded
