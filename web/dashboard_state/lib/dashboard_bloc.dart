@@ -4,9 +4,14 @@ import 'package:http/http.dart' as http;
 import 'package:juice/juice.dart';
 
 class DashboardRequestException implements Exception {
-  const DashboardRequestException(this.statusCode, this.message);
+  const DashboardRequestException(
+    this.statusCode,
+    this.message, {
+    this.fieldErrors = const {},
+  });
   final int statusCode;
   final String message;
+  final Map<String, String> fieldErrors;
   @override
   String toString() => 'Exception: $message';
 }
@@ -240,6 +245,10 @@ class DashboardBloc extends JuiceBloc<DashboardState> {
                     path.startsWith('tasks/') ||
                         path == 'github/configure' ||
                         path == 'cli-setup/verify' ||
+                        path == 'organizations/templates' ||
+                        (path == 'organizations/save' &&
+                            (body?['template_roles'] as List? ?? [])
+                                .isNotEmpty) ||
                         path == 'projects/clone' ||
                         (path == 'projects/git' &&
                             ['fetch', 'update_base'].contains(body?['action']))
@@ -269,6 +278,12 @@ class DashboardBloc extends JuiceBloc<DashboardState> {
       throw DashboardRequestException(
         response.statusCode,
         '${data['error'] ?? 'Request failed'}',
+        fieldErrors: {
+          if (data['field_errors'] case final Map fields)
+            for (final entry in fields.entries)
+              if (entry.key is String && entry.value is String)
+                entry.key as String: entry.value as String,
+        },
       );
     if ([
           'organizations',

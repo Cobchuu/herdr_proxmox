@@ -39,6 +39,21 @@ String stateTone(Object? state) {
   return 'neutral';
 }
 
+/// Tone for a live agent or member status.
+///
+/// The generic state tones below put `working` in the success bucket, which is
+/// right for jobs, builds and deployments but not for agents: the runtime
+/// palette is idle green, working blue, attention amber. Member chips and agent
+/// dots read from here so a working agent is the same colour everywhere.
+String agentStatusTone(Object? status) {
+  final value = '$status'.toLowerCase();
+  if (const ['working', 'running', 'busy', 'thinking'].contains(value))
+    return 'info';
+  if (const ['idle', 'done'].contains(value)) return 'success';
+  if (const ['blocked', 'attention'].contains(value)) return 'warning';
+  return stateTone(status);
+}
+
 /// Shape that repeats the tone without color (WCAG 1.4.1).
 String stateShape(String tone, Object? state) => switch (tone) {
   'danger' => 'diamond',
@@ -137,7 +152,7 @@ Component agentIdentity(
 
 /// Small member chip: xs role tile, name and an optional status dot.
 Component memberChip(Object? name, {Object? role, String? status}) {
-  final tone = stateTone(status);
+  final tone = agentStatusTone(status);
   final shape = stateShape(tone, status ?? '');
   return el('span', [
     agentTile(name, role: role, size: 'xs', live: status == 'working'),

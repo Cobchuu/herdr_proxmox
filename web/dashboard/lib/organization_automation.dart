@@ -188,6 +188,10 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
   var paused = policy['paused'] == true;
   var reap = policy['reap_finished_sessions'] == true;
   var reapOrphaned = policy['reap_orphaned_panes'] == true;
+  var autoPrepare = policy['auto_prepare'] == true;
+  var autoPrepareRestore = policy['auto_prepare_restore'] == true;
+  var autoPrepareChecks = policy['auto_prepare_checks'] == true;
+  var autoPrepareAgent = policy['auto_prepare_agent'] == true;
   final perMeeting = TextEditingController(
     text: '${policy['max_per_meeting'] ?? 1}',
   );
@@ -246,6 +250,50 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                       ),
                     ),
                     _limitField(perMeeting, 'Max per meeting', 10),
+                    SwitchListTile(
+                      value: autoPrepare,
+                      onChanged: (value) =>
+                          update(() => autoPrepare = value == true),
+                      title: const Text(
+                        'Prepare supported project SDKs before agent launch',
+                      ),
+                      subtitle: const Text(
+                        'Wait for verified SDKs before starting. Unsupported requirements stop the launch.',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: autoPrepareRestore,
+                      onChanged: (value) =>
+                          update(() => autoPrepareRestore = value == true),
+                      title: const Text(
+                        'Restore project dependencies before launch',
+                      ),
+                      subtitle: const Text(
+                        'Separate project-code permission. Creates an execution environment and installs frozen dependencies; builds may execute project code.',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: autoPrepareChecks,
+                      onChanged: (value) =>
+                          update(() => autoPrepareChecks = value == true),
+                      title: const Text(
+                        'Approve supported project build/test recipes automatically',
+                      ),
+                      subtitle: const Text(
+                        'Separate from SDK installation: these commands can restore dependencies and execute project code.',
+                      ),
+                    ),
+                    SwitchListTile(
+                      value: autoPrepareAgent,
+                      onChanged: (value) =>
+                          update(() => autoPrepareAgent = value == true),
+                      title: const Text(
+                        'Allow a preparation agent to install Node.js when needed',
+                      ),
+                      subtitle: const Text(
+                        'Requires SDK preparation. A dedicated session can download and execute installers; provenance remains an unverified claim. It shares the service account and is not a sandbox.',
+                      ),
+                    ),
                     _limitField(
                       perAgent,
                       'Max open per agent (queued + active)',
@@ -308,6 +356,10 @@ Future<Map<String, dynamic>?> editOrganizationAutomation(
                   'paused': paused,
                   'reap_finished_sessions': reap,
                   'reap_orphaned_panes': reapOrphaned,
+                  'auto_prepare': autoPrepare,
+                  'auto_prepare_restore': autoPrepareRestore,
+                  'auto_prepare_checks': autoPrepareChecks,
+                  'auto_prepare_agent': autoPrepareAgent,
                   'max_per_meeting': int.tryParse(perMeeting.text.trim()),
                   'max_open_per_agent': int.tryParse(perAgent.text.trim()),
                   'max_follow_up_depth': int.tryParse(depth.text.trim()),

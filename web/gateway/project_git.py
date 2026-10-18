@@ -12,10 +12,10 @@ import subprocess
 import tempfile
 import json
 from project_files import project_directory
-from repository_lock import repository_lock
+from repository_lock import common_directory, repository_lock
 
 
-def git(path, *arguments, timeout=15, index_file=None):
+def git(path, *arguments, timeout=15, index_file=None, output_limit=1_000_000):
     # Compound callers (snapshots and base updates) hold this reentrant lock
     # throughout their checks and mutations; individual Git mutations also join.
     # Read-only queries such as `worktree list` never take the lock.
@@ -24,11 +24,11 @@ def git(path, *arguments, timeout=15, index_file=None):
         mutates = any(arg in ('add', 'remove', 'prune', 'move', 'repair') for arg in arguments)
     if mutates:
         with repository_lock(path):
-            return _git(path, *arguments, timeout=timeout, index_file=index_file)
-    return _git(path, *arguments, timeout=timeout, index_file=index_file)
+            return _git(path, *arguments, timeout=timeout, index_file=index_file, output_limit=output_limit)
+    return _git(path, *arguments, timeout=timeout, index_file=index_file, output_limit=output_limit)
 
 
-def _git(path, *arguments, timeout=15, index_file=None):
+def _git(path, *arguments, timeout=15, index_file=None, output_limit=1_000_000):
     environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0')
     for key in list(environment):
         if key.startswith('GIT_') and key not in ('GIT_TERMINAL_PROMPT', 'GIT_OPTIONAL_LOCKS'):
@@ -44,9 +44,33 @@ def _git(path, *arguments, timeout=15, index_file=None):
         raise ValueError('Git is unavailable or the checkout inspection timed out.') from error
     if result.returncode:
         raise ValueError('Git information is unavailable for this checkout.')
-    if len(result.stdout) > 1_000_000:
+    if len(result.stdout) > output_limit:
         raise ValueError('Git output is too large. Narrow the selected changes.')
     return result.stdout.decode('utf-8', errors='replace')
+
+
+def checkout_identity(path, repository, *, common_dirs=None, branch=None):
+    """Validate ownership and return branch, common directory and Git directory.
+
+    A caller with a fresh porcelain status can supply its branch header to avoid
+    a second branch query. Only repository metadata is shared within a request.
+    """
+    if branch is None:
+        branch = git(path, 'symbolic-ref', '--short', 'HEAD').strip()
+    directories = git(path, 'rev-parse', '--path-format=absolute',
+                      '--git-common-dir', '--absolute-git-dir').splitlines()
+    if len(directories) != 2:
+        raise ValueError('Cannot resolve checkout metadata.')
+    common, absolute = (Path(directory).resolve() for directory in directories)
+    common_dirs = {} if common_dirs is None else common_dirs
+    if repository not in common_dirs:
+        try:
+            common_dirs[repository] = common_directory(repository)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError('Git is unavailable or the checkout inspection timed out.') from error
+    if common != common_dirs[repository]:
+        raise ValueError('Task checkout belongs to a different repository.')
+    return branch, common, absolute
 
 
 def checkout(root, path, base=None):
@@ -80,9 +104,9 @@ def checkout(root, path, base=None):
                 counts={kind: sum(c['kind'] == kind for c in changes) for kind in ('added', 'deleted', 'modified')})
 
 
-def merge_state(path):
+def merge_state(path, gitdir=None):
     """True when this checkout is in the middle of a merge, rebase or cherry-pick."""
-    gitdir = Path(git(path, 'rev-parse', '--absolute-git-dir').strip())
+    gitdir = Path(gitdir) if gitdir is not None else Path(git(path, 'rev-parse', '--absolute-git-dir').strip())
     return any((gitdir / name).exists()
                for name in ('MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD'))
 

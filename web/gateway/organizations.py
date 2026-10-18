@@ -16,6 +16,11 @@ from project_files import project_directory
 from permissions import accessible_paths, permission_mode, prepare_permissions
 from session_ownership import active, reserves
 from herdr_ids import is_pane_id, is_workspace_id
+from request_identity import ORGANIZATION_REQUEST
+# Refusals that mean "this participant is not free right now" rather than a
+# fault. A meeting that hits one waits and is retried, so answering a permission
+# prompt or finishing a task resumes it without an operator retrying by hand.
+TRANSIENT_AGENT_CODES = ('agent_blocked', 'agent_working', 'agent_not_ready')
 import toolchain_policy
 from herdr_errors import HerdrError, delivery_for, parse_completion, parse_resume, preview as preview_text
 
@@ -85,9 +90,13 @@ def policy_guidance(frozen):
     lines = ['\nToolchain policy for this task, frozen when this session started:']
     for entry in frozen['policy']['toolchains']:
         lines.append(f"- {entry['label']} {entry['required']} (declared by {entry['declared_by']})")
+        if 'component' in entry:
+            lines.append(f"  component {entry['component']}; run checks from {entry['cwd']}")
         for executable in entry['executables']:
             lines.append(f'  use {executable}')
     lines.append(f"Policy digest: {frozen['digest']}")
+    for blocker in frozen['policy'].get('blockers', []):
+        lines.append('Environment blocker: ' + blocker)
     lines.append('Use these tools for every build and check. If a command reports a different '
                  'version, stop and report the mismatch rather than switching or installing an SDK '
                  'yourself. Propose an SDK upgrade as a separate change for review; never fold it '
@@ -97,17 +106,19 @@ def policy_guidance(frozen):
 
 class OrganizationStore:
     supports_discussion_preparation = True
-    def __init__(self, path, projects, command, runtime_status=None, model_validator=None, runtime_ready=None):
+    def __init__(self, path, projects, command, runtime_status=None, model_validator=None, runtime_ready=None, template_catalog=None):
         self.path = Path(path)
         self.projects = Path(projects).resolve()
         self.command = command
         self.runtime_status = runtime_status
         self.runtime_ready = runtime_ready
         self.model_validator = model_validator
+        self.template_catalog = template_catalog
         self.lock = threading.RLock()
         # One-way notification only: never call the watcher while holding a
         # store/profile lock or SQLite transaction.
         self.jobs_changed = threading.Event()
+        self.workflow_revision = 0
         from notifications import Notifications
         self.events = Notifications()
         self.worker = ThreadPoolExecutor(max_workers=4, thread_name_prefix='organization')
@@ -116,6 +127,7 @@ class OrganizationStore:
         self.control_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='organization-input')
         self.agent_locks = {}
         self.contributions = None
+        self.environment_admission = None
         self.capacity_guard = None
         self.discussion_cursor = 0
         self.futures = set()
@@ -131,13 +143,21 @@ class OrganizationStore:
                 CREATE INDEX IF NOT EXISTS input_by_decision ON jobs(organization_id, json_extract(data, '$.decision_job_id'), json_extract(data, '$.kind'));
                 CREATE TABLE IF NOT EXISTS requests (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS session_archives (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_toolchains (repository TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
             from notifications import schema
             schema(db)
+            import team_template_library
+            team_template_library.schema(db)
             # A crash may have occurred after terminal input. Never replay automatically.
             for row in db.execute('SELECT id, data FROM jobs').fetchall():
                 job = json.loads(row['data'])
                 if job['state'] in ('queued', 'running'):
+                    if job['kind'] == 'environment_preparation':
+                        continue  # Its durable assistance record reconciles observations; never replay input.
+                    if (job['kind'] == 'launch' and job['state'] == 'queued'
+                            and job.get('launch_stage') == 'environment_ready'):
+                        continue  # Admission committed, but no external runtime call was made.
                     if (job.get('kind') == 'discussion' and not job.get('discussion_submitted_at')
                             and any(isinstance(r, dict) and r.get('resume_applied_at')
                                     for r in (job.get('session_realignments') or {}).values())):
@@ -183,13 +203,16 @@ class OrganizationStore:
             if data.get('kind') == 'discussion' and data.get('state') in ('queued', 'waiting_for_members'):
                 data['state'] = 'pending_members'
             return data
-        if table == 'jobs' and not previous and item.get('kind') == 'launch' and self.contributions is not None:
+        if table == 'jobs' and not previous and item.get('kind') in ('launch', 'environment_preparation') and self.contributions is not None:
             from contributions import TERMINAL_EXECUTIONS
             policy = self.contributions.policy(item['organization_id'])
             jobs = [json.loads(row[0]) for row in db.execute('SELECT data FROM jobs WHERE organization_id=?', (item['organization_id'],))]
-            active = sum(j.get('kind') == 'launch' and j.get('state') not in TERMINAL_EXECUTIONS for j in jobs)
+            active = len({j.get('parent_execution_id', j['id']) for j in jobs
+                          if j.get('kind') in ('launch', 'environment_preparation') and j.get('state') not in TERMINAL_EXECUTIONS})
+            if item.get('parent_execution_id') in {j['id'] for j in jobs if j.get('state') == 'waiting_environment'}:
+                active -= 1  # The helper uses its parked parent's sequential slot.
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            started = sum(j.get('kind') == 'launch' and str(j.get('created_at') or '') > cutoff for j in jobs)
+            started = sum(j.get('kind') in ('launch', 'environment_preparation') and str(j.get('created_at') or '') > cutoff for j in jobs)
             limit = policy.get('max_active_sessions') or 0
             daily = policy.get('daily_session_cap') or 0
             if limit and active >= limit:
@@ -198,6 +221,8 @@ class OrganizationStore:
                 raise ValueError('Organization daily session budget is reached; wait for the next window.')
         if not previous or meaningful(json.loads(previous[0])) != meaningful(item):
             record(db, 'job' if table == 'jobs' else 'policy', item['id'], item.get('organization_id', item['id']))
+        if table in ('organizations', 'profiles') and (not previous or json.loads(previous[0]) != item):
+            self.workflow_revision += 1
         if table == 'organizations':
             db.execute('INSERT INTO organizations VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data', (item['id'], json.dumps(item)))
         else:
@@ -322,6 +347,116 @@ class OrganizationStore:
         with self.lock, closing(self.connect()) as db:
             return [json.loads(row['data']) for row in db.execute('SELECT data FROM profiles ORDER BY rowid')]
 
+    def organization_records(self):
+        """Saved organization defaults, without runtime queries."""
+        with self.lock, closing(self.connect()) as db:
+            return [json.loads(row['data']) for row in db.execute('SELECT data FROM organizations ORDER BY rowid')]
+
+    def saved_templates(self):
+        import team_template_library
+        with self.lock, closing(self.connect()) as db:
+            return team_template_library.catalog(db)
+
+    def project_toolchains(self):
+        """Declared tool requirement per managed project, without probing anything."""
+        import project_toolchains
+        with self.lock, closing(self.connect()) as db:
+            return {row[0]: project_toolchains.normalized(json.loads(row[1]))
+                    for row in db.execute('SELECT repository, data FROM project_toolchains')}
+
+    def project_toolchain(self, repository):
+        """One project's override, or None when it states no requirement."""
+        import project_toolchains
+        if not isinstance(repository, str) or not repository:
+            return None
+        with self.lock, closing(self.connect()) as db:
+            row = db.execute('SELECT data FROM project_toolchains WHERE repository=?', (repository,)).fetchone()
+        return project_toolchains.normalized(json.loads(row[0])) if row else None
+
+    def set_project_toolchain(self, body, actor):
+        """Set, replace or clear one project's operator override.
+
+        An override is an operator statement in the same shape as a discovered
+        requirement — tool, notation, constraint — so the gateway interprets it
+        with the same evaluator. It supplements discovery; it does not maintain a
+        second requirement language, which is what a bare version field was.
+        Clearing is the empty toolchain.
+        """
+        import project_toolchains
+        from request_validation import FieldValidationError
+        if not isinstance(body, dict):
+            raise ValueError('Expected a JSON object.')
+        try:
+            # The dashboard browses relative to the projects root, so a value
+            # that is not absolute is resolved against it rather than against
+            # the gateway's working directory. Containment is still enforced,
+            # and the stored key is always the relative form.
+            value = Path(text(body, 'repository', 2000))
+            candidate = value if value.is_absolute() else Path(self.projects) / value
+            relative = Path(self.project(str(candidate))).relative_to(Path(self.projects).resolve()).as_posix()
+        except (ValueError, OSError) as error:
+            raise FieldValidationError(str(error) or 'Select a project directory.', ['repository']) from error
+        requested = body.get('toolchain')
+        if requested in (None, ''):
+            with self.lock, closing(self.connect()) as db, db:
+                db.execute('DELETE FROM project_toolchains WHERE repository=?', (relative,))
+            return dict(repository=relative, toolchain='', constraint='', notation='',
+                        origin='', actor='', at='')
+        for key in ('toolchain', 'constraint', 'version', 'notation'):
+            try:
+                if key == 'toolchain':
+                    project_toolchains.tool_name(requested)
+                elif key == 'notation':
+                    project_toolchains.tool_notation(body.get(key))
+                else:
+                    project_toolchains.tool_constraint(body.get(key))
+            except ValueError as error:
+                raise FieldValidationError(str(error), [key]) from error
+        with self.lock, closing(self.connect()) as db, db:
+            saved = project_toolchains.record(body, actor, now(), relative)
+            db.execute('INSERT OR REPLACE INTO project_toolchains VALUES (?,?)',
+                       (relative, json.dumps(saved)))
+            return saved
+
+    def template_library(self, body, actor):
+        import team_template_library
+        if not isinstance(body, dict):
+            raise ValueError('Expected a JSON object.')
+        with self.lock, closing(self.connect()) as db, db:
+            if body.get('action') == 'read':
+                return team_template_library.read(db, body.get('template_id'), body.get('version'))
+            if body.get('action') != 'save':
+                raise ValueError('Choose a supported template library action.')
+            key = text(body, 'request_id', 80)
+            if not ORGANIZATION_REQUEST.fullmatch(key):
+                raise ValueError('Invalid request ID.')
+            fingerprint = hashlib.sha256(json.dumps(['template_library', body], sort_keys=True).encode()).hexdigest()
+            previous = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
+            if previous:
+                if previous['fingerprint'] != fingerprint:
+                    raise ValueError('Request ID already used for different content.')
+                return json.loads(previous['response'])
+            result = team_template_library.save(db, body, actor)
+            db.execute('INSERT INTO requests VALUES (?,?,?)', (key, fingerprint, json.dumps(result)))
+            return result
+
+    def resolve_team_body(self, body):
+        import team_templates
+        if not body.get('template_id'):
+            if 'template_id' in body and body['template_id'] != '':
+                raise ValueError('Select a valid saved team template.')
+            return team_templates.expand(body), None
+        saved = self.template_library(dict(action='read', template_id=body['template_id'], version=body.get('template_version')), '')
+        resolved = {**saved['definition'], **body, 'template_version': saved['version']}
+        if 'template_roles' in body and 'team_members' not in body:
+            resolved.pop('team_members', None)
+        reference = {k: saved[k] for k in ('id', 'version', 'name', 'digest')}
+        return team_templates.expand(resolved), reference
+
+    def require_environment_continuation(self, continuation):
+        if self.environment_admission.current(continuation, starting=True) is None:
+            raise ValueError('The task has not recorded this admitted execution.')
+
     def frozen_policy(self, job, profile):
         """The approved toolchain policy as it stood when this session started.
 
@@ -338,10 +473,12 @@ class OrganizationStore:
         try:
             policy = toolchain_policy.resolve_committed(path)
         except (OSError, ValueError):
+            if toolchain_policy.PROJECT_RESOLVER is not None:
+                raise
             return None
-        if not policy.get('toolchains') and not policy.get('checks'):
+        if not policy.get('toolchains') and not policy.get('checks') and not policy.get('blockers'):
             return None
-        return {'policy': policy, 'digest': toolchain_policy.digest(policy),
+        return {'policy': policy, 'digest': toolchain_policy.digest(policy), 'plan_digest': policy.get('plan_digest'),
                 'frozen_at': now(), 'checkout': path.as_posix()}
 
     def checkout_in_use(self, path):
@@ -453,14 +590,15 @@ class OrganizationStore:
             details = []
             for proposal in Contributions.discussion_proposals(job):
                 key = proposal['key']
-                state = ('queued' if key in (outcome.get('queued') or []) else
+                manual_task = (job.get('manual_proposal_starts') or {}).get(key)
+                state = ('queued' if manual_task or key in (outcome.get('queued') or []) else
                          'draft' if key in (outcome.get('drafts') or []) else
                          'skipped' if key in (outcome.get('skipped') or {}) or outcome.get('unavailable') else 'proposed')
                 details.append(dict(proposal, status=state,
-                                    task_id=(outcome.get('created') or {}).get(key) or
+                                    task_id=manual_task or (outcome.get('created') or {}).get(key) or
                                     (task.get('follow_up_tasks') or {}).get(key),
-                                    reason=(outcome.get('skipped') or {}).get(key) or
-                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', '')))
+                                    reason='' if manual_task else ((outcome.get('skipped') or {}).get(key) or
+                                    (outcome.get('deferred') or {}).get(key) or outcome.get('unavailable', ''))))
             job['proposal_details'] = details
         return data
 
@@ -560,11 +698,40 @@ class OrganizationStore:
         with guard:
             return self._action(action, body)
 
+    def team_plan(self, body):
+        return self._team_plan(*self.resolve_team_body(body))
+
+    def _team_plan(self, body, source):
+        import team_templates
+        roles, policy = team_templates.validate(body)
+        if not roles:
+            return dict(members=[], warnings=[], model_policy=policy)
+        project = self.project(text(body, 'project', 2000))
+        if self.template_catalog is None:
+            raise ValueError('Team presets require CLI account discovery on this gateway.')
+        available = self.template_catalog(project)
+        try:
+            result = team_templates.plan(dict(body, project=project), available)
+        except ValueError as error:
+            details = '; '.join(a['name'] + ': ' + a.get('reason', '')[:65] for a in available.get('accounts', []) if not a.get('available'))
+            raise ValueError(str(error) + (' CLI accounts: ' + details if details else '')) from error
+        for member in result['members']:
+            model_settings(member, member['runtime'])
+            if self.model_validator is not None:
+                self.model_validator(member)
+        import template_workflows
+        result['workflow_plan'], notes = template_workflows.preview(project, self.projects, result['members'])
+        result['warnings'] = [*result['warnings'], *notes]
+        result['source_template'] = source
+        result['template_plan'] = hashlib.sha256(json.dumps(
+            [policy, result['members'], result['workflow_plan'], result['resource_limits'], source], sort_keys=True).encode()).hexdigest()
+        return result
+
     def _action(self, action, body):
         if not isinstance(body, dict):
             raise ValueError('Expected a JSON object.')
         key = text(body, 'request_id', 80)
-        if not re.fullmatch(r'[A-Za-z0-9_-]{8,80}', key):
+        if not ORGANIZATION_REQUEST.fullmatch(key):
             raise ValueError('Invalid request ID.')
         if action == 'inspect' and not body.get('job_id'):
             from collaboration import inspect_profile
@@ -580,6 +747,25 @@ class OrganizationStore:
                 from collaboration import action as collaboration_action
                 return collaboration_action(self, snapshot, action, body, org)
         fingerprint = hashlib.sha256(json.dumps([action, body], sort_keys=True).encode()).hexdigest()
+        planned = None
+        if action == 'save' and any(k in body for k in ('template_roles', 'team_members', 'team_preset', 'template_id')):
+            import team_templates
+            plan_body, source = self.resolve_team_body(body)
+            roles, _ = team_templates.validate(plan_body)
+            if roles:
+                if body.get('id'):
+                    raise ValueError('Team presets can only be applied when creating an organization.')
+                # Read-only CLI probes must run outside the write transaction.
+                # Replays need no probes: the original team is already persisted.
+                with self.lock, closing(self.connect()) as db:
+                    existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
+                    if existing:
+                        if existing['fingerprint'] != fingerprint:
+                            raise ValueError('Request ID already used for different content.')
+                        return json.loads(existing['response'])
+                planned = self._team_plan(plan_body, source)
+                if body.get('template_plan') and body['template_plan'] != planned['template_plan']:
+                    raise ValueError('Team settings or CLI accounts/models changed since the team preview. Preview the team again before creating the organization.')
         submitted = None
         with self.lock, closing(self.connect()) as db, db:
             existing = db.execute('SELECT * FROM requests WHERE key=?', (key,)).fetchone()
@@ -589,10 +775,30 @@ class OrganizationStore:
                 return json.loads(existing['response'])
             if action == 'save':
                 item_id = text(body, 'id', 40, optional=True) or uuid.uuid4().hex
+                previous_org = None
                 if body.get('id'):
-                    self.get(db, 'organizations', item_id)
+                    previous_org = self.get(db, 'organizations', item_id)
                 item = dict(id=item_id, name=text(body, 'name'), purpose=text(body, 'purpose', 2000),
                             instructions=text(body, 'instructions', 8000, optional=True))
+                if previous_org:
+                    item.update({k: previous_org[k] for k in ('template_roles', 'model_policy', 'runtime_preferences', 'team_workflows', 'team_preset', 'resource_limits', 'source_template') if k in previous_org})
+                if planned:
+                    item.update(template_roles=list(dict.fromkeys(m['template_role'] for m in planned['members'])), model_policy=planned['model_policy'],
+                                runtime_preferences=planned['runtime_preferences'], team_preset=planned.get('team_preset', ''))
+                    item['resource_limits'] = planned['resource_limits']
+                    if planned.get('source_template'):
+                        item['source_template'] = planned['source_template']
+                if planned:
+                    ids = {m['template_key']: uuid.uuid4().hex for m in planned['members']}
+                    for member in planned['members']:
+                        profile = {k: v for k, v in member.items() if k not in ('manager_role', 'manager_key', 'manager_name', 'model_name', 'persona_instruction')}
+                        profile.update(id=ids[member['template_key']], organization_id=item_id,
+                                       manager_id=ids.get(member['manager_key'], ''), version=1)
+                        self.put(db, 'profiles', profile)
+                    workflow = planned['workflow_plan']
+                    item['team_workflows'] = dict(repository=workflow['repository'],
+                                                 coordinator_id=ids.get(workflow['coordinator_key'], ''),
+                                                 reviewer_ids=[ids[r] for r in workflow['reviewer_keys']])
                 self.put(db, 'organizations', item)
             else:
                 org_id = text(body, 'organization_id', 40)
@@ -678,7 +884,7 @@ class OrganizationStore:
                     submitted = item['id']
                 elif action in ('release', 'report', 'resolve_delegation'):
                     item = self.get(db, 'jobs', text(body, 'job_id', 40), org_id)
-                    if active(item):
+                    if active(item) and not (action == 'release' and item['state'] == 'waiting_environment'):
                         raise ValueError('Wait for the running job to finish.')
                     if action == 'resolve_delegation':
                         if item['kind'] != 'delegate' or item['state'] not in ('delivered', 'reported_complete', 'needs_attention', 'uncertain', 'completed', 'cancelled'):
@@ -695,7 +901,7 @@ class OrganizationStore:
                         elif item.get('resolution', {}).get('decision') != decision:
                             raise ValueError('This delegation was already resolved differently.')
                     elif action == 'release':
-                        if item['kind'] != 'launch':
+                        if item['kind'] not in ('launch', 'environment_preparation'):
                             raise ValueError('Only run bindings can be released.')
                         # The binding itself is persona_sent; what matters is
                         # whether another job still owns it. A blocked or
@@ -703,7 +909,8 @@ class OrganizationStore:
                         # detached, which would leave it unfinalizable forever.
                         others = [json.loads(row['data']) for row in
                                   db.execute('SELECT data FROM jobs WHERE organization_id=?', (org_id,))]
-                        if any(j['id'] != item['id'] and reserves(j, item.get('profile_id'))
+                        if any(j['id'] != item['id'] and j.get('parent_execution_id') != item['id']
+                               and reserves(j, item.get('profile_id'))
                                for j in others):
                             raise ValueError('A discussion or meeting still owns this session; resolve it before releasing.')
                         item['state'] = 'released'
@@ -1317,6 +1524,18 @@ class OrganizationStore:
                 future.add_done_callback(self._finished)
 
     def execute(self, job_id):
+        if self.environment_admission is not None:
+            with self.lock, closing(self.connect()) as db:
+                pending = self.get(db, 'jobs', job_id)
+            if pending['state'] != 'queued':
+                return
+            try:
+                if not self.environment_admission.admit(pending):
+                    return
+            except (ValueError, OSError, sqlite3.Error) as error:
+                self.environment_admission.update(job_id, ('queued', 'waiting_environment'),
+                    state='needs_attention', error=str(error)[:1000])
+                return
         with self.lock, closing(self.connect()) as db:
             job = self.get(db, 'jobs', job_id)
             if job.get('state') != 'queued':
@@ -1341,9 +1560,20 @@ class OrganizationStore:
                     lock.acquire()
                 acquired.append(lock)
             if job['kind'] == 'discussion':
-                from discussion_scheduler import prepare
+                from discussion_scheduler import mark_waiting, prepare
                 try:
                     prepared = prepare(self, job_id)
+                except HerdrError as error:
+                    # A participant that is busy, waiting on a decision, or not
+                    # yet interactive is not a preparation fault. Waiting keeps
+                    # the meeting queued, so the poll loop retries it and it
+                    # resumes by itself once the member is free — including after
+                    # an operator answers a permission prompt. Parking it here
+                    # instead stranded the meeting until someone retried by hand.
+                    if error.code not in TRANSIENT_AGENT_CODES:
+                        raise
+                    mark_waiting(self, job_id, str(error))
+                    return
                 except Exception as error:  # A preparation fault must stay visible, never silently queued.
                     self.update_job(job_id, state='needs_attention',
                                     error=(str(error) or error.__class__.__name__)[:500],
@@ -1384,7 +1614,11 @@ class OrganizationStore:
                 job = self.update_job(job_id, launch_stage='workspace_preparing')
                 project = self.project(profile['project'])
                 source = Path(project)
-                repository = any((parent / '.git').exists() for parent in (source, *source.parents))
+                # Only a repository inside managed projects may own this launch.
+                # A home-directory repository must not turn an unrelated project
+                # into a worktree of that repository (or fail on its permissions).
+                repository = any((parent / '.git').exists() for parent in (source, *source.parents)
+                                 if parent.is_relative_to(self.projects))
                 if job.get('reuse_checkout'):
                     checkout = Path(job.get('worktree_path') or job.get('source_project', project)).resolve()
                     if not checkout.is_relative_to(self.projects) or not checkout.is_dir():
@@ -1453,15 +1687,42 @@ class OrganizationStore:
                 # Record the exact executable arguments sent to Herdr, separately
                 # from the editable profile and any later in-TUI model changes.
                 job = self.update_job(job_id, launch_arguments=arguments)
-                job = self.update_job(job_id, launch_stage='agent_starting')
                 # Frozen before the agent starts, so the session's policy is the
                 # one that applied when the work began.
-                frozen = self.frozen_policy(job, profile)
+                admitted = (job.get('environment_admission') or {}).get('state') == 'ready'
+                if admitted and self.environment_admission is not None:
+                    continuation = self.environment_admission.store.waiter(job_id)
+                    if continuation is None:
+                        raise ValueError('The admitted environment continuation record is missing; inspect this execution.')
+                    self.require_environment_continuation(continuation)
+                frozen = job.get('toolchain_policy') if admitted else None
+                frozen = frozen or self.frozen_policy(job, profile)
+                if admitted and frozen and frozen.get('plan_digest'):
+                    import project_git
+                    checkout = Path(job.get('worktree_path') or job.get('source_project') or project)
+                    if (project_git.git(checkout, 'rev-parse', 'HEAD').strip() != job['start_sha']
+                            or toolchain_policy.digest(frozen['policy']) != frozen['digest']):
+                        raise ValueError('The admitted environment no longer matches this execution.')
+                    measured = toolchain_policy.verify(frozen['policy'], root=checkout)
+                    if not measured or not all(item.get('matches') is True for item in measured):
+                        raise ValueError('The prepared SDK selection changed before agent launch; prepare again.')
+                    frozen = dict(frozen, checkout=str(checkout))
                 if frozen:
-                    job = self.update_job(job_id, toolchain_policy=frozen)
+                    job = self.update_job(job_id, toolchain_policy=frozen, launch_stage='environment_binding')
+                    from environment_launch import configure
+                    pane, workspace = configure(self, job, frozen, pane, workspace)
+                    job = self.update_job(job_id, pane_id=pane, workspace_id=workspace)
+                    if admitted and self.environment_admission is not None:
+                        # Restoring an environment may take minutes. Recheck
+                        # permission and task ownership before starting the agent.
+                        self.require_environment_continuation(continuation)
+                job = self.update_job(job_id, launch_stage='agent_starting')
                 self.command('agent', 'start', job['alias'], '--kind', profile['runtime'], '--pane', pane, '--timeout', '60000', *(['--', *arguments] if arguments else []), timeout=70)
                 agent = self.identity(job)
                 job = self.update_job(job_id, agent_session=agent.get('agent_session'))
+                if (job.get('environment_binding') or {}).get('state') == 'requested':
+                    from environment_launch import verify_process
+                    verify_process(self, job)
                 if job.get('task_id'):
                     job = self.update_job(job_id, completion_token=uuid.uuid4().hex)
                 org = job['organization']
@@ -1487,6 +1748,9 @@ class OrganizationStore:
                     if job.get('task_id'):
                         task_prompt = task_prompt.replace('{{HERDR_TASK_RECEIPT}}', (receipt_directory / 'receipt.json').as_posix()).replace('{{HERDR_TASK_RUN}}', job['id']).replace('{{HERDR_TASK_TOKEN}}', job['completion_token'])
                     prompt += '\n\nAssigned task (start now in this checkout):\n' + task_prompt
+                environment_binding = job.get('environment_binding') or {}
+                environment_notice = ('\nInteractive SDK activation is unavailable: ' + environment_binding['reason']
+                                      if environment_binding.get('state') == 'unavailable' else '')
                 if profile.get('group_id'):
                     # Do not deliver an imperative group description as the startup task.
                     # Purpose, roster and output paths arrive together in the discussion.
@@ -1506,12 +1770,12 @@ class OrganizationStore:
                                'publication authorization. Dashboard task publishing is administrator-controlled.')
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen), '--wait', '--timeout', '180000', timeout=190)
+                    self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(job.get('execution_toolchain_policy') or frozen) + environment_notice, '--wait', '--timeout', '180000', timeout=190)
                     self.identity(job)
                 else:
                     if job.get('continuation_context'):
                         prompt += '\n\n' + job['continuation_context']
-                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(frozen))
+                    response = self.command('agent', 'prompt', job['alias'], prompt + policy_guidance(job.get('execution_toolchain_policy') or frozen) + environment_notice)
                     self.update_job(job_id, delivery=dict(stage='sent', at=now(),
                                                           completion=self.completion_baseline(response)))
                 self.update_job(job_id, state='persona_sent')
@@ -1560,6 +1824,8 @@ class OrganizationStore:
                 detail += ' Launch failed during preflight; no workspace or pane was created and no terminal input was sent.'
             elif job['kind'] == 'launch' and job.get('launch_stage') == 'workspace_preparing':
                 detail += ' Launch failed while preparing the workspace; no agent was started and no terminal input was sent.'
+            elif job['kind'] == 'launch' and job.get('launch_stage') == 'environment_binding':
+                detail += ' Launch failed while binding the prepared environment; no agent was started. Inspect the recorded panes before retrying.'
             elif delivery == 'blocked':
                 detail += ' The agent needs a decision; no prompt input was sent. Inspect the session and choose an action.'
             elif delivery == 'unknown' and code:

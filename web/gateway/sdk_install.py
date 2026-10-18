@@ -51,6 +51,34 @@ class SdkInstall:
         except (OSError, ValueError, AttributeError):
             return None
 
+    def progress(self, started_at=None):
+        """How far the running install has come, or None.
+
+        Written by the installer, which is the only thing that knows. Read
+        leniently: a missing, stale or malformed file means no percentage, never
+        a broken card. `phase` names what the bar is showing, because every
+        phase but the download is an allocation rather than a measurement.
+        """
+        try:
+            value = json.loads((self.state.parent / 'progress.json').read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        percent = value.get('percent')
+        if type(percent) is not int or not 0 <= percent <= 100:
+            return None
+        try:
+            recorded = datetime.fromisoformat(value['at'])
+            started = datetime.fromisoformat(started_at)
+            now = datetime.now(timezone.utc)
+            if not started <= recorded <= now:
+                return None
+        except (KeyError, ValueError, TypeError):
+            return None
+        return {'percent': percent, 'phase': str(value.get('phase') or '')[:40],
+                'at': str(value.get('at') or '')[:40]}
+
     def snapshot(self):
         with self.lock:
             try:
@@ -75,10 +103,11 @@ class SdkInstall:
             except ValueError as error:
                 declared, catalog_error = {}, str(error)
             toolchains = self.toolchains(declared)
-            return dict(status, toolchains=toolchains, catalog_error=catalog_error,
-                        missing=sorted(name for name, entry in toolchains.items()
-                                       if entry['required'] and not entry['installed']),
-                        supported=self.queue.is_dir())
+        return dict(status, toolchains=toolchains, catalog_error=catalog_error,
+                    missing=sorted(name for name, entry in toolchains.items()
+                                   if entry['required'] and not entry['installed']),
+                    progress=self.progress(status.get('started_at')) if status.get('state') == 'running' else None,
+                    supported=self.queue.is_dir())
 
     def install(self, body):
         if not isinstance(body, dict) or set(body) - {'toolchain'}:
@@ -92,24 +121,23 @@ class SdkInstall:
             name = body.get('toolchain')
             if not self.declared():
                 raise ValueError('This release does not provision any toolchain.')
-            if 'toolchain' in body and (not isinstance(name, str) or not name or name not in info['toolchains']):
+            # A request must name its toolchain. Inferring it from "whatever is
+            # absent" let a build blocked on one ecosystem queue an unrelated SDK
+            # whenever the release happened to provision exactly one, so the
+            # caller must now state the identity it verified.
+            if not isinstance(name, str) or not name:
+                raise ValueError('Name the toolchain to install. This release provisions: '
+                                 + (', '.join(sorted(info['toolchains'])) or 'none')
+                                 + '.')
+            if name not in info['toolchains']:
                 raise ValueError('This release does not provision that toolchain.')
             # Checked before "already installed": a toolchain with no declared
             # version is not absent, it is unprovisionable, and saying otherwise
             # sends the operator looking for the wrong problem.
-            if name is not None and not info['toolchains'][name]['required']:
+            if not info['toolchains'][name]['required']:
                 raise ValueError('This release declares no version for that toolchain; '
                                  'state it in the file the catalog reads before installing.')
-            if name is None:
-                # An omitted name means "whatever is absent", which is only
-                # unambiguous while exactly one declared toolchain is missing.
-                if len(info['toolchains']) != 1:
-                    raise ValueError('Several toolchains are declared; choose which to install: '
-                                     + ', '.join(sorted(info['toolchains'])))
-                if not info['missing']:
-                    raise ValueError('The toolchains this release provisions are already installed.')
-                name = info['missing'][0]
-            elif name not in info['missing']:
+            if name not in info['missing']:
                 raise ValueError('That toolchain is already installed.')
             request = self.queue / 'request.json'
             temporary = self.queue / 'request.tmp'

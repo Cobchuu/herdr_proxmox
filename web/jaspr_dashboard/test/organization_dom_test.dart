@@ -2,6 +2,7 @@
 library;
 
 import 'dart:convert';
+import 'package:herdr_jaspr_dashboard/pages/org_forms.dart' as forms;
 import 'dart:js_interop';
 import 'package:test/test.dart';
 import 'package:http/http.dart' as http;
@@ -13,6 +14,7 @@ import 'package:web/web.dart' as web;
 import 'package:herdr_jaspr_dashboard/services.dart';
 import 'package:herdr_jaspr_dashboard/ui.dart' as ui;
 import 'package:herdr_jaspr_dashboard/pages/organization_page.dart';
+import 'package:herdr_jaspr_dashboard/pages/organization_automation.dart';
 import 'package:herdr_jaspr_dashboard/pages/group_page.dart';
 import 'package:herdr_jaspr_dashboard/pages/collaboration_panel.dart';
 import 'package:herdr_jaspr_dashboard/pages/org_chart.dart';
@@ -161,7 +163,11 @@ void main() {
     Component child, {
     List<Map<String, dynamic>> jobs = const [],
     String? failAction,
-    Map<String, dynamic> Function(http.Request)? response,
+    bool Function(http.Request)? failWhen,
+    String? startedTaskId,
+    String role = 'admin',
+    dynamic Function(http.Request)? response,
+    Map<String, dynamic>? projectListing,
   }) async {
     var lost = false;
     connection = DashboardBloc(
@@ -172,15 +178,53 @@ void main() {
             'path': path,
             ...jsonDecode(request.body) as Map<String, dynamic>,
           });
-          if (path.endsWith('/$failAction') && !lost) {
+          if ((path.endsWith('/$failAction') ||
+                  failWhen?.call(request) == true) &&
+              !lost) {
             lost = true;
             return http.Response('{"error":"response lost"}', 503);
           }
         }
         final data =
-            response?.call(request) ??
-            (path.endsWith('/organizations/state') ||
-                    path.endsWith('/organizations/activity')
+            (path.endsWith('/projects/browse')
+                ? projectListing ??
+                      {
+                        'root': '/projects',
+                        'kind': 'folder',
+                        'entries': [
+                          for (final name in ['app', 'other', 'new-app'])
+                            {'name': name, 'path': name, 'kind': 'folder'},
+                          {
+                            'name': 'notes.txt',
+                            'path': 'notes.txt',
+                            'kind': 'file',
+                          },
+                          {'name': 'linked', 'path': 'linked', 'kind': 'link'},
+                        ],
+                      }
+                : response?.call(request)) ??
+            (path.endsWith('/cli-setup')
+                ? {
+                    // The hire form offers only the runtimes the gateway reports
+                    // as ready, so the fixture must report them.
+                    'clis': [
+                      for (final entry in {
+                        'codex': 'Codex',
+                        'claude': 'Claude',
+                        'opencode': 'OpenCode',
+                        'agy': 'Antigravity',
+                      }.entries)
+                        {
+                          'id': entry.key,
+                          'name': entry.value,
+                          'installed': true,
+                          'status': 'not_configured',
+                          'ready': null,
+                        },
+                    ],
+                  }
+                : path.endsWith('/organizations/state') ||
+                      path.endsWith('/organizations/activity')
                 ? snapshot(jobs: jobs)
                 : path.endsWith('/organizations/history')
                 ? {
@@ -197,24 +241,797 @@ void main() {
                       : {
                           'runtimes': {'opencode': modelCatalog()},
                         })
+                : path.endsWith('/tasks/start_proposal')
+                ? {'id': startedTaskId}
                 : path.endsWith('/organizations/session')
                 ? {'results': []}
                 : path.endsWith('/session')
                 ? {'authenticated': true}
                 : {'workspaces': [], 'agents': []});
-        return http.Response(jsonEncode(data), 200);
+        final result = await data;
+        if (result is http.Response) return result;
+        return http.Response(jsonEncode(result), 200);
       }),
     );
     BlocScope.register<DashboardBloc>(() => connection!);
     connection!.connect('test');
     await settle();
-    connection!.operator.value = {'role': 'admin'};
+    connection!.operator.value = {'role': role};
     binding.attachRootComponent(_Host(child), attachTo: '#org-dom-test');
     await settle();
   }
 
   List<Map<String, dynamic>> actions(String action) =>
       posts.where((p) => p['path'] == '/api/organizations/$action').toList();
+
+  Map<String, dynamic> proposalJob() => {
+    'id': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'kind': 'discussion',
+    'state': 'artifact_ready',
+    'organization_id': 'org',
+    'group_id': 'group',
+    'proposal_details': [
+      {
+        'key': 'proposal-1',
+        'title': 'Follow up',
+        'description': 'Acceptance criteria and checks',
+        'profile_id': 'alice',
+        'status': 'skipped',
+        'reason': 'Discussion created before automatic follow-up was enabled.',
+      },
+    ],
+  };
+
+  web.HTMLInputElement policyInput(String key) =>
+      nodes('.dialog-layer [data-field="$key"] input').single
+          as web.HTMLInputElement;
+
+  test(
+    'SDK preparation and native checks require separate permission',
+    () async {
+      var policy = <String, dynamic>{};
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/automation')) {
+            return {'policy': policy};
+          }
+          if (request.url.path.endsWith('/tasks/automation')) {
+            policy = Map<String, dynamic>.from(jsonDecode(request.body));
+            return {'policy': policy};
+          }
+          return null;
+        },
+      );
+      await click('Edit policy');
+      expect(policyInput('auto_prepare').checked, isFalse);
+      expect(policyInput('auto_prepare_checks').checked, isFalse);
+      expect(policyInput('auto_prepare_agent').checked, isFalse);
+      policyInput('auto_prepare').click();
+      await settle();
+      await click('Save');
+      expect(policy['auto_prepare'], isTrue);
+      expect(policy['auto_prepare_checks'], isFalse);
+      expect(policy['auto_prepare_agent'], isFalse);
+      await click('Edit policy');
+      expect(policyInput('auto_prepare').checked, isTrue);
+      expect(policyInput('auto_prepare_checks').checked, isFalse);
+      policyInput('auto_prepare_checks').click();
+      await settle();
+      await click('Save');
+      expect(policy['auto_prepare'], isTrue);
+      expect(policy['auto_prepare_checks'], isTrue);
+      expect(policy['auto_prepare_agent'], isFalse);
+      await click('Edit policy');
+      policyInput('auto_prepare_agent').click();
+      await settle();
+      await click('Save');
+      expect(policy['auto_prepare_agent'], isTrue);
+      expect(policy['auto_prepare'], isTrue);
+      expect(policy['auto_prepare_checks'], isTrue);
+    },
+  );
+
+  test(
+    'policy rejection stays in the modal, highlights its rule and preserves edits',
+    () async {
+      var policy = <String, dynamic>{
+        'auto_capture': false,
+        'auto_validate': false,
+        'auto_publish': false,
+        'daily_cap': 5,
+      };
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/automation'))
+            return {'policy': policy};
+          if (request.url.path.endsWith('/tasks/automation')) {
+            final body = Map<String, dynamic>.from(jsonDecode(request.body));
+            if (body['auto_validate'] == true)
+              return http.Response(
+                jsonEncode({
+                  'error':
+                      'Automatic validation needs the durable build service.',
+                  'field_errors': {
+                    'auto_validate':
+                        'Install the durable build service under Builds & deployments.',
+                  },
+                }),
+                400,
+              );
+            policy = body;
+            return {'policy': policy};
+          }
+          return null;
+        },
+      );
+      await click('Edit policy');
+      policyInput('auto_capture').click();
+      policyInput('auto_validate').click();
+      await input('Daily task limit', '7');
+      await click('Save');
+      expect(nodes('[role="dialog"]'), hasLength(1));
+      final summary = nodes('.org-form__summary').single;
+      expect(
+        summary.textContent,
+        contains('Automatic validation needs the durable build service.'),
+      );
+      expect(
+        summary.textContent,
+        contains('Validate captured candidates automatically'),
+      );
+      expect(summary.parentElement!.firstElementChild, summary);
+      expect(web.document.activeElement, summary);
+      expect(policyInput('auto_validate').getAttribute('aria-invalid'), 'true');
+      final errorId = policyInput(
+        'auto_validate',
+      ).getAttribute('aria-describedby')!;
+      expect(
+        web.document.getElementById(errorId)!.textContent,
+        contains('Builds & deployments'),
+      );
+      expect(
+        nodes('.org-form__item--invalid').single.getAttribute('data-field'),
+        'auto_validate',
+      );
+      expect(policyInput('auto_validate').checked, isTrue);
+      expect(policyInput('auto_capture').checked, isTrue);
+      expect(policyInput('daily_cap').value, '7');
+      expect(policy['auto_validate'], isFalse);
+      policyInput('auto_validate').click();
+      await settle();
+      await click('Save');
+      expect(nodes('[role="dialog"]'), isEmpty);
+      expect(policy['auto_validate'], isFalse);
+      expect(policy['auto_capture'], isTrue);
+      expect(policy['daily_cap'], 7);
+      expect(posts, hasLength(2));
+    },
+  );
+
+  for (final editBeforeRetry in [false, true]) {
+    test(
+      'policy modal retains retry identity unless the draft changes: $editBeforeRetry',
+      () async {
+        var policy = <String, dynamic>{
+          'auto_capture': false,
+          'auto_validate': false,
+          'auto_publish': false,
+        };
+        await mount(
+          const OrganizationAutomation(organizationId: 'org'),
+          failAction: 'automation',
+          response: (request) {
+            if (request.url.path.endsWith('/tasks/automation'))
+              policy = Map<String, dynamic>.from(jsonDecode(request.body));
+            if (request.url.path.endsWith('/organizations/automation') ||
+                request.url.path.endsWith('/tasks/automation'))
+              return {'policy': policy};
+            return null;
+          },
+        );
+        await click('Edit policy');
+        await click('Save');
+        expect(nodes('[role="dialog"]'), hasLength(1));
+        expect(
+          nodes('.org-form__summary').single.textContent,
+          contains('response lost'),
+        );
+        if (editBeforeRetry) {
+          policyInput('auto_capture').click();
+          await settle();
+        }
+        await click('Save');
+        expect(nodes('[role="dialog"]'), isEmpty);
+        expect(posts, hasLength(2));
+        expect(
+          posts.last['request_id'],
+          editBeforeRetry
+              ? isNot(posts.first['request_id'])
+              : posts.first['request_id'],
+        );
+      },
+    );
+  }
+
+  test(
+    'pending policy submission disables duplicate saves and modal dismissal',
+    () async {
+      final reply = Completer<http.Response>();
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/automation'))
+            return {
+              'policy': {'auto_capture': false},
+            };
+          if (request.url.path.endsWith('/tasks/automation'))
+            return reply.future;
+          return null;
+        },
+      );
+      try {
+        await click('Edit policy');
+        await click('Save');
+        expect(btn('Saving…').disabled, isTrue);
+        expect(btn('Cancel').disabled, isTrue);
+        expect(btn('Close').disabled, isTrue);
+        expect(policyInput('auto_capture').matches(':disabled'), isTrue);
+        nodes('[role="dialog"]').single.dispatchEvent(
+          web.KeyboardEvent(
+            'keydown',
+            web.KeyboardEventInit(key: 'Escape', bubbles: true),
+          ),
+        );
+        btn('Saving…').click();
+        await settle();
+        expect(nodes('[role="dialog"]'), hasLength(1));
+        expect(posts, hasLength(1));
+        reply.complete(http.Response('{"error":"Please retry"}', 503));
+        await settle();
+        expect(btn('Save').disabled, isFalse);
+        expect(btn('Close').disabled, isFalse);
+        expect(nodes('[role="dialog"]'), hasLength(1));
+      } finally {
+        if (!reply.isCompleted)
+          reply.complete(http.Response('{"error":"Please retry"}', 503));
+        await settle();
+      }
+    },
+  );
+
+  test(
+    'invalid policy limits highlight the field before any request',
+    () async {
+      await mount(
+        const OrganizationAutomation(organizationId: 'org'),
+        response: (request) =>
+            request.url.path.endsWith('/organizations/automation')
+            ? {
+                'policy': {'daily_cap': 5},
+              }
+            : null,
+      );
+      await click('Edit policy');
+      await input('Daily task limit', '-1');
+      await click('Save');
+      expect(nodes('[role="dialog"]'), hasLength(1));
+      expect(
+        nodes('.org-form__item--invalid').single.getAttribute('data-field'),
+        'daily_cap',
+      );
+      expect(
+        nodes('.org-form__summary').single.textContent,
+        contains('Daily task limit'),
+      );
+      expect(posts, isEmpty);
+    },
+  );
+
+  test(
+    'manual proposal retry preserves request identity and opens the task',
+    () async {
+      final oldHash = web.window.location.hash;
+      addTearDown(
+        () => web.window.history.replaceState(
+          null,
+          '',
+          oldHash.isEmpty ? '#' : oldHash,
+        ),
+      );
+      await mount(
+        const GroupPage(id: 'group'),
+        jobs: [proposalJob()],
+        failAction: 'start_proposal',
+        startedTaskId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      );
+      await click('Proposals');
+      await click('Start as task');
+      expect(
+        posts.where((p) => p['path'] == '/api/tasks/start_proposal'),
+        isEmpty,
+      );
+      await click('Confirm');
+      await click('Start as task');
+      await click('Confirm');
+      final starts = posts
+          .where((p) => p['path'] == '/api/tasks/start_proposal')
+          .toList();
+      expect(starts.length, 2);
+      expect(starts[0]['request_id'], starts[1]['request_id']);
+      expect(starts[0]['job_id'], proposalJob()['id']);
+      expect(starts[0]['proposal_key'], 'proposal-1');
+      expect(
+        web.window.location.hash,
+        '#/tasks/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      );
+    },
+  );
+
+  test('manual proposal control is hidden from non-administrators', () async {
+    await mount(
+      const GroupPage(id: 'group'),
+      jobs: [proposalJob()],
+      role: 'operator',
+    );
+    await click('Proposals');
+    expect(
+      nodes('button').where((n) => n.textContent == 'Start as task'),
+      isEmpty,
+    );
+  });
+
+  test(
+    'manual proposal confirmation cannot cross an account generation',
+    () async {
+      await mount(const GroupPage(id: 'group'), jobs: [proposalJob()]);
+      await click('Proposals');
+      await click('Start as task');
+      await connection!.disconnect();
+      await settle();
+      await click('Confirm');
+      expect(
+        posts.where((p) => p['path'] == '/api/tasks/start_proposal'),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'empty project explorer blocks team preview but permits a bare organization',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        projectListing: {'root': '/projects', 'kind': 'folder', 'entries': []},
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates'))
+            return {
+              'roles': [
+                {'id': 'lead_developer', 'name': 'Lead Developer'},
+              ],
+            };
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          return {'authenticated': true};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Empty team');
+      await input('Purpose', 'Hire later');
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      expect(btn('Preview team').disabled, true);
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('No project folders are available.'),
+      );
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await click('Save');
+      expect(actions('save'), hasLength(1));
+    },
+  );
+
+  test(
+    'organization presets preview personas and invalidate changed project settings',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {'id': 'lead_developer', 'name': 'Lead Developer'},
+                ],
+                'policies': {'balanced': 'Balanced', 'economy': 'Lowest cost'},
+                'runtime_names': {'codex': 'Codex', 'claude': 'Claude Code'},
+              };
+            return {
+              'template_plan': 'preview-digest',
+              'warnings': [],
+              'accounts': [
+                {
+                  'name': 'Codex',
+                  'available': true,
+                  'reason': 'CLI reports signed in.',
+                },
+                {
+                  'name': 'Claude Code',
+                  'available': false,
+                  'reason': 'Herdr integration missing.',
+                },
+              ],
+              'members': [
+                {
+                  'name': 'Lead Developer',
+                  'runtime': 'claude',
+                  'model_name': 'Sonnet',
+                  'manager_role': '',
+                  'reasoning': 'high',
+                  'selection_note': 'Balanced choice',
+                  'persona': 'Plan and coordinate. Report to the owner.',
+                },
+              ],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Template team');
+      await input('Purpose', 'Build tools');
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      expect(control('Team project directory'), isA<web.HTMLSelectElement>());
+      final folders = nodes('select option').map((n) => n.textContent).toList();
+      expect(folders, contains('/projects/app'));
+      expect(folders, isNot(contains('/projects/notes.txt')));
+      expect(folders, isNot(contains('/projects/linked')));
+      await choose('Team project directory', '/projects/app');
+      await input('Maximum concurrent sessions', '2');
+      await input('Sessions per 24 hours', '10');
+      await choose('Preferred CLI', 'codex');
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Preview the selected team'),
+      );
+      await click('Preview team');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Claude Code: Excluded'),
+      );
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Lead Developer · claude · Sonnet'),
+      );
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('Plan and coordinate.'),
+      );
+      await choose('Team project directory', '/projects/other');
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      await click('Preview team');
+      await click('Save');
+      final saved = actions('save').single;
+      expect(saved['template_roles'], ['lead_developer']);
+      expect(saved['project'], '/projects/other');
+      expect(saved['model_policy'], 'balanced');
+      expect(saved['runtime_preferences'], ['codex']);
+      expect(saved['resource_limits'], {
+        'max_active_sessions': 2,
+        'max_active_meetings': 1,
+        'daily_session_cap': 10,
+      });
+      expect(saved['template_plan'], 'preview-digest');
+      expect(saved.containsKey('preset_lead_developer'), false);
+      expect(actions('hire'), isEmpty);
+    },
+  );
+
+  test(
+    'custom member names personas models and duplicates survive re-preview',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {
+                    'id': 'lead_developer',
+                    'name': 'Lead Developer',
+                    'persona_instruction': 'Plan and coordinate.',
+                  },
+                ],
+                'policies': {'balanced': 'Balanced'},
+                'runtime_names': {'claude': 'Claude Code'},
+              };
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            final specs = body['team_members'] as List;
+            return {
+              'template_plan': 'custom-preview',
+              'member_specs': specs,
+              'warnings': [],
+              'runtimes': {
+                'claude': {
+                  'models': [
+                    {
+                      'provider': '',
+                      'id': 'claude-sonnet-5-5',
+                      'name': 'Sonnet',
+                      'reasoning': ['medium', 'high'],
+                    },
+                  ],
+                },
+              },
+              'members': [
+                for (final spec in specs)
+                  {
+                    'template_key': spec['key'],
+                    'name': spec['name'] ?? 'Lead Developer',
+                    'runtime': 'claude',
+                    'provider': '',
+                    'model': 'claude-sonnet-5-5',
+                    'model_name': 'Sonnet',
+                    'reasoning': spec['reasoning'] ?? 'high',
+                    'manager_name': 'Organization owner',
+                    'manager_role': '',
+                    'persona': spec['persona'] ?? 'Plan and coordinate.',
+                    'selection_note': 'Fits this role',
+                  },
+              ],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Custom team');
+      await input('Purpose', 'Build tools');
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await choose('Team project directory', '/projects/app');
+      nodes(
+        'summary',
+      ).firstWhere((n) => n.textContent == 'Configure Lead Developer').click();
+      await settle();
+      await input('Member name', 'Maya');
+      await input('Persona responsibilities', 'Lead the API migration.');
+      await click('Add another Lead Developer');
+      await click('Preview team');
+      await choose('Member CLI', 'claude');
+      await choose('Member model', jsonEncode(['', 'claude-sonnet-5-5']));
+      await choose('Member reasoning', 'medium');
+      await choose('Reports to', '');
+      await click('Save');
+      expect(actions('save'), isEmpty);
+      await click('Preview team');
+      await click('Save');
+      final saved = actions('save').single;
+      final members = saved['team_members'] as List;
+      expect(members.length, 2);
+      expect(members[0]['name'], 'Maya');
+      expect(members[0]['persona'], 'Lead the API migration.');
+      expect(members[0]['model'], 'claude-sonnet-5-5');
+      expect(members[0]['reasoning'], 'medium');
+      expect(members[0]['manager_key'], '');
+      expect(members[0]['key'], isNot(members[1]['key']));
+      expect(saved['template_roles'], ['lead_developer']);
+    },
+  );
+
+  test(
+    'team preset fills the draft and selected roles can still be changed',
+    () async {
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        response: (request) {
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {'id': 'lead_developer', 'name': 'Lead Developer'},
+                  {'id': 'backend_developer', 'name': 'Backend Developer'},
+                ],
+                'policies': {'balanced': 'Balanced'},
+                'bundles': [
+                  {
+                    'id': 'frontend_backend',
+                    'name': 'Frontend/backend team',
+                    'description': 'A focused engineering team.',
+                    'model_policy': 'balanced',
+                    'members': [
+                      {
+                        'key': 'lead_developer',
+                        'template_role': 'lead_developer',
+                      },
+                      {
+                        'key': 'backend_developer',
+                        'template_role': 'backend_developer',
+                      },
+                    ],
+                  },
+                ],
+              };
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            return {
+              'template_plan': 'bundle-plan',
+              'members': [],
+              'member_specs': body['team_members'],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'Preset team');
+      await input('Purpose', 'Build tools');
+      await choose('Team preset', 'frontend_backend');
+      expect((control('Lead Developer') as web.HTMLInputElement).checked, true);
+      expect(
+        (control('Backend Developer') as web.HTMLInputElement).checked,
+        true,
+      );
+      (control('Backend Developer') as web.HTMLInputElement).click();
+      await settle();
+      await choose('Team project directory', '/projects/app');
+      await click('Preview team');
+      await click('Save');
+      final saved = actions('save').single;
+      expect(saved['team_preset'], 'frontend_backend');
+      expect(saved['template_roles'], ['lead_developer']);
+      expect((saved['team_members'] as List).length, 1);
+    },
+  );
+
+  test(
+    'saved template versions load edit retry and create with pinned provenance',
+    () async {
+      const identifier = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      var latest = 1;
+      final versions = <int, Map<String, dynamic>>{
+        1: {
+          'team_members': [
+            {
+              'key': 'lead',
+              'template_role': 'lead_developer',
+              'name': 'Maya',
+              'persona': 'Plan delivery.',
+              'manager_key': '',
+              'use_worktree': true,
+            },
+          ],
+          'model_policy': 'balanced',
+          'runtime_preferences': ['codex', 'claude'],
+          'resource_limits': {
+            'max_active_sessions': 3,
+            'max_active_meetings': 1,
+            'daily_session_cap': 20,
+          },
+        },
+      };
+      await mount(
+        const OrganizationPage(initialView: 'team'),
+        failWhen: (r) =>
+            r.url.path.endsWith('/templates/library') &&
+            (jsonDecode(r.body) as Map)['action'] == 'save',
+        response: (request) {
+          if (request.url.path.endsWith('/templates/library')) {
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            if (body['action'] == 'save')
+              versions[++latest] = Map<String, dynamic>.from(
+                body['definition'],
+              );
+            final version = body['action'] == 'save'
+                ? latest
+                : body['version'] as int;
+            return {
+              'id': identifier,
+              'version': version,
+              'latest_version': latest,
+              'name': 'API team',
+              'description': 'A portable API team',
+              'definition': versions[version],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/templates')) {
+            if (request.method == 'GET')
+              return {
+                'roles': [
+                  {
+                    'id': 'lead_developer',
+                    'name': 'Lead Developer',
+                    'persona_instruction': 'Plan delivery.',
+                  },
+                ],
+                'policies': {'balanced': 'Balanced'},
+                'runtime_names': {'codex': 'Codex', 'claude': 'Claude Code'},
+                'saved_templates': [
+                  {
+                    'id': identifier,
+                    'name': 'API team',
+                    'version': 1,
+                    'versions': [
+                      {'version': 1, 'name': 'API team'},
+                    ],
+                  },
+                ],
+              };
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            return {
+              'template_plan': 'version-2-plan',
+              'member_specs': body['team_members'],
+              'members': [],
+            };
+          }
+          if (request.url.path.endsWith('/organizations/state'))
+            return snapshot();
+          if (request.url.path.endsWith('/session'))
+            return {'authenticated': true};
+          return {'workspaces': [], 'agents': []};
+        },
+      );
+      await click('Create organization');
+      await input('Organization name', 'New organization');
+      await input('Purpose', 'Build tools');
+      await choose('Saved template version', '$identifier@1');
+      expect((control('Lead Developer') as web.HTMLInputElement).checked, true);
+      expect(
+        (control('Maximum concurrent sessions') as web.HTMLInputElement).value,
+        '3',
+      );
+      nodes(
+        'summary',
+      ).firstWhere((n) => n.textContent == 'Configure Maya').click();
+      await settle();
+      await input('Member name', 'Maya v2');
+      nodes(
+        'summary',
+      ).firstWhere((n) => n.textContent == 'Save reusable template').click();
+      await settle();
+      await click('Save new version');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains('response lost'),
+      );
+      await click('Save new version');
+      final saves = actions(
+        'templates/library',
+      ).where((p) => p['action'] == 'save').toList();
+      expect(saves.length, 2);
+      expect(saves[0]['request_id'], saves[1]['request_id']);
+      expect((saves[1]['definition'] as Map).containsKey('project'), false);
+      expect(saves[1]['expected_version'], 1);
+      await choose('Team project directory', '/projects/new-app');
+      await click('Preview team');
+      await click('Save');
+      final body = actions('save').single;
+      expect(body['template_id'], identifier);
+      expect(body['template_version'], 2);
+      expect(body['runtime_preferences'], ['codex', 'claude']);
+      expect((body['team_members'] as List).single['name'], 'Maya v2');
+    },
+  );
 
   test(
     'hire preserves CLI model, worktree and permission defaults when runtime changes',
@@ -549,6 +1366,137 @@ void main() {
       expect(p['profiles'], data['profiles']);
       expect(p['groups'], data['groups']);
       expect(actions('launch'), isEmpty);
+    },
+  );
+  test(
+    'template preview renders actual worktree and permission settings',
+    () async {
+      await mount(dom.div([]));
+      final form = forms.organizationForm(
+        null,
+        {
+          'roles': [
+            {'id': 'lead_developer', 'name': 'Lead Developer'},
+          ],
+          'policies': {'balanced': 'Balanced'},
+        },
+        (body) async => {
+          'member_specs': body['team_members'],
+          'members': [
+            {
+              'template_key': (body['team_members'] as List).first['key'],
+              'name': 'Shared reviewer',
+              'runtime': 'opencode',
+              'model_name': 'Coder',
+              'reasoning': '',
+              'manager_name': 'Organization owner',
+              'selection_note': '',
+              'persona': 'Review changes.',
+              'use_worktree': false,
+              'permission_mode': 'full_autonomy',
+              'accessible_paths': ['/shared/**'],
+            },
+          ],
+        },
+        null,
+        true,
+        {'/projects/app': '/projects/app'},
+      );
+      await settle();
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await choose('Team project directory', '/projects/app');
+      await click('Preview team');
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        contains(
+          'Shared project directory · Full autonomy · Additional access: /shared/**',
+        ),
+      );
+      expect(
+        web.document.getElementById('org-dom-test')!.textContent,
+        isNot(contains('Separate worktree · CLI default permissions')),
+      );
+      await click('Cancel');
+      await form;
+    },
+  );
+
+  test(
+    'template save preserves newer draft edits and advances saved identity',
+    () async {
+      await mount(dom.div([]));
+      final pending = Completer<Map<String, dynamic>>();
+      final next = Completer<Map<String, dynamic>>();
+      Map<String, dynamic>? submitted;
+      final form = forms.organizationForm(
+        null,
+        {
+          'roles': [
+            {
+              'id': 'lead_developer',
+              'name': 'Lead Developer',
+              'persona_instruction': 'Lead delivery.',
+            },
+          ],
+          'policies': {'balanced': 'Balanced'},
+        },
+        null,
+        (body) {
+          submitted = body;
+          return pending.isCompleted ? next.future : pending.future;
+        },
+        true,
+        {'/projects/app': '/projects/app'},
+      );
+      await settle();
+      (control('Lead Developer') as web.HTMLInputElement).click();
+      await settle();
+      await input('Template name', 'Saved team');
+      await click('Save as new template');
+      expect(submitted, isNotNull);
+      await input('Member name', 'Edited during save');
+      final definition = Map<String, dynamic>.from(submitted!['definition']);
+      definition['team_members'] = [
+        {
+          ...(definition['team_members'] as List).single as Map,
+          'name': 'Lead Developer',
+          'persona': 'Lead delivery.',
+          'manager_key': '',
+          'use_worktree': true,
+        },
+      ];
+      pending.complete({
+        'id': 'a' * 32,
+        'version': 1,
+        'latest_version': 1,
+        'name': 'Saved team',
+        'description': '',
+        'definition': definition,
+      });
+      await settle();
+      await settle();
+      expect(
+        (control('Member name') as web.HTMLInputElement).value,
+        'Edited during save',
+      );
+      expect(
+        nodes('button').any((n) => n.textContent == 'Save new version'),
+        isTrue,
+        reason:
+            'A successful save should establish the saved identity even when newer draft edits prevent hydration.',
+      );
+      await click('Save new version');
+      expect(submitted!['template_id'], 'a' * 32);
+      expect(submitted!['expected_version'], 1);
+      next.complete({
+        ...await pending.future,
+        'version': 2,
+        'latest_version': 2,
+      });
+      await settle();
+      await click('Cancel');
+      await form;
     },
   );
 }

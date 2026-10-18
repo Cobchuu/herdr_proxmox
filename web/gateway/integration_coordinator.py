@@ -1,5 +1,5 @@
 """Durable, idle-only integration inbox and coordinator reports."""
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -92,11 +92,13 @@ class IntegrationCoordinator:
         self.lock = threading.RLock()
         self.stopped = threading.Event()
         self._dispatch_jobs = None
+        self._template_revision = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as db, db:
             db.executescript('CREATE TABLE IF NOT EXISTS settings (repository TEXT PRIMARY KEY, data TEXT NOT NULL);'
                              'CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, data TEXT NOT NULL);'
                              'CREATE TABLE IF NOT EXISTS audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);')
+        self.sync_template_workflows()
 
     def close(self):
         self.stopped.set()
@@ -195,6 +197,8 @@ class IntegrationCoordinator:
                     raise ValueError('Coordinator profile is unavailable.')
                 config = dict(old if old.get('profile_id') == profile_id else {}, repository=repository, enabled=True,
                               profile_id=profile_id, organization_id=profile['organization_id'])
+            config.pop('template_organization_id', None)
+            config.pop('template_unavailable', None)
             if auto_sdk is not None:
                 config['auto_sdk'] = auto_sdk
             if auto_build is not None:
@@ -205,7 +209,49 @@ class IntegrationCoordinator:
                                 actor=actor or 'dashboard_operator'))
         return config
 
+    def sync_template_workflows(self):
+        """Reconcile generated defaults on startup/metadata changes, outside reads.
+
+        Store metadata is frozen before taking the coordinator lock. Explicit
+        operator configurations never inherit subsequent template changes.
+        """
+        import template_workflows
+        with getattr(self.store, 'lock', nullcontext()):
+            revision = getattr(self.store, 'workflow_revision', None)
+            if isinstance(revision, int) and revision == self._template_revision:
+                return
+            defaults = template_workflows.coordinator_configurations(self.store)
+        by_repository = {}
+        for config in defaults:
+            by_repository.setdefault(config['repository'], []).append(config)
+        with self.lock, closing(self.connect()) as db, db:
+            saved = {r[0]: json.loads(r[1]) for r in db.execute('SELECT * FROM settings')}
+            # Older configure() retained the template marker. Its durable audit
+            # still proves explicit ownership; do not reset those settings.
+            explicit = {r[0] for r in db.execute("SELECT DISTINCT json_extract(data, '$.repository') FROM audit "
+                                               "WHERE json_extract(data, '$.action')='configuration'")}
+            for repository in saved.keys() | by_repository.keys():
+                old = saved.get(repository)
+                if old and old.get('template_organization_id') and repository in explicit:
+                    old = dict(old)
+                    old.pop('template_organization_id', None)
+                    old.pop('template_unavailable', None)
+                    db.execute('UPDATE settings SET data=? WHERE repository=?', (json.dumps(old), repository))
+                    self.audit(db, dict(action='template_ownership_reconciled', **old))
+                if old and not old.get('template_organization_id'):
+                    continue
+                candidates = by_repository.get(repository, [])
+                config = next((c for c in candidates if old and c['profile_id'] == old.get('profile_id')),
+                              candidates[0] if candidates else None)
+                if config is None and old:
+                    config = dict(old, enabled=False, template_unavailable=True)
+                if config is not None and config != old:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?, ?)', (repository, json.dumps(config)))
+                    self.audit(db, dict(action='template_configuration', **config))
+        self._template_revision = revision  # Only cache metadata after a successful commit.
+
     def observe(self, notices):
+        self.sync_template_workflows()
         with self.lock, closing(self.connect()) as db, db:
             settings = {r[0]: json.loads(r[1]) for r in db.execute('SELECT * FROM settings')}
             for notice in notices:
@@ -403,6 +449,37 @@ class IntegrationCoordinator:
             return False, 'verification_failed', 'Git verification no longer confirms the exact commit.', verification
         return True, None, '', verification
 
+    def required_toolchain(self, event):
+        """The tool a blocked build is missing, or a refusal that says why not.
+
+        A worker reports a blocker *category*, never a tool, and free text from a
+        worker must not choose which privileged installer runs. The identity comes
+        from the project's resolved requirement report — discovery combined with
+        any operator override — and it counts only when an installer this release
+        ships would actually satisfy it. Identity, existence and satisfaction are
+        three different questions and only the third resolves a blocker.
+        """
+        reader = getattr(self, 'effective_requirements', None)
+        if not callable(reader):
+            raise ValueError('Requirement resolution is unavailable; inspect the gateway configuration.')
+        report = reader(event.get('repository'))
+        installable = report.get('provisionable') or []
+        if len(installable) > 1:
+            # The category does not name the tool, but the build recorded which
+            # tools it measured and which failed to match. A failed tool that is
+            # also installable is the one the blocker is about; evidence that
+            # identifies nothing, or several, stays a refusal.
+            recorded = event.get('validation_run')
+            evidence = recorded.get('toolchain_evidence') if isinstance(recorded, dict) else None
+            failed = {item.get('name') for item in evidence or []
+                      if isinstance(item, dict) and item.get('matches') is False}
+            identified = [name for name in installable if name in failed]
+            if len(identified) == 1:
+                return identified[0]
+        if len(installable) != 1:
+            raise ValueError(report['project_requirement']['reason'])
+        return installable[0]
+
     def missing_toolchain(self, config, event):
         """Queue the scoped SDK install once, when the operator opted in."""
         if not config.get('auto_sdk') or not event.get('blocker') == TOOLCHAIN or self.sdk_request is None:
@@ -410,11 +487,11 @@ class IntegrationCoordinator:
         if event.get('sdk_requested'):
             return
         try:
-            self.sdk_request()
+            self.sdk_request(self.required_toolchain(event))
         except (ValueError, OSError) as exc:
-            # Auto-install cannot choose between several absent toolchains, so a
-            # blocked build would otherwise stall with no explanation. Record the
-            # refusal once; later polls must not repeat it into the reason.
+            # An unidentified or unprovisionable requirement is a real answer:
+            # a blocked build would otherwise stall with no explanation. Record
+            # the refusal once; later polls must not repeat it into the reason.
             if not event.get('sdk_note'):
                 event['sdk_note'] = (str(exc) or type(exc).__name__)[:400]
                 # Keep the refusal visible even when the original build reason
@@ -548,6 +625,7 @@ class IntegrationCoordinator:
 
     def tick(self):
         """Advance durable events once; returns True when another tick can progress."""
+        self.sync_template_workflows()
         with self.lock, closing(self.connect()) as db, db:
             advance_pending = False
             settings = {r[0]: json.loads(r[1]) for r in db.execute('SELECT * FROM settings')}

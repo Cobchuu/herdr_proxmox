@@ -1,6 +1,5 @@
 import 'dart:async';
-
-import 'dart:math';
+import 'dart:convert';
 
 import '../services.dart';
 
@@ -9,9 +8,6 @@ import '../ui.dart';
 import 'org_forms.dart';
 
 import 'org_ui.dart';
-
-String newRequestId() =>
-    '${DateTime.now().microsecondsSinceEpoch}_${Random.secure().nextInt(0x7fffffff)}';
 
 class OrganizationAutomation extends StatefulComponent {
   const OrganizationAutomation({super.key, required this.organizationId});
@@ -109,27 +105,41 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
   Future<void> edit() async {
     final epoch = connection.generation;
 
-    final chosen = await editOrganizationAutomation(policy!);
-
-    if (!mounted || epoch != connection.generation || chosen == null) return;
-
-    pending = {
-      'organization_id': component.organizationId,
-
-      ...chosen,
-
-      'request_id': newRequestId(),
-    };
-
-    await save();
+    await editOrganizationAutomation(
+      policy!,
+      save: (chosen) async {
+        if (!mounted ||
+            epoch != connection.generation ||
+            !connection.state.connected)
+          throw StateError(
+            'The connection changed. Close and reopen the policy editor before saving.',
+          );
+        // Preserve the request identity after an uncertain response, but an edited
+        // policy is a new intent and must not reuse that identity. Compare the
+        // whole intent rather than its length, so an extra bookkeeping key can
+        // never silently drop retry idempotency.
+        final intent = {'organization_id': component.organizationId, ...chosen};
+        final previous = pending == null
+            ? null
+            : (Json.from(pending!)..remove('request_id'));
+        if (previous == null || jsonEncode(previous) != jsonEncode(intent))
+          pending = {...intent, 'request_id': requestId()};
+        await save(fromDialog: true);
+      },
+    );
   }
 
-  Future<void> save() async {
+  Future<void> save({bool fromDialog = false}) async {
     if (busy ||
         pending == null ||
         !connection.state.connected ||
-        connection.operator.value['role'] != 'admin')
+        connection.operator.value['role'] != 'admin') {
+      if (fromDialog)
+        throw StateError(
+          'The policy cannot be saved right now. Check the connection and try again.',
+        );
       return;
+    }
 
     final epoch = connection.generation;
 
@@ -148,16 +158,21 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
 
           pending = null;
         });
+      else if (fromDialog)
+        throw StateError(
+          'The connection changed while saving. Close and reopen the policy editor.',
+        );
     } catch (e) {
       if (mounted && epoch == connection.generation)
         setState(() {
-          error = '$e';
+          error = fromDialog ? null : '$e';
 
           if (e is DashboardRequestException &&
               e.statusCode >= 400 &&
               e.statusCode < 500)
             pending = null;
         });
+      if (fromDialog) rethrow;
     } finally {
       if (mounted) {
         setState(() => busy = false);
@@ -179,7 +194,11 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
     final admin =
         connection.state.connected &&
         connection.operator.value['role'] == 'admin';
-    final entries = policy?.entries.toList() ?? const [];
+    final entries =
+        policy?.entries
+            .where((e) => automationLabels.containsKey(e.key))
+            .toList() ??
+        const [];
     final switches = entries.where((e) => e.value is bool).toList();
     final limits = entries.where((e) => e.value is! bool).toList();
 
@@ -196,10 +215,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
                 el('h3', [text('Automation')], classes: 'overline'),
                 factList([
                   for (final entry in switches)
-                    (
-                      automationLabels[entry.key] ?? humanize(entry.key),
-                      value(entry.value),
-                    ),
+                    (automationLabels[entry.key]!, value(entry.value)),
                 ], classes: 'org-policy__list'),
               ], classes: 'org-policy__group'),
             if (limits.isNotEmpty)
@@ -207,10 +223,7 @@ class _OrganizationAutomationState extends State<OrganizationAutomation> {
                 el('h3', [text('Limits')], classes: 'overline'),
                 factList([
                   for (final entry in limits)
-                    (
-                      automationLabels[entry.key] ?? humanize(entry.key),
-                      value(entry.value),
-                    ),
+                    (automationLabels[entry.key]!, value(entry.value)),
                 ], classes: 'org-policy__list'),
               ], classes: 'org-policy__group'),
           ], classes: 'org-policy'),
@@ -254,6 +267,15 @@ const automationLabels = <String, String>{
   'reap_finished_sessions':
       'Archive and close finished idle sessions automatically',
   'reap_orphaned_panes': 'Reclaim proven empty orphaned panes',
+  'auto_capture': 'Capture completed candidates automatically',
+  'auto_validate': 'Validate captured candidates automatically',
+  'auto_publish': 'Publish validated tasks automatically',
+  'auto_prepare': 'Prepare supported project SDKs before agent launch',
+  'auto_prepare_restore': 'Restore project dependencies before launch',
+  'auto_prepare_checks':
+      'Approve supported project build/test recipes automatically',
+  'auto_prepare_agent':
+      'Allow a preparation agent to install Node.js when needed',
   'max_per_meeting': 'Max automatic tasks per meeting',
   'max_open_per_agent': 'Max open tasks per agent',
   'max_follow_up_depth': 'Max follow-up depth',
@@ -263,10 +285,20 @@ const automationLabels = <String, String>{
   'daily_session_cap': 'Daily session starts',
 };
 
-Future<Json?> editOrganizationAutomation(Json policy) async {
+Future<Json?> editOrganizationAutomation(
+  Json policy, {
+  Future<void> Function(Json)? save,
+}) async {
   final defaults = <String, dynamic>{
     'auto_queue_proposals': false,
     'paused': false,
+    'auto_validate': false,
+    'auto_capture': policy['auto_capture'] ?? policy['auto_validate'] ?? false,
+    'auto_publish': false,
+    'auto_prepare': false,
+    'auto_prepare_restore': false,
+    'auto_prepare_checks': false,
+    'auto_prepare_agent': false,
     'reap_finished_sessions': false,
     'reap_orphaned_panes': false,
     'max_per_meeting': 1,
@@ -290,36 +322,50 @@ Future<Json?> editOrganizationAutomation(Json policy) async {
   };
 
   const labels = automationLabels;
+  Json normalized(Json values) => {
+    for (final key in labels.keys)
+      key: maxima.containsKey(key) ? int.parse('${values[key]}') : values[key],
+  };
 
   final result = await editRecord(
     'Organization automation & limits',
     defaults,
     labels,
+    submit: save == null ? null : (values) => save(normalized(values)),
     flags: {
       'auto_queue_proposals',
       'paused',
       'reap_finished_sessions',
       'reap_orphaned_panes',
+      'auto_validate',
+      'auto_capture',
+      'auto_publish',
+      'auto_prepare',
+      'auto_prepare_restore',
+      'auto_prepare_checks',
+      'auto_prepare_agent',
     },
     extra: (v) => [
       note(
-        'Valid proposals remain drafts when queueing is disabled or limits are reached. Publishing, merging and deployment remain manual. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes.',
+        'Managed SDK preparation uses trusted providers. Agent-assisted preparation is a separate opt-in for Node.js: a dedicated session can download and run installers in its allocation, and its provenance remains an unverified claim. This shares the service account and is not a sandbox. Locked Dependency restoration requires its own permission and can execute project build code. Native check approval is separate: build and test commands can restore dependencies and execute project code. Unsupported requirements stop the launch; disabling preparation does not silently resume a waiting launch.',
+      ),
+      note(
+        'Valid proposals remain drafts when queueing is disabled or limits are reached. Pausing leaves queued work queued. A session budget of 0 disables that limit. Finished-session cleanup retains archives and never closes working agents; orphan cleanup requires verified empty panes. Capture checks the agent receipt and committed candidate without a build service. Automatic validation uses the current build executor. Gateway builds stop on restart; install the durable build service under Builds & deployments for restart resilience. Automatic publication requires that service and automatic validation.',
       ),
     ],
-    validate: (v) {
+    validateFields: (v) {
+      final errors = <String, String>{};
       for (final entry in maxima.entries) {
         final n = int.tryParse('${v[entry.key]}');
         if (n == null || n < 0 || n > entry.value)
-          return '${labels[entry.key]} must be a whole number from 0 to ${entry.value}.';
+          errors[entry.key] =
+              '${labels[entry.key]} must be a whole number from 0 to ${entry.value}.';
       }
-      return null;
+      return errors;
     },
   );
 
   if (result == null) return null;
 
-  return {
-    for (final key in labels.keys)
-      key: maxima.containsKey(key) ? int.parse('${result[key]}') : result[key],
-  };
+  return normalized(result);
 }

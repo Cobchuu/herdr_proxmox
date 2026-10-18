@@ -236,6 +236,8 @@
 .access-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-5); align-items: start; }
 .toolchain-name { display: flex; flex-direction: column; gap: var(--space-0-5); }
 .toolchain-name > .mono { color: var(--color-text-tertiary); }
+.project-analysis-card .toolchain-name { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.project-analysis-card .org-form__item { padding-block: var(--space-2); }
 .setup-panel .terminal-panel__body { gap: var(--space-3); }
 .setup-hint { padding: var(--space-1) var(--space-2) 0; }
 .setup-link {
