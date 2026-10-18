@@ -9,6 +9,42 @@ import 'package:juice/juice.dart';
 
 void main() {
   JuiceLoggerConfig.minLevel = Level.warning;
+  test(
+    'request exceptions retain valid field errors for modal validation',
+    () async {
+      final connection = DashboardBloc(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/tasks/automation'))
+            return http.Response(
+              jsonEncode({
+                'error': 'Cannot enable validation.',
+                'field_errors': {
+                  'auto_validate': 'Install the build service.',
+                  'bad': 42,
+                },
+              }),
+              400,
+            );
+          return http.Response('{"workspaces":[],"agents":[]}', 200);
+        }),
+      );
+      connection.connect('token');
+      await connection.stream.firstWhere(
+        (_) => connection.state.refreshed != null,
+      );
+      await expectLater(
+        connection.request('tasks/automation', {}),
+        throwsA(
+          isA<DashboardRequestException>()
+              .having((e) => e.message, 'message', 'Cannot enable validation.')
+              .having((e) => e.fieldErrors, 'field errors', {
+                'auto_validate': 'Install the build service.',
+              }),
+        ),
+      );
+      await connection.disconnect();
+    },
+  );
   testWidgets(
     'notification cursor refreshes records and stops after disconnect',
     (tester) async {

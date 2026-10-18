@@ -22,6 +22,7 @@ from integration_coordinator import IntegrationCoordinator
 from project_files import ProjectJobs, clone_repository, project_directory
 from cli_setup import CliSetup
 import model_catalog
+import team_templates
 import project_explorer
 import project_git
 from run_logs import RunLogs
@@ -33,6 +34,12 @@ from resource_usage import resources
 from organization_transfer import export_configuration, import_configuration
 from operators import Operators
 from sdk_install import SdkInstall
+from build_service_install import BuildServiceInstall
+from request_validation import FieldValidationError
+import project_analysis
+import project_toolchains
+import toolchain_policy
+from environment_preparation import EnvironmentPreparation
 from updates import Updates
 from validation import ValidationRuns
 from github_api import GitHub, GitHubError
@@ -72,6 +79,10 @@ def command(*args, timeout=10):
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
+            if args[:2] in (('pane', 'run'), ('pane', 'close')):
+                # Native write helpers can acknowledge with plain text. This
+                # proves acceptance only; shell activation has its own barrier.
+                return {'admitted': True}
             raise ValueError('Unexpected Herdr response; check the installed CLI version.') from exc
         if isinstance(data, dict) and 'error' in data:
             raise parse_error(result.stdout, operation)
@@ -355,6 +366,33 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlsplit(self.path).query)
                 self.validation_artifact((query.get('id') or [''])[0], (query.get('kind') or ['static'])[0])
                 return
+            # A query string means an exact-match allowlist cannot admit this, so
+            # it is routed here beside the other parameterised reads.
+            if self.path.startswith('/api/projects/analysis?'):
+                query = parse_qs(urlsplit(self.path).query)
+                try:
+                    # The resolved view, not the raw report: the page, the
+                    # readiness check and the provisioning decision read one
+                    # answer, so a discovered requirement and a contradictory
+                    # override cannot both be presented as true.
+                    self.reply(200, self.server.analysis.effective(
+                        (query.get('path') or [''])[0],
+                        revision=(query.get('revision') or [''])[0] or None,
+                        force=(query.get('refresh') or [''])[0] == '1'))
+                except (ValueError, OSError) as error:
+                    self.reply(400, {'error': str(error)[:500]})
+                return
+            if self.path.startswith('/api/projects/environment?'):
+                query = parse_qs(urlsplit(self.path).query)
+                preparation = getattr(self.server, 'environments', None)
+                if preparation is None:
+                    self.reply(503, {'error': 'Environment preparation is unavailable.'})
+                    return
+                identifier = (query.get('job') or [''])[0]
+                result = preparation.store.job(identifier) if identifier else preparation.store.get(
+                    (query.get('plan') or [''])[0])
+                self.reply(200 if result else 404, result or {'error': 'No environment record has that identity.'})
+                return
             if self.path == '/api/build':
                 from build_identity import snapshot as build_snapshot
                 self.reply(200, build_snapshot())
@@ -365,7 +403,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/organizations/export':
                 self.reply(200, export_configuration(self.server.organizations))
                 return
-            if self.path not in ('/api/snapshot', '/api/organizations', '/api/organizations/directory', '/api/organizations/state', '/api/projects/jobs', '/api/cli-setup', '/api/logs', '/api/ssh-access', '/api/dashboard-access', '/api/herdr-server', '/api/updates', '/api/models', '/api/integration', '/api/sdk', '/api/validation', '/api/tasks', '/api/github', '/api/discovery'):
+            if self.path == '/api/organizations/templates':
+                self.reply(200, dict(team_templates.snapshot(), saved_templates=self.server.organizations.saved_templates()))
+                return
+            if self.path not in ('/api/snapshot', '/api/organizations', '/api/organizations/directory', '/api/organizations/state', '/api/projects/jobs', '/api/cli-setup', '/api/logs', '/api/ssh-access', '/api/dashboard-access', '/api/herdr-server', '/api/updates', '/api/models', '/api/integration', '/api/sdk', '/api/build-service', '/api/projects/toolchains', '/api/validation', '/api/tasks', '/api/github', '/api/discovery'):
                 self.reply(404, {'error': 'Unknown endpoint.'})
                 return
             try:
@@ -397,6 +438,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if self.path == '/api/validation':
                     self.reply(200, self.server.validation.snapshot())
+                    return
+                if self.path == '/api/build-service':
+                    self.reply(200, self.server.build_service_install.snapshot())
+                    return
+                if self.path == '/api/projects/toolchains':
+                    self.reply(200, project_toolchains.snapshot(
+                        self.server.organizations.project_toolchains(),
+                        self.server.sdk_install.snapshot().get('toolchains') or {},
+                        catalog=toolchain_policy.catalog()))
                     return
                 if self.path == '/api/integration':
                     # Served from memory; the watcher owns the Git work.
@@ -523,18 +573,57 @@ class Handler(BaseHTTPRequestHandler):
         actor = getattr(self, 'operator', {}).get('name', 'dashboard_operator')
         role = getattr(self, 'operator', {}).get('role', 'operator')
         actions = {f'/api/workspaces/{name}': name for name in ('create', 'focus', 'rename')}
+        actions['/api/organizations/templates'] = 'templates'
+        actions['/api/organizations/templates/library'] = 'template_library'
+        environment_actions = {f'/api/projects/environment/{name}': name for name in ('plan', 'select', 'prepare', 'cancel', 'authorize-restore')}
+        actions.update(environment_actions)
         organization_actions = {f'/api/organizations/{name}': name for name in ('save', 'hire', 'launch', 'delegate', 'release', 'report', 'resolve_delegation', 'group', 'discuss', 'chat', 'inspect', 'input', 'recover', 'transcript', 'retry_discussion', 'cancel_discussion', 'remove_agent', 'remove_group', 'session', 'realign_discussion_session')}
         setup_actions = {f'/api/cli-setup/{name}': name for name in ('start', 'poll', 'input', 'resize', 'close', 'verify', 'install_integration')}
         log_actions = {f'/api/logs/{name}': name for name in ('save', 'preview', 'ticket', 'delete')}
-        if self.path not in actions and self.path not in organization_actions and self.path not in setup_actions and self.path not in log_actions and self.path not in ('/api/organizations/import', '/api/ssh-access/add', '/api/dashboard-access', '/api/herdr-server/start', '/api/knowledge', '/api/updates/install', '/api/updates/check', '/api/updates/alphas', '/api/updates/promote', '/api/updates/rollback', '/api/updates/provenance', '/api/models', '/api/sdk/install', '/api/validation/run', '/api/projects/clone', '/api/projects/browse', '/api/projects/git', '/api/integration/configure', '/api/integration/retry', '/api/integration/blockers', '/api/integration/repair', '/api/integration/guidance', '/api/integration/recover', '/api/organizations/history', '/api/organizations/activity', '/api/github/configure', '/api/tasks/create', '/api/tasks/launch', '/api/tasks/candidate', '/api/tasks/publish', '/api/tasks/publication', '/api/tasks/repair', '/api/tasks/pull', '/api/tasks/refresh', '/api/tasks/build', '/api/tasks/policy', '/api/tasks/complete', '/api/tasks/discuss', '/api/tasks/review_policy', '/api/tasks/proposal', '/api/tasks/assignment', '/api/tasks/automation', '/api/tasks/discovery', '/api/tasks/handover', '/api/tasks/consult', '/api/tasks/acceptance'):
+        if self.path not in actions and self.path not in organization_actions and self.path not in setup_actions and self.path not in log_actions and self.path not in ('/api/organizations/import', '/api/ssh-access/add', '/api/dashboard-access', '/api/herdr-server/start', '/api/knowledge', '/api/updates/install', '/api/updates/check', '/api/updates/alphas', '/api/updates/promote', '/api/updates/rollback', '/api/updates/provenance', '/api/models', '/api/sdk/install', '/api/build-service/install', '/api/validation/run', '/api/projects/clone', '/api/projects/browse', '/api/projects/git', '/api/projects/toolchain', '/api/integration/configure', '/api/integration/retry', '/api/integration/blockers', '/api/integration/repair', '/api/integration/guidance', '/api/integration/recover', '/api/organizations/history', '/api/organizations/activity', '/api/github/configure', '/api/tasks/create', '/api/tasks/start_proposal', '/api/tasks/launch', '/api/tasks/candidate', '/api/tasks/publish', '/api/tasks/publication', '/api/tasks/repair', '/api/tasks/pull', '/api/tasks/refresh', '/api/tasks/build', '/api/tasks/policy', '/api/tasks/complete', '/api/tasks/discuss', '/api/tasks/review_policy', '/api/tasks/proposal', '/api/tasks/assignment', '/api/tasks/automation', '/api/tasks/discovery', '/api/tasks/handover', '/api/tasks/consult', '/api/tasks/acceptance'):
             self.reply(404, {'error': 'Unknown endpoint.'})
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= (2_000_000 if self.path == '/api/organizations/import' else 65536):
+            if not 0 < size <= (2_000_000 if self.path == '/api/organizations/import' else
+                                team_templates.MAX_REQUEST_BYTES if self.path in ('/api/organizations/save', '/api/organizations/templates', '/api/organizations/templates/library') else 65536):
                 raise ValueError('Invalid request size.')
             body = json.loads(self.rfile.read(size))
-            if self.path == '/api/github/configure':
+            if self.path == '/api/organizations/templates/library':
+                if not isinstance(body, dict):
+                    raise ValueError('Expected a JSON object.')
+                if body.get('action') == 'save' and role != 'admin':
+                    raise ValueError('Only an administrator can save shared team templates.')
+                self.reply(200, self.server.organizations.template_library(body, actor))
+            elif self.path == '/api/organizations/templates':
+                if not isinstance(body, dict):
+                    raise ValueError('Expected a JSON object.')
+                self.reply(200, self.server.organizations.team_plan(body))
+            elif self.path in environment_actions:
+                if role != 'admin':
+                    raise ValueError('Only an administrator can prepare project environments.')
+                if not isinstance(body, dict):
+                    raise ValueError('Expected an environment request object.')
+                preparation = getattr(self.server, 'environments', None)
+                if preparation is None:
+                    raise ValueError('Environment preparation is unavailable.')
+                operation = environment_actions[self.path]
+                allowed = {'plan': {'path', 'revision'}, 'select': {'digest', 'checks'}, 'prepare': {'digest', 'retry'},
+                           'cancel': {'id'}, 'authorize-restore': {'digest', 'allowed'}}[operation]
+                if set(body) - allowed or ('retry' in body and type(body['retry']) is not bool):
+                    raise ValueError('Invalid environment request options.')
+                if operation == 'plan':
+                    result = preparation.plan(body.get('path'), body.get('revision'))
+                elif operation == 'select':
+                    result = preparation.select(body.get('digest'), body.get('checks'), actor)
+                elif operation == 'prepare':
+                    result = preparation.prepare(body.get('digest'), body.get('retry', False))
+                elif operation == 'authorize-restore':
+                    result = preparation.authorize_restore(body.get('digest'), body.get('allowed'), actor)
+                else:
+                    result = preparation.store.cancel(body.get('id'))
+                self.reply(200, result)
+            elif self.path == '/api/github/configure':
                 if role != 'admin':
                     raise ValueError('Only an administrator can configure GitHub publishing.')
                 self.reply(200, self.server.github.configure(body))
@@ -552,6 +641,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.integration.wake()
                 self.reply(200, result)
             elif self.path == '/api/organizations/import':
+                if role != 'admin' and isinstance(body, dict) and (body.get('team_templates') or body.get('team_template_versions')):
+                    raise ValueError('Only an administrator can import shared team templates.')
                 self.reply(200, import_configuration(self.server.organizations, body))
             elif self.path == '/api/organizations/activity':
                 self.reply(200, self.server.organizations.activity(body))
@@ -561,6 +652,14 @@ class Handler(BaseHTTPRequestHandler):
                 if role != 'admin':
                     raise ValueError('Only an administrator can install a development toolchain.')
                 self.reply(200, self.server.sdk_install.install(body))
+            elif self.path == '/api/projects/toolchain':
+                if role != 'admin':
+                    raise ValueError('Only an administrator can declare a project toolchain.')
+                self.reply(200, self.server.organizations.set_project_toolchain(body, actor))
+            elif self.path == '/api/build-service/install':
+                if role != 'admin':
+                    raise ValueError('Only an administrator can install the durable build service.')
+                self.reply(200, self.server.build_service_install.install(body, self.server.validation))
             elif self.path == '/api/validation/run':
                 self.reply(200, self.server.validation.submit(body, actor=actor))
             elif self.path == '/api/integration/configure':
@@ -669,6 +768,8 @@ class Handler(BaseHTTPRequestHandler):
             # HTTP 401 is reserved for dashboard authentication. An upstream
             # 401 must not revoke a valid browser session or erase task state.
             self.reply(502, {'error': str(exc)[:500], 'source': 'github', 'github_status': exc.status})
+        except FieldValidationError as exc:
+            self.reply(400, {'error': str(exc)[:500], 'field_errors': exc.field_errors})
         except (ValueError, UnicodeError) as exc:
             self.reply(400, {'error': str(exc)[:500]})
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -716,15 +817,18 @@ def main():
     policy = TOKEN_FILE.parent / 'dashboard-access.json'
     operators = Operators(Path('/etc/herdr/operators.json'))
     sdk_install = SdkInstall()
+    build_service_install = BuildServiceInstall()
     cli_setup = CliSetup()
-    organizations = OrganizationStore(DATABASE, PROJECTS, command, runtime_status=cli_setup.status, runtime_ready=cli_setup.ready, model_validator=lambda profile: model_catalog.validate_selection(cli_setup, PROJECTS, profile))
+    organizations = OrganizationStore(DATABASE, PROJECTS, command, runtime_status=cli_setup.status, runtime_ready=cli_setup.ready,
+                                      model_validator=lambda profile: model_catalog.validate_selection(cli_setup, PROJECTS, profile),
+                                      template_catalog=lambda project: team_templates.catalog(cli_setup, PROJECTS, project))
     github = GitHub(DATABASE.parent / 'github.json')
     contributions = Contributions(DATABASE.with_name('tasks.sqlite3'), PROJECTS, organizations, github)
     run_logs = RunLogs(DATABASE.parent / 'run-logs', BIN)
     ssh_access = SshAccess()
     projects = ProjectJobs(PROJECTS, DATABASE.with_name('projects.sqlite3'))
     coordinator = IntegrationCoordinator(DATABASE.with_name('integration.sqlite3'), organizations,
-                                         sdk_request=lambda: sdk_install.install({}))
+                                         sdk_request=lambda name: sdk_install.install({'toolchain': name}))
     build_queue = None
     minimum_build_space = 0
     build_config = BUILD_SERVICE_CONFIG
@@ -743,7 +847,27 @@ def main():
         if not contributions.record_build(event_id, summary):
             coordinator.record_validation_run(event_id, summary)
 
+    analysis = project_analysis.ProjectAnalysis(
+        PROJECTS,
+        overrides=organizations.project_toolchains,
+        toolchains=lambda: sdk_install.snapshot().get('toolchains') or {},
+        catalog=toolchain_policy.catalog)
+    # Approval, readiness and provisioning all read the same resolved report;
+    # two views of one project's requirement is how they drift apart.
+    coordinator.effective_requirements = lambda repository: analysis.effective(repository)
+    environments = EnvironmentPreparation(analysis, DATABASE.parent / 'environments.sqlite3',
+        Path(os.environ.get('HERDR_ENVIRONMENT_ROOT', str(DATABASE.parent / 'environments'))))
+    from environment_admission import EnvironmentAdmission
+    admission = EnvironmentAdmission(organizations, environments)
+    organizations.environment_admission = admission
+    environments.admission = admission
+    environments.start()
+    from environment_policy import EnvironmentPolicies
+    previous_project_resolver = toolchain_policy.PROJECT_RESOLVER
+    toolchain_policy.PROJECT_RESOLVER = EnvironmentPolicies(PROJECTS, environments.store).resolve
     validation = ValidationRuns(PROJECTS, build_event, record=record_build, queue=build_queue, minimum_free_bytes=minimum_build_space)
+    validation.install_lock = build_service_install.lock
+    validation.install_guard = build_service_install.require_idle
     contributions.validation = validation
     integration = IntegrationWatcher(PROJECTS, organizations.active_checkouts, coordinator=coordinator,
                                      wake_event=organizations.events.subscribe(('task', 'job', 'policy', 'runtime')))
@@ -758,16 +882,20 @@ def main():
     RUNTIME_EVENTS.start()
     contributions.start()
     try:
-        serve_gateway(bind, 8787, policy, token, {'github': github, 'contributions': contributions, 'projects': projects, 'organizations': organizations, 'cli_setup': cli_setup, 'run_logs': run_logs, 'ssh_access': ssh_access, 'herdr_server': HerdrServer(command), 'integration': integration, 'coordinator': coordinator, 'operators': operators, 'sdk_install': sdk_install, 'validation': validation}, cookie_secure=secure_setting == '1')
+        serve_gateway(bind, 8787, policy, token, {'github': github, 'contributions': contributions, 'projects': projects, 'organizations': organizations, 'cli_setup': cli_setup, 'run_logs': run_logs, 'ssh_access': ssh_access, 'herdr_server': HerdrServer(command), 'integration': integration, 'coordinator': coordinator, 'operators': operators, 'sdk_install': sdk_install, 'build_service_install': build_service_install, 'validation': validation, 'analysis': analysis, 'environments': environments}, cookie_secure=secure_setting == '1')
     finally:
-        RUNTIME_EVENTS.close()
-        outbox.close()
-        contributions.close()
-        coordinator.close()
-        integration.close()
-        projects.close()
-        organizations.close()
-        cli_setup.close()
+        try:
+            environments.close()
+            RUNTIME_EVENTS.close()
+            outbox.close()
+            contributions.close()
+            coordinator.close()
+            integration.close()
+            projects.close()
+            organizations.close()
+            cli_setup.close()
+        finally:
+            toolchain_policy.PROJECT_RESOLVER = previous_project_resolver
 
 
 if __name__ == '__main__':

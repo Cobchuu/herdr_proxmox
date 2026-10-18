@@ -148,6 +148,10 @@ Component statusDot(String activity, {String? tone}) => el(
   attributes: {
     'data-tone': tone ?? agentActivityTone(activity),
     'data-activity': activity,
+    // Pulsing marks live work. Carried on the dot itself so every caller —
+    // including the sidebar agent list, which has no room for a role tile —
+    // breathes while the agent is working.
+    'data-live': '${activity == 'working'}',
     'data-shape': switch (activity) {
       'working' || 'idle' => 'filled',
       'attention' => 'diamond',
@@ -354,8 +358,16 @@ Component select(
   String label,
   String value,
   Map<String, String> options,
-  void Function(String) onChange,
-) => _Control(label, value, onChange, kind: 'select', options: options);
+  void Function(String) onChange, {
+  bool disabled = false,
+}) => _Control(
+  label,
+  value,
+  onChange,
+  kind: 'select',
+  options: options,
+  disabled: disabled,
+);
 
 class _Control extends StatefulComponent {
   const _Control(
@@ -366,13 +378,14 @@ class _Control extends StatefulComponent {
     this.placeholder,
     this.password = false,
     this.isRequired = false,
+    this.disabled = false,
     this.kind = 'input',
     this.rows = 5,
     this.options = const {},
   });
   final String label, value, kind;
   final String? id, placeholder;
-  final bool password, isRequired;
+  final bool password, isRequired, disabled;
   final int rows;
   final Map<String, String> options;
   final void Function(String) change;
@@ -445,7 +458,7 @@ class _ControlState extends State<_Control> {
               },
             ),
         ],
-        attributes: {'id': id},
+        attributes: {'id': id, if (component.disabled) 'disabled': ''},
         events: {
           'change': (event) =>
               component.change((event.target as web.HTMLSelectElement).value),
@@ -502,25 +515,51 @@ void closeDialogs() {
   }
 }
 
+/// Keeps the visible heading authoritative, with a valid name for custom bodies.
+class DialogLabel {
+  DialogLabel(this.headingId, {this.fallback = 'Dialog'});
+  final String headingId;
+  final String fallback;
+  final headings = ValueNotifier<int>(0);
+  String get fallbackId => '$headingId-fallback';
+  String get id => headings.value > 0 ? headingId : fallbackId;
+}
+
 class _Dialog {
-  _Dialog(this.title, this.content, this.close, this.dismissible);
+  _Dialog(
+    this.title,
+    this.content,
+    this.close,
+    this.dismissible,
+    this.label,
+    this.canDismiss,
+  );
   final String title;
   final Component Function() content;
   final void Function() close;
   final bool dismissible;
+  final DialogLabel? label;
+  final bool Function()? canDismiss;
 }
 
 Future<T?> showDialog<T>(
   String title,
   Component Function(void Function(T?) close) content, {
   bool dismissible = true,
+  DialogLabel? label,
+  bool Function()? canDismiss,
 }) {
   final result = Completer<T?>();
   final previouslyFocused = web.document.activeElement;
+  // Headings mount while their dialog is building; rebuild after that frame.
+  void headingChanged() => scheduleMicrotask(refreshDialogs);
+  label?.headings.addListener(headingChanged);
   late _Dialog dialog;
   void close(T? value) {
     if (result.isCompleted) return;
+    if (value == null && canDismiss?.call() == false) return;
     _dialogs.remove(dialog);
+    label?.headings.removeListener(headingChanged);
     result.complete(value);
     refreshDialogs();
     scheduleMicrotask(() {
@@ -529,7 +568,14 @@ Future<T?> showDialog<T>(
     });
   }
 
-  dialog = _Dialog(title, () => content(close), () => close(null), dismissible);
+  dialog = _Dialog(
+    title,
+    () => content(close),
+    () => close(null),
+    dismissible,
+    label,
+    canDismiss,
+  );
   _dialogs.add(dialog);
   refreshDialogs();
   scheduleMicrotask(() {
@@ -570,7 +616,19 @@ Component buildDialogs() => el('div', [
               // leaves a gap under the close button. Dialogs built through the
               // Flutter-shaped AlertDialog carry their own title instead.
               if (dialog.title.isNotEmpty) el('h2', [text(dialog.title)]),
-              if (dialog.dismissible) button('Close', dialog.close),
+              if (dialog.label case final label?)
+                el(
+                  'h2',
+                  [text(label.fallback)],
+                  classes: 'visually-hidden',
+                  attributes: {'id': label.fallbackId},
+                ),
+              if (dialog.dismissible)
+                button(
+                  'Close',
+                  dialog.close,
+                  disabled: dialog.canDismiss?.call() == false,
+                ),
             ], classes: 'dialog__header'),
             dialog.content(),
           ],
@@ -578,7 +636,10 @@ Component buildDialogs() => el('div', [
           attributes: {
             'role': 'dialog',
             'aria-modal': '${_dialogs.last == dialog}',
-            'aria-label': dialog.title,
+            if (dialog.label != null)
+              'aria-labelledby': dialog.label!.id
+            else
+              'aria-label': dialog.title,
             'tabindex': '-1',
             if (_dialogs.last != dialog) 'inert': '',
           },
@@ -596,9 +657,15 @@ Component buildDialogs() => el('div', [
           }
           if (key.key == 'Tab') {
             final elements = web.document.querySelectorAll(
-              '.dialog-layer:last-child button:not([disabled]), .dialog-layer:last-child input, .dialog-layer:last-child select, .dialog-layer:last-child textarea, .dialog-layer:last-child a[href]',
+              '.dialog-layer:last-child :is(button,input,select,textarea):not(:disabled), .dialog-layer:last-child a[href]',
             );
-            if (elements.length == 0) return;
+            if (elements.length == 0) {
+              key.preventDefault();
+              (web.document.querySelector('.dialog-layer:last-child .dialog')
+                      as web.HTMLElement?)
+                  ?.focus();
+              return;
+            }
             final first = elements.item(0) as web.HTMLElement;
             final last = elements.item(elements.length - 1) as web.HTMLElement;
             final panel = web.document.querySelector(

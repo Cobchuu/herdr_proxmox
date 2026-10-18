@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'web/gateway'))
 import server
+import toolchain_policy
 
 
 class GatewayBootTests(unittest.TestCase):
@@ -31,6 +32,8 @@ class GatewayBootTests(unittest.TestCase):
                     self.assertIs(services['contributions'].validation, services['validation'])
                     self.assertIs(services['contributions'].github, services['github'])
                     self.assertIs(services['contributions'].store, services['organizations'])
+                    self.assertIs(services['organizations'].environment_admission,
+                                  services['environments'].admission)
                     self.assertEqual(services['contributions'].snapshot()['tasks'], [])
                     services['integration'].schedule_builds()
                     self.assertEqual(services['coordinator'].snapshot()['events'], [])
@@ -38,5 +41,7 @@ class GatewayBootTests(unittest.TestCase):
                                     DATABASE=root / 'organizations.sqlite3', BUILD_SERVICE_CONFIG=config), \
                         patch.object(server, 'serve_gateway', side_effect=inspect_graph) as serve, \
                         patch.object(server.IntegrationWatcher, '_loop', return_value=None):
+                    previous = toolchain_policy.PROJECT_RESOLVER
                     server.main()
+                    self.assertIs(toolchain_policy.PROJECT_RESOLVER, previous)
                 serve.assert_called_once()

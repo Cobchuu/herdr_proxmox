@@ -656,6 +656,52 @@ class OrganizationTests(unittest.TestCase):
         self.assertEqual(job['state'], 'needs_attention')
         self.assertFalse(any(args[:2] in (('agent', 'start'), ('agent', 'prompt')) for args, _ in self.calls))
 
+    def test_prepared_environment_reaches_the_actual_agent_start_pane(self):
+        original = self.store.command
+        def command(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ('tab', 'create'):
+                workspace = args[args.index('--workspace') + 1]
+                return dict(root_pane=dict(pane_id=workspace + ':pB'), tab=dict(workspace_id=workspace))
+            return result
+        self.store.command = command
+        org = self.organization()
+        profile = self.hire(org, use_worktree=False)
+        executable = str(self.root / 'sdk' / 'dotnet')
+        frozen = dict(digest='policy', plan_digest='plan', checkout=str(self.projects), policy=dict(
+            plan_digest='plan', blockers=[], toolchains=[dict(name='dotnet-sdk', label='.NET SDK',
+                required='8.0.100', component='.', cwd='.', declared_by='global.json#sdk.version',
+                executables=[executable])]))
+        with patch.object(self.store, 'frozen_policy', return_value=frozen), \
+                patch('environment_launch.activate_shell'), \
+                patch('environment_launch.verify_process') as verify:
+            run = self.action('launch', organization_id=org, profile_id=profile)
+            self.drain()
+        verify.assert_called_once()
+        job = next(item for item in self.store.job_records() if item['id'] == run)
+        self.assertEqual(job['state'], 'persona_sent', job.get('error'))
+        self.assertTrue(job['pane_id'].endswith(':pB'))
+        start = next(args for args, _ in self.calls if args[:2] == ('agent', 'start'))
+        self.assertEqual(start[6], job['pane_id'])
+        self.assertEqual(job['environment_binding']['plan_digest'], 'plan')
+        self.assertEqual(job['environment_binding']['environment']['DOTNET_ROOT'], str(self.root / 'sdk'))
+        creates = [args for args, _ in self.calls if args[:2] == ('tab', 'create')]
+        self.assertEqual(len(creates), 1)
+        self.assertIn('DOTNET_ROOT=' + str(self.root / 'sdk'), creates[0])
+        other = self.hire(org, name='Other', use_worktree=False)
+        before = len(self.calls)
+        with patch.object(self.store, 'frozen_policy', return_value=frozen), \
+                patch('environment_launch.activate_shell', side_effect=ValueError('activation not confirmed')), \
+                patch('environment_launch.verify_process') as verify:
+            failed_id = self.action('launch', organization_id=org, profile_id=other)
+            self.drain()
+        failed = next(item for item in self.store.job_records() if item['id'] == failed_id)
+        self.assertEqual(failed['state'], 'needs_attention')
+        self.assertIn('while binding the prepared environment', failed['error'])
+        self.assertNotIn('no terminal input was sent', failed['error'])
+        self.assertFalse(any(args[:2] in (('agent', 'start'), ('agent', 'prompt')) for args, _ in self.calls[before:]))
+        verify.assert_not_called()
+
     def action(self, action, **body):
         return self.store.action(action, {'request_id': uuid.uuid4().hex, **body})['id']
 
@@ -807,6 +853,19 @@ class OrganizationTests(unittest.TestCase):
             self.assertTrue(self.store.checkout_in_use(self.projects / 'worker'))
             run.pop('worktree_path')
             self.assertTrue(self.store.checkout_in_use(self.projects))
+
+    def test_launch_ignores_repository_outside_managed_projects(self):
+        # Deterministic even when the developer's real home is a repository.
+        (self.root / '.git').mkdir()
+        org = self.organization()
+        profile = self.hire(org)
+        job_id = self.action('launch', organization_id=org, profile_id=profile)
+        self.drain()
+        job = next(j for j in self.store.job_records() if j['id'] == job_id)
+        self.assertEqual(job['state'], 'persona_sent', job.get('error'))
+        self.assertEqual(job['workspace_mode'], 'workspace')
+        self.assertTrue(any(args[:2] == ('workspace', 'create') for args, _ in self.calls))
+        self.assertFalse(any(args[:2] == ('worktree', 'create') for args, _ in self.calls))
 
     def test_worktree_can_be_explicitly_disabled(self):
         (self.projects / '.git').mkdir()
@@ -1013,6 +1072,46 @@ class OrganizationTests(unittest.TestCase):
         self.assertIn('needs a decision', job['error'])
         self.assertEqual(job['delivery']['stage'], 'blocked')
         self.assertEqual(len([args for args, _ in self.calls if args[:2] == ('agent', 'prompt')]), before)
+
+    def test_http_team_presets_preview_create_and_authentication(self):
+        import team_templates
+        import model_catalog
+        self.store.template_catalog = lambda project: {'runtimes': {'claude': model_catalog.curated('claude')}}
+        server = gateway.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
+        server.token = 'a' * 48
+        server.organizations = self.store
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}/api/organizations'
+        headers = {'Authorization': 'Bearer ' + server.token, 'Content-Type': 'application/json'}
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + '/templates')
+            self.assertEqual(error.exception.code, 401)
+            presets = json.load(urlopen(Request(base + '/templates', headers=headers)))
+            self.assertEqual(len(presets['roles']), len(team_templates.ROLES))
+            body = dict(template_roles=['lead_developer', 'frontend_developer', 'reviewer'],
+                        project=str(self.projects), model_policy='balanced')
+            request = Request(base + '/templates', headers=headers, data=json.dumps(body).encode())
+            preview = json.load(urlopen(request))
+            self.assertEqual(len(preview['members']), 3)
+            self.assertEqual(self.store.profile_records(), [])
+            body.update(request_id='http-preset-create', name='Preset team', purpose='Build',
+                        template_plan=preview['template_plan'])
+            request = Request(base + '/save', headers=headers, data=json.dumps(body).encode())
+            result = json.load(urlopen(request))
+            self.assertEqual(json.load(urlopen(request)), result)
+            state = json.load(urlopen(Request(base + '/state', headers=headers)))
+            self.assertEqual(len(state['profiles']), 3)
+            self.assertEqual(state['jobs'], [])
+            self.assertEqual(self.calls, [])
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(base + '/templates', headers=headers, data=b'{"template_roles":["bad"]}'))
+            self.assertEqual(error.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_http_create_hire_and_reconnect_without_herdr(self):
         server = gateway.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)

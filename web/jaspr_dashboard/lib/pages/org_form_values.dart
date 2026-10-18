@@ -38,3 +38,39 @@ String configurationImportSummary(Map<String, dynamic> data) {
     throw const FormatException('Unsupported configuration format.');
   return '${(data['organizations'] as List).length} organizations, ${(data['profiles'] as List).length} agents, ${(data['groups'] as List).length} groups.';
 }
+
+/// Only the runtimes the gateway will accept, for the hire form's dropdown.
+///
+/// The CLI snapshot reports readiness with the same rule the add-agent and
+/// launch paths enforce, so a CLI that is missing, whose integration is absent
+/// or outdated, or whose version cannot be verified is not offered at all -
+/// rather than being presented and then refused on save. An agent being edited
+/// keeps its own runtime even when it is no longer ready, labelled with the
+/// reason, so opening the form cannot silently change the value.
+Map<String, String> runtimeChoices(
+  List<Map<String, dynamic>> runtimes, [
+  Map<String, dynamic>? profile,
+]) {
+  final current = '${profile?['runtime'] ?? ''}';
+  final choices = <String, String>{};
+  for (final cli in runtimes) {
+    final id = '${cli['id'] ?? ''}';
+    if (id.isEmpty) continue;
+    final label = '${cli['name'] ?? id}';
+    final problem = '${cli['ready'] ?? ''}';
+    if (problem.isEmpty) {
+      choices[id] = label;
+    } else if (id == current) {
+      choices[id] = '$label - not ready: $problem';
+    }
+  }
+  if (current.isNotEmpty && !choices.containsKey(current)) {
+    choices[current] = 'Runtime $current - readiness unavailable';
+  }
+  if (choices.isEmpty) {
+    // Saying so beats an empty list: the reason is always something the
+    // operator can fix on the CLI accounts page.
+    return {'': 'No runtime is ready - connect a CLI account first'};
+  }
+  return {'': 'Choose runtime', ...choices};
+}

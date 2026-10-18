@@ -13,6 +13,7 @@ import 'package:web/web.dart' as web;
 import 'package:herdr_jaspr_dashboard/services.dart';
 import 'package:herdr_jaspr_dashboard/ui.dart' as ui;
 import 'package:herdr_jaspr_dashboard/pages/builds_page.dart';
+import 'package:herdr_jaspr_dashboard/pages/project_analysis_card.dart';
 import 'package:herdr_jaspr_dashboard/pages/update_card.dart';
 import 'package:herdr_jaspr_dashboard/pages/toolchain_card.dart';
 import 'package:herdr_jaspr_dashboard/pages/dashboard_access_controls.dart';
@@ -201,6 +202,360 @@ void main() {
   }
 
   test(
+    'discovery displays source, inherited SDK evidence and host readiness',
+    () async {
+      await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+        if (request.url.path.endsWith('/analysis')) {
+          return {
+            'source': {
+              'scope': 'working_tree',
+              'at': '2026-10-16',
+              'revision': '',
+            },
+            'coverage': {
+              'files': 2,
+              'directories': 1,
+              'unknown': 0,
+              'truncated': true,
+            },
+            // The resolved view the gateway serves: discovery plus the host
+            // assessment, so readiness is measured rather than declared.
+            'requirements': [
+              {
+                'tool': 'dotnet',
+                'label': '.NET SDK',
+                'constraint': '8.0.100',
+                'notation': 'dotnet',
+                'components': ['Api'],
+                'override': null,
+                'conflicts': [],
+                'assessment': {
+                  'verdict': 'undecidable',
+                  'measured': '8.0.400',
+                  'selected': '/usr/bin/dotnet',
+                  'detail':
+                      'SDK selection for the recorded lookup context has not been assessed.',
+                  'installer': false,
+                  'provisionable': false,
+                  'offer': null,
+                },
+              },
+            ],
+            'provisionable': [],
+            'components': [
+              {
+                'path': 'Api',
+                'basis': 'manifest',
+                'languages': [
+                  {'label': 'C#'},
+                ],
+                'ecosystems': [
+                  {'label': '.NET'},
+                ],
+                'frameworks': [
+                  {'label': 'ASP.NET Core'},
+                ],
+                'candidate_commands': [
+                  {
+                    'command': ['dotnet', 'test'],
+                    'source': 'convention',
+                  },
+                ],
+                'requirements': [
+                  {
+                    'tool': 'dotnet',
+                    'label': '.NET SDK',
+                    'selected': '8.0.100',
+                    'established': true,
+                    'observations': [
+                      {'file': 'global.json', 'field': 'sdk.version'},
+                    ],
+                    'resolution': {
+                      'context': {'directory': 'Api'},
+                      'shadowed': [],
+                      'boundary_note':
+                          'Host configuration above the repository root is not inspected.',
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        return {'workspaces': [], 'agents': []};
+      });
+      final content = web.document
+          .getElementById('operations-test')!
+          .textContent!;
+      expect(content, contains('Source: working_tree'));
+      expect(content, contains('global.json#sdk.version'));
+      expect(content, contains('SDK lookup: Api'));
+      expect(content, contains('Host configuration above the repository root'));
+      expect(content, contains('partial: a limit stopped the scan'));
+      expect(content, contains('Host readiness'));
+      expect(content, contains('Measured 8.0.400'));
+      expect(content, contains('/usr/bin/dotnet'));
+      expect(content, contains('Component: Api'));
+      expect(content, contains('.NET · C#'));
+      expect(content, contains('Frameworks: ASP.NET Core'));
+      expect(content, contains('Candidate command: dotnet test (convention)'));
+      expect(content, isNot(contains(' ·  · ')));
+      expect(content, isNot(contains("Instance of 'Text'")));
+      expect(
+        content,
+        contains('No requirement of this project is installable'),
+      );
+      await click('Re-analyse');
+      expect(
+        requests
+            .where((r) => r['endpoint'] == '/api/projects/analysis')
+            .last['query'],
+        contains('refresh=1'),
+      );
+    },
+  );
+
+  test(
+    'committed environment preparation queues and cancels without claiming test success',
+    () async {
+      final check = {
+        'id': 'Api:build',
+        'cwd': 'Api',
+        'arguments': ['dotnet', 'build', 'App.csproj'],
+        'source': 'convention',
+      };
+      Map<String, dynamic> fixture(bool approved) => {
+        'digest': approved ? 'approved-plan' : 'plan',
+        'preparation_version': 1,
+        'check_candidates': [check],
+        'selected_checks': approved ? [check] : [],
+        'requirements': [
+          {
+            'state': 'acquire',
+            'capability': 'dotnet-sdk',
+            'version': '8.0.100',
+            'components': ['Api'],
+            'artifact': {},
+            'activation': 'available',
+          },
+        ],
+      };
+      await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+        if (request.url.path.endsWith('/environment/plan'))
+          return fixture(false);
+        if (request.url.path.endsWith('/environment/select'))
+          return fixture(true);
+        if (request.url.path.endsWith('/environment/prepare'))
+          return {'id': 'job', 'state': 'queued'};
+        if (request.url.path.endsWith('/environment/cancel'))
+          return {'id': 'job', 'state': 'cancelled'};
+        return {
+          'components': [],
+          'requirements': [],
+          'workspaces': [],
+          'agents': [],
+        };
+      });
+      await click('Plan environment');
+      expect(posts('projects/environment/plan').single['path'], 'repo');
+      await click('Approve Api: dotnet build App.csproj (convention)');
+      expect(posts('projects/environment/select').single['checks'], [
+        'Api:build',
+      ]);
+      await click('Prepare SDKs');
+      expect(
+        posts('projects/environment/prepare').single['digest'],
+        'approved-plan',
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('SDK preparation queued'),
+      );
+      await click('Cancel SDK preparation');
+      expect(posts('projects/environment/cancel').single['id'], 'job');
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('SDK preparation cancelled'),
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        isNot(contains('checks passed')),
+      );
+      await click('Prepare SDKs');
+      expect(posts('projects/environment/prepare').last['retry'], isTrue);
+      await click('Cancel SDK preparation');
+    },
+  );
+
+  test('Dependency approval is separate from check selection', () async {
+    Map<String, dynamic> fixture(bool allowed) => {
+      'digest': allowed ? 'restore-approved' : 'plan',
+      'restore_permission': {'allowed': allowed},
+      'requirements': [
+        {
+          'capability': 'python',
+          'restore_recipes': [
+            {'manager': 'uv', 'requires_restore': true},
+          ],
+        },
+      ],
+      'check_candidates': [],
+      'selected_checks': [],
+    };
+    await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+      if (request.url.path.endsWith('/environment/plan')) return fixture(false);
+      if (request.url.path.endsWith('/environment/authorize-restore')) {
+        return fixture(true);
+      }
+      return {
+        'components': [],
+        'requirements': [],
+        'workspaces': [],
+        'agents': [],
+      };
+    });
+    await click('Plan environment');
+    await click('Approve dependency restoration');
+    final grant = posts('projects/environment/authorize-restore').single;
+    expect(grant['digest'], 'plan');
+    expect(grant['allowed'], isTrue);
+    expect(grant.containsKey('retry'), isFalse);
+    expect(posts('projects/environment/select'), isEmpty);
+    expect(
+      web.document.getElementById('operations-test')!.textContent,
+      contains('Revoke dependency restoration'),
+    );
+  });
+
+  test(
+    'discovery distinguishes installed runtimes, deduplicates reasons and exposes unknown paths',
+    () async {
+      const reason = 'Python source was found but no version is declared.';
+      await mount(const ProjectAnalysisCard(path: 'repo'), (request) {
+        if (request.url.path.endsWith('/analysis'))
+          return {
+            'coverage': {
+              'files': 7,
+              'unknown': 6,
+              'unknown_evidence': [
+                for (var i = 0; i < 6; i++) 'data/$i.unknown',
+              ],
+            },
+            'requirements': [
+              {
+                'tool': 'python',
+                'label': 'Python',
+                'constraint': '',
+                'assessment': {'verdict': 'satisfied', 'measured': '3.13.5'},
+              },
+            ],
+            'components': [
+              {
+                'path': 'scripts',
+                'basis': 'inferred',
+                'requirements': [
+                  {
+                    'tool': 'python',
+                    'label': 'Python',
+                    'established': false,
+                    'reason': reason,
+                  },
+                ],
+                'unresolved': [
+                  {'reason': reason},
+                  {'reason': 'A separate issue remains.'},
+                ],
+              },
+            ],
+          };
+        return {'workspaces': [], 'agents': []};
+      });
+      final root = web.document.getElementById('operations-test')!;
+      expect(
+        root.textContent,
+        contains('Installed — required version unknown'),
+      );
+      expect(root.textContent!.split(reason), hasLength(2));
+      expect(root.textContent, contains('A separate issue remains.'));
+      final details = root.querySelector('details') as web.HTMLDetailsElement;
+      expect(details.open, isFalse);
+      (details.querySelector('summary') as web.HTMLElement).click();
+      await settle();
+      expect(details.open, isTrue);
+      expect(details.textContent, contains('Showing 6 of 6 paths.'));
+      for (var i = 0; i < 6; i++)
+        expect(details.textContent, contains('data/$i.unknown'));
+    },
+  );
+
+  test(
+    'build service install queues once, shows failures and supports retry',
+    () async {
+      var state = 'idle';
+      dynamic response(http.Request r) {
+        if (r.url.path == '/api/build-service/install') {
+          expect(r.body, '{}');
+          state = 'queued';
+          return {'state': state};
+        }
+        if (r.url.path == '/api/build-service') {
+          return {
+            'state': state,
+            'supported': true,
+            if (state == 'failed')
+              'error': 'CPU/memory cgroup controllers are unavailable.',
+          };
+        }
+        if (r.url.path == '/api/validation')
+          return {'runs': [], 'executor': 'gateway'};
+        return buildResponse(r);
+      }
+
+      await mount(const BuildsPage(), response);
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Build-service installation: Not requested'),
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Automatic capture works without this service'),
+      );
+      await click('Install build service');
+      expect(posts('build-service/install'), hasLength(1));
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Build-service installation: Waiting to start'),
+      );
+      expect(button('Installing build service…').disabled, isTrue);
+      state = 'failed';
+      await click('Refresh builds');
+      await until(
+        () => web.document
+            .getElementById('operations-test')!
+            .textContent!
+            .contains('CPU/memory cgroup controllers are unavailable.'),
+      );
+      await click('Install build service');
+      expect(posts('build-service/install'), hasLength(2));
+    },
+  );
+
+  test('build service install is hidden from non-administrators', () async {
+    await mount(const BuildsPage(), (r) {
+      if (r.url.path == '/api/build-service')
+        return {'state': 'idle', 'supported': true};
+      if (r.url.path == '/api/validation')
+        return {'runs': [], 'executor': 'gateway'};
+      return buildResponse(r);
+    }, role: 'operator');
+    expect(
+      elements('button').any((e) => e.textContent == 'Install build service'),
+      isFalse,
+    );
+    expect(posts('build-service/install'), isEmpty);
+  });
+
+  test(
     'deployment approval shows immutable evidence and cancellation sends nothing',
     () async {
       await mount(const BuildsPage(), buildResponse);
@@ -315,6 +670,44 @@ void main() {
         posts('updates/install').single,
         containsPair('confirm_alpha', true),
       );
+    },
+  );
+  test(
+    'SDK progress shows the phase and falls back when no percentage is known',
+    () async {
+      var state = 'running';
+      Map<String, dynamic>? progress = {'percent': 43, 'phase': 'download'};
+      await mount(
+        const ToolchainCard(),
+        (r) => r.url.path == '/api/sdk'
+            ? {
+                'supported': true,
+                'state': state,
+                'toolchains': {},
+                'progress': progress,
+              }
+            : {'workspaces': [], 'agents': []},
+      );
+      expect(elements('progress').single.getAttribute('value'), '43');
+      expect(elements('progress').single.getAttribute('max'), '100');
+      expect(
+        elements('progress').single.getAttribute('aria-label'),
+        'Downloading SDK',
+      );
+      expect(
+        web.document.getElementById('operations-test')!.textContent,
+        contains('Downloading SDK · 43%'),
+      );
+      progress = {'percent': 101};
+      await click('Refresh toolchain status');
+      expect(elements('progress').single.hasAttribute('value'), false);
+      state = 'queued';
+      progress = null;
+      await click('Refresh toolchain status');
+      expect(elements('progress').single.hasAttribute('value'), false);
+      state = 'complete';
+      await click('Refresh toolchain status');
+      expect(elements('progress'), isEmpty);
     },
   );
   test(

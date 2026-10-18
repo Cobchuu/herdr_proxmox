@@ -402,6 +402,11 @@ class CliSetup:
         self.integration_status()
         with ThreadPoolExecutor(max_workers=4) as pool:
             clis = list(pool.map(self.status, COMMANDS))
+        # The same rule the add-agent and launch paths enforce. Without it the
+        # hire form can only offer a static list of names, so it presents
+        # runtimes that saving will refuse.
+        for cli in clis:
+            cli['ready'] = self.ready(cli['id'])
         connected = [c['name'] for c in clis
                      if c.get('installed') and (c.get('integration') or {}).get('current')]
         outdated = [c['name'] for c in clis
